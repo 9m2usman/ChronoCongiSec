@@ -1,0 +1,66 @@
+
+# AMSC CODEOWNERS TEMPLATE
+# Replace placeholders with actual GitHub usernames or team handles.
+# Example: @username or @organization/team-name
+
+# Default ownership
+* @M7_GITHUB_USERNAME
+
+# Documentation
+/docs/architecture/          @M1_GITHUB_USERNAME
+/docs/api-contracts/          @M1_GITHUB_USERNAME
+/docs/database-design/        @M6_GITHUB_USERNAME
+/docs/security-design/        @M4_GITHUB_USERNAME
+/docs/ml-design/              @M4_GITHUB_USERNAME
+/docs/deployment/             @M7_GITHUB_USERNAME
+
+# Backend platform
+/backend/app/core/             @M1_GITHUB_USERNAME
+/backend/app/api/auth.py       @M1_GITHUB_USERNAME
+/backend/app/api/tenants.py    @M1_GITHUB_USERNAME
+/backend/app/api/agents.py     @M1_GITHUB_USERNAME
+
+# Agent gateway
+/backend/app/gateway/          @M2_GITHUB_USERNAME
+/backend/app/api/gateway.py    @M2_GITHUB_USERNAME
+
+# Memory and knowledge
+/backend/app/memory/           @M3_GITHUB_USERNAME
+/backend/app/knowledge/        @M3_GITHUB_USERNAME
+/backend/app/api/memory.py     @M3_GITHUB_USERNAME
+/backend/app/api/chronimem.py  @M3_GITHUB_USERNAME
+
+# Security and recovery
+/backend/app/security/         @M4_GITHUB_USERNAME
+/backend/app/recovery/         @M4_GITHUB_USERNAME
+/backend/app/api/security.py   @M4_GITHUB_USERNAME
+/backend/app/api/incidents.py  @M4_GITHUB_USERNAME
+/backend/app/api/recovery.py   @M4_GITHUB_USERNAME
+
+# Database
+/backend/app/database/        @M6_GITHUB_USERNAME
+/backend/alembic/             @M6_GITHUB_USERNAME
+
+# Celery infrastructure
+/backend/app/workers/         @M7_GITHUB_USERNAME
+
+# Frontend
+/frontend/                    @M5_GITHUB_USERNAME
+
+# Machine learning
+/ml/                          @M4_GITHUB_USERNAME
+
+# Infrastructure and CI/CD
+/infrastructure/              @M7_GITHUB_USERNAME
+/docker-compose.yml           @M7_GITHUB_USERNAME
+/Makefile                     @M7_GITHUB_USERNAME
+/.github/workflows/           @M7_GITHUB_USERNAME
+
+# Tests
+/backend/tests/               @M7_GITHUB_USERNAME
+
+# Shared contracts
+/shared/                      @M1_GITHUB_USERNAME
+
+# Demo scenarios
+/demo/                        @M7_GITHUB_USERNAME
