@@ -158,14 +158,14 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | **FR-008** | The system shall maintain an immutable version history for each memory record, incrementing version numbers on update. | P0 | TRD §2.2, DB §2.3 |
 | **FR-009** | The system shall record directional provenance graph edges (`DERIVED_FROM`, `TRANSFORMED_INTO`, `SUPERSEDES`) linking child memories to parent sources or records. | P0 | TRD §2.2, DB §2.3, UI Screen 03 |
 | **FR-010** | The system shall maintain dynamic memory trust states: `UNVERIFIED`, `TRUSTED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, `SUPERSEDED`. | P0 | TRD §2.2, DB §2.3 |
-| **FR-011** | The system shall provide a protected memory retrieval API that strictly filters out any record where `trust_state == 'QUARANTINED'`. | P0 | TRD §2.2, SEC-005, API §2.4 |
+| **FR-011** | Normal agent retrieval shall return only currently eligible `TRUSTED` records. `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, and `SUPERSEDED` records are excluded; forensic access requires a separate permissioned path. | P0 | TRD §15.3, SEC-005, API §2.4 |
 
 ### Category 4: Security Gateway & Action Authorization
 | ID | Requirement Description | Priority | Traceability Mapping |
 |---|---|---|---|
 | **FR-012** | All protected tool calls must pass through the AMSC Security Gateway. Agents must never possess direct credentials for external adapters. | P0 | TRD §2.3, SEC-001, API §2.5 |
 | **FR-013** | The Gateway shall validate proposal schema and enforce client-supplied `idempotency_key`, preventing duplicate tool executions. | P0 | TRD §2.3, DB §2.4, API §2.5 |
-| **FR-014** | The Gateway shall evaluate referenced memory records: if any referenced memory is `SUSPICIOUS` or `QUARANTINED`, the action must be `BLOCKED`. | P0 | TRD §2.3, SEC-002, UI Screen 04 |
+| **FR-014** | The Gateway shall require every memory reference used to justify a protected action to be currently eligible and `TRUSTED`; any `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, or `SUPERSEDED` reference must result in `BLOCKED`. | P0 | TRD §16, SEC-002, UI Screen 04 |
 | **FR-015** | The Gateway shall enforce parameter constraints: if an operation parameter exceeds allowed thresholds, the action must be `BLOCKED` or set to `REQUIRES_APPROVAL`. | P0 | TRD §2.3, DB §2.2 |
 | **FR-016** | The Gateway shall fail closed: if policy evaluation or database checks experience an unhandled failure, the default decision is `BLOCK`. | P0 | TRD §3.0, SEC-004 |
 | **FR-017** | Upon an `ALLOW` decision, the Gateway shall invoke the server-side tool adapter, record the execution outcome, and correlate execution latency. | P0 | TRD §2.3, DB §2.4 |
@@ -196,7 +196,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 |---|---|---|---|
 | **NFR-001** | Performance | Gateway policy evaluation latency for cached/local memory references must not exceed acceptable thresholds. | P95 < 50ms at 100 concurrent requests |
 | **NFR-002** | Reliability | The system must maintain continuous operation and handle graceful restarts with zero data corruption. | 99.9% uptime during operational testing |
-| **NFR-003** | Data Integrity | Checkpoint snapshot verification must detect any byte-level bit rot or manual database tampering. | 100% tamper detection via SHA-256 |
+| **NFR-003** | Data Integrity | Checkpoint verification must detect content mismatch and, where database-writer compromise is in scope, verify an independently protected signature/MAC over checkpoint roots. | 100% detection of tested modifications under the documented key-separation threat model; SHA-256 alone is not an authenticity guarantee |
 | **NFR-004** | Usability | Web interface must provide technical information density, responsive layouts, and visible focus states compliant with WCAG 2.1 AA. | 100% keyboard navigable; high-contrast |
 | **NFR-005** | Scalability | Database queries must enforce pagination and bounded depth limits on graph and trace endpoints. | Default page size 50; max graph depth 5 |
 
@@ -207,10 +207,10 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | ID | Requirement Specification | Verification Method |
 |---|---|---|
 | **SEC-001** | **Complete Mediation:** All protected tool actions must route through `/api/v1/gateway/actions/propose`. No backdoor or direct connection permitted. | Automated penetration test attempting direct adapter port access. |
-| **SEC-002** | **Memory Trust Gating:** Actions referencing `SUSPICIOUS` or `QUARANTINED` memory must return `decision = 'BLOCK'` and execution status `NOT_EXECUTED`. | Security integration test asserting blocked execution. |
+| **SEC-002** | **Memory Trust Gating:** Protected actions may be justified only by eligible `TRUSTED` memory. Any non-TRUSTED or superseded reference must return `decision = 'BLOCK'` and `execution_status = 'NOT_EXECUTED'`. | Security integration test asserting blocked execution for each non-eligible state. |
 | **SEC-003** | **Fail-Closed Default:** In the event of unhandled exceptions or timeout during policy checks, response must be `BLOCK`. | Chaos test injecting synthetic exceptions into policy engine. |
 | **SEC-004** | **Cross-Tenant Hard Isolation:** Queries for Tenant A must never return Tenant B records, even when Tenant B IDs are passed in request bodies. | Automated cross-tenant fuzzing suite running in CI. |
-| **SEC-005** | **Quarantine Invariant:** Ingested query pipelines must enforce `trust_state != 'QUARANTINED'`. Quarantined records must not leak to agents. | Retrieval filter integration test. |
+| **SEC-005** | **Trusted Retrieval Invariant:** Normal agent retrieval returns only eligible `TRUSTED` records. Non-trusted/superseded records require a separate authorized forensic path. | Retrieval integration tests for every trust state and forensic authorization. |
 | **SEC-006** | **Credential Concealment:** Adapter credentials (API keys, secret tokens) must remain strictly server-side. Zero credential leakage to clients. | Code audit and API response inspection. |
 | **SEC-007** | **Non-Destructive Rollback:** Pre-recovery state must be snapshotted before any rollback transaction commits. | Rollback regression test asserting pre-snapshot existence. |
 
