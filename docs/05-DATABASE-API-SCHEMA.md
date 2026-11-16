@@ -13,6 +13,9 @@
 
 ## 1. Database Principles & Storage Boundaries
 
+**Tenant-safe relational references (mandatory):** For every tenant-owned parent table referenced by another tenant-owned table, enforce tenant-consistent relationships at the database layer, not only in application query filters. Add a `UNIQUE (tenant_id, id)` constraint to the parent and use composite foreign keys `(tenant_id, parent_id) REFERENCES parent_table(tenant_id, id)` in the child. Apply this pattern to memory→agent/source, version→memory record, provenance edge→both endpoint records, transformation→input/output records, retrieval event→agent/memory, tool permission→agent/tool, and recovery/checkpoint references. Keep `tenant_id NOT NULL`; ensure delete/update behavior preserves forensic history and does not create cross-tenant links. M6 owns the exact migration design and must test forged cross-tenant foreign-key combinations directly against PostgreSQL.
+
+
 AMSC enforces a strict distinction between durable systems of record and temporary ephemeral stores:
 
 1. **PostgreSQL System of Record:**
@@ -92,6 +95,18 @@ CREATE TABLE tenants (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX idx_tenants_slug ON tenants(slug);
+
+-- 1B. Branches (Subordinate Organizational Units within Company)
+CREATE TABLE branches (
+    id VARCHAR(36) PRIMARY KEY, -- UUIDv4
+    tenant_id VARCHAR(36) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name VARCHAR(128) NOT NULL,
+    code VARCHAR(32) NOT NULL, -- e.g. 'HEAD_OFFICE', 'LAHORE', 'KARACHI', 'ISLAMABAD'
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, INACTIVE
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_tenant_branch_code UNIQUE (tenant_id, code)
+);
+CREATE INDEX idx_branches_tenant ON branches(tenant_id);
 
 -- 2. Users
 CREATE TABLE users (
@@ -200,7 +215,7 @@ CREATE TABLE sources (
     name VARCHAR(255) NOT NULL,
     source_type VARCHAR(64) NOT NULL DEFAULT 'DOCUMENT_FEED',
     uri VARCHAR(1024),
-    trust_state VARCHAR(32) NOT NULL DEFAULT 'TRUSTED', -- TRUSTED, UNVERIFIED, UNTRUSTED
+    trust_state VARCHAR(32) NOT NULL DEFAULT 'UNVERIFIED', -- UNVERIFIED, TRUSTED, UNTRUSTED
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -222,7 +237,7 @@ CREATE TABLE memory_records (
     agent_id VARCHAR(36) REFERENCES agents(id) ON DELETE SET NULL,
     source_id VARCHAR(36) REFERENCES sources(id) ON DELETE SET NULL,
     record_type VARCHAR(64) NOT NULL DEFAULT 'KNOWLEDGE', -- KNOWLEDGE, CONVERSATION, SCRATCHPAD
-    trust_state VARCHAR(32) NOT NULL DEFAULT 'TRUSTED', -- UNVERIFIED, TRUSTED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED
+    trust_state VARCHAR(32) NOT NULL DEFAULT 'UNVERIFIED', -- UNVERIFIED, TRUSTED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED
     current_version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP

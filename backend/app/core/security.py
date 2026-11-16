@@ -1,0 +1,305 @@
+"""Security Architecture Foundations & Cryptographic Standards.
+
+Module: backend.app.core.security
+Owner: M1 — Platform Backend & API Integration Lead
+
+Follows:
+- AMSC-DOC-002 (TRD/SRS) Section 5: Security Architecture
+- AMSC-DOC-005 (Database & API Schema) Section 5: Authentication & API Conventions
+- Master Implementation Specification: M1 Day 2 Authentication Baseline
+"""
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
+import argon2
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+import jwt
+
+from backend.app.core.config import Settings, get_settings
+from backend.app.core.exceptions import AuthenticationError
+
+# --- Cryptographic Constants & Algorithm Standards ---
+RECOMMENDED_PASSWORD_HASH_ALGORITHM = "argon2id"
+TOKEN_TYPE = "Bearer"
+DEFAULT_JWT_ALGORITHM = "HS256"
+MIN_SECRET_LENGTH_BYTES = 32
+JWT_ISSUER = "amsc-api"
+JWT_AUDIENCE = "amsc-client"
+
+# Invariant: MD5, SHA-1, and plain SHA-256 are strictly prohibited for password storage
+PROHIBITED_HASH_ALGORITHMS = {"md5", "sha1", "sha256"}
+
+# Argon2id hasher configured per RFC 9106 recommended interactive profiles
+# time_cost=2, memory_cost=19456 KiB (~19MB), parallelism=1
+_password_hasher = PasswordHasher(
+    time_cost=2,
+    memory_cost=19456,
+    parallelism=1,
+    hash_len=32,
+    type=argon2.Type.ID,
+)
+
+# Pre-computed dummy hash for timing-attack mitigation when user is not found
+_DUMMY_ARGON2_HASH = _password_hasher.hash("amsc-timing-mitigation-dummy-password")
+
+# Dedicated bounded thread pool for Argon2 operations to keep event loop responsive
+# Bounded to 4 worker threads to prevent thread explosion under attack
+_AUTH_WORKER_COUNT = 4
+_auth_thread_pool: Optional[ThreadPoolExecutor] = None
+
+
+def get_auth_executor(max_workers: int = _AUTH_WORKER_COUNT) -> ThreadPoolExecutor:
+    """Return dedicated singleton ThreadPoolExecutor for Argon2 operations."""
+    global _auth_thread_pool
+    if _auth_thread_pool is None:
+        _auth_thread_pool = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="amsc-argon2",
+        )
+    return _auth_thread_pool
+
+
+def shutdown_auth_executor() -> None:
+    """Gracefully terminate dedicated auth thread pool during app shutdown."""
+    global _auth_thread_pool
+    if _auth_thread_pool is not None:
+        _auth_thread_pool.shutdown(wait=False)
+        _auth_thread_pool = None
+
+
+def get_auth_semaphore(max_concurrency: int = 8) -> asyncio.Semaphore:
+    """Return per-event-loop semaphore bounding concurrent Argon2 operations.
+
+    Binding to the active event loop avoids cross-loop future binding contamination
+    in async tests and multi-loop environments.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.Semaphore(max_concurrency)
+
+    if not hasattr(loop, "_amsc_auth_semaphore") or getattr(loop, "_amsc_auth_concurrency", None) != max_concurrency:
+        loop._amsc_auth_semaphore = asyncio.Semaphore(max_concurrency)
+        loop._amsc_auth_concurrency = max_concurrency
+    return loop._amsc_auth_semaphore
+
+
+# ============================================================================
+# 1. Password Hashing & Verification (Argon2id)
+# ============================================================================
+
+def hash_password(plain_password: str) -> str:
+    """Hash a plaintext password using Argon2id with automatic salt generation.
+
+    Never stores or returns plaintext.
+    """
+    if not plain_password:
+        raise ValueError("Password cannot be empty.")
+    return _password_hasher.hash(plain_password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plaintext password against an Argon2id hash.
+
+    Fails safely on corrupted, mismatched, or unsupported hash strings.
+    """
+    if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+        return False
+    if not plain_password or not hashed_password:
+        return False
+
+    # Prohibit legacy or unsafe hashes
+    if not hashed_password.startswith("$argon2"):
+        return False
+
+    try:
+        return _password_hasher.verify(hashed_password, plain_password)
+    except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+    except Exception:
+        return False
+
+
+def dummy_verify_password() -> None:
+    """Perform dummy Argon2id verification to equalize response timing when user is not found."""
+    try:
+        _password_hasher.verify(_DUMMY_ARGON2_HASH, "wrong-password")
+    except Exception:
+        pass
+
+
+async def verify_password_async(
+    plain_password: str,
+    hashed_password: str,
+    max_concurrency: int = 8,
+) -> bool:
+    """Verify a password against Argon2id hash off the event loop with bounded concurrency.
+
+    Offloads CPU/memory-intensive Argon2id operations to a dedicated bounded thread pool
+    so the asyncio event loop remains responsive.
+    """
+    if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+        return False
+    if not plain_password or not hashed_password:
+        return False
+    if not hashed_password.startswith("$argon2"):
+        return False
+
+    sem = get_auth_semaphore(max_concurrency)
+    executor = get_auth_executor()
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with sem:
+            return await loop.run_in_executor(
+                executor, verify_password, plain_password, hashed_password
+            )
+    except Exception:
+        return False
+
+
+async def dummy_verify_password_async(max_concurrency: int = 8) -> None:
+    """Perform dummy Argon2id verification off event loop to equalize response timing."""
+    sem = get_auth_semaphore(max_concurrency)
+    executor = get_auth_executor()
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with sem:
+            await loop.run_in_executor(executor, dummy_verify_password)
+    except Exception:
+        pass
+
+
+def needs_rehash(hashed_password: str) -> bool:
+    """Check if the stored hash requires rehashing due to parameter updates."""
+    try:
+        return _password_hasher.check_needs_rehash(hashed_password)
+    except Exception:
+        return True
+
+
+# ============================================================================
+# 2. JWT Generation & Verification (HS256)
+# ============================================================================
+#
+# Production Lifecycle & Revocation Architecture Note:
+# ----------------------------------------------------
+# 1. Unique Token Identifier (jti):
+#    Every access token generated below contains a cryptographically unique
+#    UUIDv4 'jti' claim. However, the presence of a 'jti' claim alone does NOT
+#    provide revocation. Revocation requires an active, stateful check against
+#    a revocation registry (such as an M7 distributed Redis blocklist with TTL
+#    equal to the remaining token lifetime, or an M6 database session table).
+#    Until an external revocation store is wired into the token validation path,
+#    token invalidation relies strictly on short expiration windows (exp).
+#
+# 2. Key Rotation Requirements:
+#    In the current baseline, tokens are signed using a symmetric secret key
+#    (JWT_SECRET). For production key rotation:
+#    - Introduce a key identifier ('kid') in the JWT header.
+#    - Maintain a keyring supporting the current active signing key and previous
+#      valid keys for graceful verification during rotation periods.
+#    - Implement an emergency key revocation and rollover runbook to revoke all
+#      tokens signed with a compromised secret key.
+# ============================================================================
+
+def create_access_token(
+    user_id: str,
+    tenant_id: str,
+    role: str,
+    expires_delta: Optional[timedelta] = None,
+    settings: Optional[Settings] = None,
+    additional_claims: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Generate a signed HMAC-SHA256 JWT containing verified user and tenant claims."""
+    cfg = settings or get_settings()
+
+    if not cfg.JWT_SECRET or len(cfg.JWT_SECRET) < 32:
+        raise ValueError("JWT_SECRET must be configured and at least 32 characters.")
+
+    now = datetime.now(timezone.utc)
+    if expires_delta:
+        expire = now + expires_delta
+    else:
+        expire = now + timedelta(minutes=cfg.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    payload: Dict[str, Any] = {
+        "sub": str(user_id),
+        "tenant_id": str(tenant_id),
+        "role": str(role),
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+        "jti": uuid.uuid4().hex,
+        "token_use": "access",
+    }
+
+    if additional_claims:
+        # Prevent overriding critical security claims
+        reserved_keys = {"sub", "tenant_id", "role", "iss", "aud", "iat", "nbf", "exp", "jti", "token_use"}
+        safe_additional = {k: v for k, v in additional_claims.items() if k not in reserved_keys}
+        payload.update(safe_additional)
+
+    encoded = jwt.encode(payload, cfg.JWT_SECRET, algorithm=DEFAULT_JWT_ALGORITHM)
+    return encoded
+
+
+def decode_access_token(
+    token: str,
+    settings: Optional[Settings] = None,
+) -> Dict[str, Any]:
+    """Decode, verify signature, and validate claims of an incoming JWT.
+
+    Strictly enforces algorithm HS256, expiration, issuer, audience, and required claims.
+    Fails closed on any signature mismatch, malformed token, or expired timestamp.
+    """
+    cfg = settings or get_settings()
+
+    if not cfg.JWT_SECRET:
+        raise AuthenticationError("Authentication service configuration error.")
+
+    try:
+        payload = jwt.decode(
+            token,
+            cfg.JWT_SECRET,
+            algorithms=[DEFAULT_JWT_ALGORITHM],
+            issuer=JWT_ISSUER,
+            audience=JWT_AUDIENCE,
+            options={
+                "require": ["sub", "tenant_id", "role", "exp", "iat", "nbf", "iss", "aud", "jti"],
+                "verify_exp": True,
+                "verify_iat": True,
+                "verify_nbf": True,
+                "verify_iss": True,
+                "verify_aud": True,
+                "verify_signature": True,
+            },
+        )
+
+        if payload.get("token_use") != "access":
+            raise AuthenticationError("Invalid token purpose.")
+
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        raise AuthenticationError("Authentication token has expired.")
+    except jwt.InvalidAlgorithmError:
+        raise AuthenticationError("Invalid token signing algorithm.")
+    except jwt.InvalidIssuerError:
+        raise AuthenticationError("Invalid token issuer.")
+    except jwt.InvalidAudienceError:
+        raise AuthenticationError("Invalid token audience.")
+    except jwt.InvalidSignatureError:
+        raise AuthenticationError("Invalid token signature.")
+    except jwt.DecodeError:
+        raise AuthenticationError("Malformed authentication token.")
+    except jwt.PyJWTError:
+        raise AuthenticationError("Invalid authentication credentials.")

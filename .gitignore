@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+
+# ML artifacts and data (review before committing)
+ml/datasets/raw/*
+!ml/datasets/raw/.gitkeep
+ml/model_registry/*
+!ml/model_registry/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.joblib
+*.pkl
+
+# Local infrastructure
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db

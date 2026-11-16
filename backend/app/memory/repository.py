@@ -1,0 +1,335 @@
+"""Repository interface and in-memory implementation for Memory & Provenance entities.
+
+Matches Document 05 Section 3.3 (tables: memory_records, memory_versions, provenance_edges).
+"""
+
+from abc import ABC, abstractmethod
+from copy import deepcopy
+from typing import Dict, List, Optional
+
+from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, SourceRecord, TrustState
+
+
+class MemoryRepository(ABC):
+    """Abstract interface for memory persistence, matching M6 relational tables."""
+
+    is_persistent: bool = False
+    is_in_memory: bool = False
+
+    @abstractmethod
+    def create_record(self, record: MemoryRecord) -> MemoryRecord:
+        """Persist a new memory record."""
+        pass
+
+    @abstractmethod
+    def get_record(self, record_id: str, tenant_id: str) -> Optional[MemoryRecord]:
+        """Fetch a memory record by ID within tenant boundary."""
+        pass
+
+    @abstractmethod
+    def list_records(
+        self,
+        tenant_id: str,
+        agent_id: Optional[str] = None,
+        trust_state: Optional[str] = None,
+        only_trusted: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[MemoryRecord]:
+        """Query memory records with optional filters, pagination, and strict tenant scoping.
+
+        When only_trusted=True (default for normal retrieval), only records with
+        trust_state == TRUSTED are returned.
+        """
+        pass
+
+    @abstractmethod
+    def update_record(self, record: MemoryRecord) -> MemoryRecord:
+        """Update an existing memory record (e.g. current_version, updated_at)."""
+        pass
+
+    @abstractmethod
+    def create_version(self, version: MemoryVersion) -> MemoryVersion:
+        """Persist a new immutable memory version."""
+        pass
+
+    @abstractmethod
+    def get_versions(self, record_id: str, tenant_id: str) -> List[MemoryVersion]:
+        """Fetch all historical versions of a record, sorted by version asc."""
+        pass
+
+    @abstractmethod
+    def get_version(self, record_id: str, version: int, tenant_id: str) -> Optional[MemoryVersion]:
+        """Fetch a specific version of a record within tenant."""
+        pass
+
+    @abstractmethod
+    def get_latest_version(self, record_id: str, tenant_id: str) -> Optional[MemoryVersion]:
+        """Fetch the latest version of a record within tenant."""
+        pass
+
+    @abstractmethod
+    def create_edge(self, edge: ProvenanceEdge) -> ProvenanceEdge:
+        """Persist a provenance edge."""
+        pass
+
+    @abstractmethod
+    def get_edges_for_record(self, record_id: str, tenant_id: str) -> List[ProvenanceEdge]:
+        """Fetch all provenance edges connecting to or from a record within tenant."""
+        pass
+
+    @abstractmethod
+    def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        """Fetch an agent entity by ID within company/tenant boundary."""
+        pass
+
+    @abstractmethod
+    def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        """Persist an agent entity."""
+        pass
+
+    @abstractmethod
+    def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        """Fetch a knowledge source by ID within company/tenant boundary."""
+        pass
+
+    @abstractmethod
+    def create_source(self, source: SourceRecord) -> SourceRecord:
+        """Persist a knowledge source entity."""
+        pass
+
+
+class InMemoryMemoryRepository(MemoryRepository):
+    """In-memory reference implementation of MemoryRepository for standalone operation and tests."""
+
+    is_persistent: bool = False
+    is_in_memory: bool = True
+
+    def __init__(self) -> None:
+        # Key: record_id -> MemoryRecord
+        self._records: Dict[str, MemoryRecord] = {}
+        # Key: record_id -> List[MemoryVersion]
+        self._versions: Dict[str, List[MemoryVersion]] = {}
+        # Key: edge_id -> ProvenanceEdge
+        self._edges: Dict[str, ProvenanceEdge] = {}
+        # Key: (agent_id, tenant_id) -> AgentRecord
+        self._agents: Dict[str, AgentRecord] = {}
+        # Key: (source_id, tenant_id) -> SourceRecord
+        self._sources: Dict[str, SourceRecord] = {}
+
+        self._seed_defaults()
+
+    def _seed_defaults(self) -> None:
+        """Seed canonical agents and sources for default organization and branches."""
+        # Canonical organization: tenant-a-uuid-001 (ChronoCongiSec Enterprise)
+        t_a = "tenant-a-uuid-001"
+        self.create_agent(
+            AgentRecord(
+                id="agent-001",
+                tenant_id=t_a,
+                name="Finance Bot",
+                status="ACTIVE",
+                branch_id="branch-lhr-002",
+            )
+        )
+        self.create_agent(
+            AgentRecord(
+                id="agent-head-office-001",
+                tenant_id=t_a,
+                name="Head Office Lead Bot",
+                status="ACTIVE",
+                branch_id="branch-ho-001",
+            )
+        )
+        self.create_agent(
+            AgentRecord(
+                id="agent-inactive-001",
+                tenant_id=t_a,
+                name="Deprecated Bot",
+                status="ISOLATED",
+                branch_id="branch-lhr-002",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-doc-001",
+                tenant_id=t_a,
+                name="Treasury Policy Memo",
+                source_type="DOCUMENT_FEED",
+                status="ACTIVE",
+                branch_id="branch-ho-001",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-inactive-001",
+                tenant_id=t_a,
+                name="Old Inactive Feed",
+                source_type="DOCUMENT_FEED",
+                status="INACTIVE",
+            )
+        )
+
+        # Secondary tenant for cross-company isolation tests
+        t_b = "tenant-b-uuid-002"
+        self.create_agent(
+            AgentRecord(
+                id="agent-b-001",
+                tenant_id=t_b,
+                name="External Agent",
+                status="ACTIVE",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-b-001",
+                tenant_id=t_b,
+                name="External Partner Source",
+                status="ACTIVE",
+            )
+        )
+
+    def create_record(self, record: MemoryRecord) -> MemoryRecord:
+        stored = deepcopy(record)
+        self._records[stored.id] = stored
+        if stored.id not in self._versions:
+            self._versions[stored.id] = []
+        return deepcopy(stored)
+
+    def get_record(self, record_id: str, tenant_id: str) -> Optional[MemoryRecord]:
+        rec = self._records.get(record_id)
+        if rec and rec.tenant_id == tenant_id:
+            return deepcopy(rec)
+        return None
+
+    def list_records(
+        self,
+        tenant_id: str,
+        agent_id: Optional[str] = None,
+        trust_state: Optional[str] = None,
+        only_trusted: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[MemoryRecord]:
+        safe_limit = max(1, min(limit, 100))
+        safe_offset = max(0, offset)
+
+        results: List[MemoryRecord] = []
+        for rec in self._records.values():
+            if rec.tenant_id != tenant_id:
+                continue
+            if agent_id is not None and rec.agent_id != agent_id:
+                continue
+            # Enforce GAP-001: Normal retrieval must return ONLY eligible TRUSTED memory
+            if only_trusted and rec.trust_state != TrustState.TRUSTED.value:
+                continue
+            if trust_state is not None and rec.trust_state != trust_state:
+                continue
+            results.append(deepcopy(rec))
+
+        # Sort by created_at asc
+        results.sort(key=lambda r: (r.created_at or 0))
+        return results[safe_offset : safe_offset + safe_limit]
+
+    def update_record(self, record: MemoryRecord) -> MemoryRecord:
+        existing = self._records.get(record.id)
+        if not existing or existing.tenant_id != record.tenant_id:
+            raise KeyError(f"Memory record {record.id} not found for tenant {record.tenant_id}")
+        self._records[record.id] = deepcopy(record)
+        return deepcopy(record)
+
+    def create_version(self, version: MemoryVersion) -> MemoryVersion:
+        stored = deepcopy(version)
+        versions_list = self._versions.setdefault(stored.record_id, [])
+        for existing in versions_list:
+            if existing.version == stored.version:
+                raise ValueError(
+                    f"Version {stored.version} already exists for record {stored.record_id} "
+                    f"(violates uq_record_version constraint)"
+                )
+        versions_list.append(stored)
+        versions_list.sort(key=lambda v: v.version)
+        return deepcopy(stored)
+
+    def get_versions(self, record_id: str, tenant_id: str) -> List[MemoryVersion]:
+        record = self.get_record(record_id, tenant_id)
+        if not record:
+            return []
+        versions = self._versions.get(record_id, [])
+        return [deepcopy(v) for v in versions if v.tenant_id == tenant_id]
+
+    def get_version(self, record_id: str, version: int, tenant_id: str) -> Optional[MemoryVersion]:
+        for v in self.get_versions(record_id, tenant_id):
+            if v.version == version:
+                return deepcopy(v)
+        return None
+
+    def get_latest_version(self, record_id: str, tenant_id: str) -> Optional[MemoryVersion]:
+        versions = self.get_versions(record_id, tenant_id)
+        if versions:
+            return deepcopy(versions[-1])
+        return None
+
+    def create_edge(self, edge: ProvenanceEdge) -> ProvenanceEdge:
+        stored = deepcopy(edge)
+        self._edges[stored.id] = stored
+        return deepcopy(stored)
+
+    def get_edges_for_record(self, record_id: str, tenant_id: str) -> List[ProvenanceEdge]:
+        edges: List[ProvenanceEdge] = []
+        for edge in self._edges.values():
+            if edge.tenant_id != tenant_id:
+                continue
+            if edge.from_record_id == record_id or edge.to_record_id == record_id:
+                edges.append(deepcopy(edge))
+        return edges
+
+    def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        key = f"{tenant_id}:{agent_id}"
+        agent = self._agents.get(key)
+        return deepcopy(agent) if agent else None
+
+    def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        stored = deepcopy(agent)
+        key = f"{stored.tenant_id}:{stored.id}"
+        self._agents[key] = stored
+        return deepcopy(stored)
+
+    def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        key = f"{tenant_id}:{source_id}"
+        src = self._sources.get(key)
+        return deepcopy(src) if src else None
+
+    def create_source(self, source: SourceRecord) -> SourceRecord:
+        stored = deepcopy(source)
+        key = f"{stored.tenant_id}:{stored.id}"
+        self._sources[key] = stored
+        return deepcopy(stored)
+
+
+# Global in-memory repository instance for runtime dependency injection
+_default_repository = InMemoryMemoryRepository()
+
+
+def get_default_repository() -> MemoryRepository:
+    """Return the default memory repository.
+
+    Fails closed in production if a persistent M6 database repository is not configured.
+    """
+    try:
+        from backend.app.core.config import get_settings
+        settings = get_settings()
+        if settings.APP_ENV == "production":
+            raise RuntimeError(
+                "Production startup failure: Real database memory repository from M6 is not configured. "
+                "In-memory memory repository fallback is prohibited in production."
+            )
+    except ImportError:
+        pass
+    return _default_repository
+
+
+def reset_default_repository() -> None:
+    """Reset repository storage, primarily used for test fixture cleanup."""
+    global _default_repository
+    _default_repository = InMemoryMemoryRepository()
