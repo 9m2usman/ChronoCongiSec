@@ -12,15 +12,15 @@
 
 ## 1. Global User Journey & System State Machine
 
-The AMSC user journey flows from multi-tenant authentication through real-time observability, alert triage, deep forensic trace investigation, and authorized memory recovery.
+The AMSC user journey flows from enterprise authentication through real-time observability, alert triage, deep forensic trace investigation, and authorized memory recovery.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unauthenticated
     Unauthenticated --> Authenticated : Login (Email/Password or API Key)
-    Authenticated --> TenantWorkspace : Select Tenant Context (Company A / B / C)
+    Authenticated --> EnterpriseWorkspace : Select Branch Context (Head Office / Lahore / Karachi / Islamabad)
     
-    state TenantWorkspace {
+    state EnterpriseWorkspace {
         [*] --> OverviewDashboard
         
         OverviewDashboard --> AgentRegistry : Inspect Agents & Tools

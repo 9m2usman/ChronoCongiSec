@@ -81,6 +81,37 @@ class ProvenanceEdge(BaseModel):
     )
 
 
+class AgentRecord(BaseModel):
+    """Agent entity contract matching Document 05 Table 5 (agents)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tenant_id: str
+    name: str
+    runtime: str = "LANGCHAIN"
+    model: str = "gpt-4o"
+    status: str = "ACTIVE"
+    branch_id: Optional[str] = None
+    created_at: Optional[datetime] = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SourceRecord(BaseModel):
+    """Source entity contract matching Document 05 Table 9 (sources)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tenant_id: str
+    name: str
+    source_type: str = "DOCUMENT_FEED"
+    status: str = "ACTIVE"
+    branch_id: Optional[str] = None
+    created_at: Optional[datetime] = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
 class MemoryIngestRequest(BaseModel):
     """Request payload for POST /memory matching Document 05 Section 5.1 Route Catalog."""
     content: str = Field(..., min_length=1, max_length=1_000_000, description="Memory content chunk")

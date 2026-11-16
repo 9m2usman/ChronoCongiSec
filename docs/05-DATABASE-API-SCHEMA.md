@@ -96,6 +96,18 @@ CREATE TABLE tenants (
 );
 CREATE INDEX idx_tenants_slug ON tenants(slug);
 
+-- 1B. Branches (Subordinate Organizational Units within Company)
+CREATE TABLE branches (
+    id VARCHAR(36) PRIMARY KEY, -- UUIDv4
+    tenant_id VARCHAR(36) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name VARCHAR(128) NOT NULL,
+    code VARCHAR(32) NOT NULL, -- e.g. 'HEAD_OFFICE', 'LAHORE', 'KARACHI', 'ISLAMABAD'
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE', -- ACTIVE, INACTIVE
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_tenant_branch_code UNIQUE (tenant_id, code)
+);
+CREATE INDEX idx_branches_tenant ON branches(tenant_id);
+
 -- 2. Users
 CREATE TABLE users (
     id VARCHAR(36) PRIMARY KEY, -- UUIDv4

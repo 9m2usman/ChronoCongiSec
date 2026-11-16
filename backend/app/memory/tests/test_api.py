@@ -81,7 +81,7 @@ def test_api_ingest_memory_success(app_and_client):
 
 def test_api_query_memory_and_strict_tenant_isolation(app_and_client):
     """GET /api/v1/memory must scope results to caller's tenant and exclude other tenants."""
-    _, client, _ = app_and_client
+    _, client, repo = app_and_client
     headers_a = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
     headers_b = _make_auth_header(tenant_id="tenant-b-uuid-002", user_id="user-b-analyst-003")
 
@@ -98,6 +98,10 @@ def test_api_query_memory_and_strict_tenant_isolation(app_and_client):
         json={"content": "Company B Treasury Guidelines."},
         headers=headers_b,
     )
+
+    # Transition records to TRUSTED so normal retrieval returns them (GAP-001)
+    for r in repo._records.values():
+        r.trust_state = "TRUSTED"
 
     # Tenant A querying -> receives ONLY Company A's record
     res_a = client.get("/api/v1/memory", headers=headers_a)
@@ -176,7 +180,7 @@ def test_api_cross_tenant_parent_reference_rejected(app_and_client):
 
 def test_api_get_memory_detail_and_cross_tenant_rejection(app_and_client):
     """GET /api/v1/memory/{id} returns full detail to owner; returns 404 to another tenant."""
-    _, client, _ = app_and_client
+    _, client, repo = app_and_client
     headers_a = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
     headers_b = _make_auth_header(tenant_id="tenant-b-uuid-002", user_id="user-b-analyst-003")
 
@@ -186,6 +190,8 @@ def test_api_get_memory_detail_and_cross_tenant_rejection(app_and_client):
         headers=headers_a,
     )
     record_id = create_res.json()["id"]
+    # Transition record to TRUSTED so normal detail access succeeds (GAP-004)
+    repo._records[record_id].trust_state = "TRUSTED"
 
     # Detail request by Tenant A
     res_a = client.get(f"/api/v1/memory/{record_id}", headers=headers_a)
@@ -214,6 +220,8 @@ def test_api_quarantined_records_excluded_and_bypass_prohibited(app_and_client):
     # Ingest clean record
     res1 = client.post("/api/v1/memory", json={"content": "Clean record."}, headers=headers)
     id1 = res1.json()["id"]
+    # Mark record 1 as TRUSTED
+    repo._records[id1].trust_state = "TRUSTED"
 
     # Ingest second record and mark it QUARANTINED in repository
     res2 = client.post("/api/v1/memory", json={"content": "Poisoned record."}, headers=headers)
@@ -265,7 +273,7 @@ def test_api_detail_endpoint_hides_quarantined_and_rejected_records(app_and_clie
 
 def test_api_pagination_defaults_and_limits(app_and_client):
     """Listing supports default 50, custom limits, offset, and max 100 limit."""
-    _, client, _ = app_and_client
+    _, client, repo = app_and_client
     headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
 
     # Ingest 55 records
@@ -275,6 +283,10 @@ def test_api_pagination_defaults_and_limits(app_and_client):
             json={"content": f"Document index {i:02d}"},
             headers=headers,
         )
+
+    # Transition all records to TRUSTED for normal query retrieval (GAP-001)
+    for r in repo._records.values():
+        r.trust_state = "TRUSTED"
 
     # 1. Default query returns exactly 50 records
     res_default = client.get("/api/v1/memory", headers=headers)
@@ -308,7 +320,7 @@ def test_api_pagination_defaults_and_limits(app_and_client):
 
 def test_api_pagination_preserves_tenant_isolation(app_and_client):
     """Pagination never crosses tenant boundaries."""
-    _, client, _ = app_and_client
+    _, client, repo = app_and_client
     headers_a = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
     headers_b = _make_auth_header(tenant_id="tenant-b-uuid-002", user_id="user-b-analyst-003")
 
@@ -316,6 +328,10 @@ def test_api_pagination_preserves_tenant_isolation(app_and_client):
     for i in range(5):
         client.post("/api/v1/memory", json={"content": f"A record {i}"}, headers=headers_a)
         client.post("/api/v1/memory", json={"content": f"B record {i}"}, headers=headers_b)
+
+    # Transition records to TRUSTED
+    for r in repo._records.values():
+        r.trust_state = "TRUSTED"
 
     # Tenant B paging with limit=100 only receives 5 records, all belonging to tenant-b
     res_b = client.get("/api/v1/memory?limit=100", headers=headers_b)
@@ -333,6 +349,9 @@ def test_api_tampered_checksum_returns_sanitized_500(app_and_client):
     res = client.post("/api/v1/memory", json={"content": "Original authentic content."}, headers=headers)
     record_id = res.json()["id"]
 
+    # Transition to TRUSTED so query attempts retrieval
+    repo._records[record_id].trust_state = "TRUSTED"
+
     # Tamper with stored content in repository
     repo._versions[record_id][0].content = "Tampered content injected directly into storage."
 
@@ -345,3 +364,82 @@ def test_api_tampered_checksum_returns_sanitized_500(app_and_client):
     assert "Traceback" not in str(error_data)
     assert "Exception" not in str(error_data)
     assert "Stored=" not in str(error_data)
+
+
+# ============================================================================
+# GAP-001, GAP-003, GAP-004 Dedicated API Tests
+# ============================================================================
+
+def test_api_gap_001_unverified_records_hidden_from_retrieval(app_and_client):
+    """GAP-001: Newly ingested UNVERIFIED records are not returned by GET /api/v1/memory."""
+    _, client, _ = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
+
+    post_res = client.post("/api/v1/memory", json={"content": "New unverified memo."}, headers=headers)
+    assert post_res.status_code == 201
+
+    # Normal retrieval returns 0 records
+    get_res = client.get("/api/v1/memory", headers=headers)
+    assert get_res.status_code == 200
+    assert len(get_res.json()) == 0
+
+    # Querying trust_state=UNVERIFIED returns 403 Forbidden
+    forbidden_res = client.get("/api/v1/memory?trust_state=UNVERIFIED", headers=headers)
+    assert forbidden_res.status_code == 403
+
+
+def test_api_gap_003_ingest_validates_agent_and_source(app_and_client):
+    """GAP-003: Ingest API rejects nonexistent, unowned, or inactive agents and sources."""
+    _, client, _ = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
+
+    # 1. Nonexistent agent
+    res_bad_agent = client.post(
+        "/api/v1/memory",
+        json={"content": "Memo", "agent_id": "ghost-agent-999"},
+        headers=headers,
+    )
+    assert res_bad_agent.status_code in (400, 422)
+
+    # 2. Inactive / ISOLATED agent (agent-inactive-001 was seeded with status ISOLATED)
+    res_isolated_agent = client.post(
+        "/api/v1/memory",
+        json={"content": "Memo", "agent_id": "agent-inactive-001"},
+        headers=headers,
+    )
+    assert res_isolated_agent.status_code in (400, 422)
+
+    # 3. Nonexistent source
+    res_bad_source = client.post(
+        "/api/v1/memory",
+        json={"content": "Memo", "source_id": "ghost-source-999"},
+        headers=headers,
+    )
+    assert res_bad_source.status_code in (400, 422)
+
+    # 4. Inactive source (src-inactive-001 was seeded with status INACTIVE)
+    res_inactive_source = client.post(
+        "/api/v1/memory",
+        json={"content": "Memo", "source_id": "src-inactive-001"},
+        headers=headers,
+    )
+    assert res_inactive_source.status_code in (400, 422)
+
+
+def test_api_gap_004_detail_endpoint_hides_unverified_records(app_and_client):
+    """GAP-004: GET /api/v1/memory/{id} returns 404 for UNVERIFIED records; returns 200 once TRUSTED."""
+    _, client, repo = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
+
+    post_res = client.post("/api/v1/memory", json={"content": "Initial unverified record."}, headers=headers)
+    rec_id = post_res.json()["id"]
+
+    # Initial state is UNVERIFIED -> returns 404
+    detail_res_unverified = client.get(f"/api/v1/memory/{rec_id}", headers=headers)
+    assert detail_res_unverified.status_code == 404
+
+    # Promote to TRUSTED -> returns 200
+    repo._records[rec_id].trust_state = "TRUSTED"
+    detail_res_trusted = client.get(f"/api/v1/memory/{rec_id}", headers=headers)
+    assert detail_res_trusted.status_code == 200
+    assert detail_res_trusted.json()["record"]["trust_state"] == "TRUSTED"

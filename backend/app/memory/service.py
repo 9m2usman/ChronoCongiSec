@@ -7,14 +7,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Set, Tuple
 
-from backend.app.core.exceptions import AMSCException, NotFoundError, ValidationError
+from backend.app.core.exceptions import AMSCException, ForbiddenError, NotFoundError, ValidationError
 from .hashing import sha256_hex
 from .models import (
+    AgentRecord,
     MemoryRecord,
     MemoryVersion,
     ProvenanceEdge,
     ProvenanceRelationType,
     RecordType,
+    SourceRecord,
     TrustState,
 )
 from .repository import MemoryRepository, get_default_repository
@@ -169,6 +171,7 @@ def ingest_memory(
     and a MemoryVersion with version 1 and cryptographic checksum from sha256_hex.
     Optionally records a DERIVED_FROM provenance edge if parent_record_id is supplied.
     Strictly verifies parent record existence, tenant boundary, and DAG depth/acyclicity.
+    Enforces GAP-003: independently verifies agent_id, source_id, and parent ownership.
     """
     if content is None or not content.strip():
         raise ValidationError("Memory content must not be empty or whitespace only.")
@@ -178,19 +181,48 @@ def ingest_memory(
     record_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
 
-    # 1. Validate parent record if provided
+    # 1. Validate agent if provided (GAP-003)
+    if agent_id:
+        agent = repo.get_agent(agent_id, tenant_id)
+        if not agent or agent.tenant_id != tenant_id:
+            raise ValidationError(
+                f"Agent '{agent_id}' does not exist or does not belong to company '{tenant_id}'."
+            )
+        if agent.status != "ACTIVE":
+            raise ValidationError(
+                f"Agent '{agent_id}' is not ACTIVE (status: '{agent.status}'). Ingestion rejected."
+            )
+
+    # 2. Validate source if provided (GAP-003)
+    if source_id:
+        source = repo.get_source(source_id, tenant_id)
+        if not source or source.tenant_id != tenant_id:
+            raise ValidationError(
+                f"Source '{source_id}' does not exist or does not belong to company '{tenant_id}'."
+            )
+        if source.status != "ACTIVE":
+            raise ValidationError(
+                f"Source '{source_id}' is not ACTIVE (status: '{source.status}'). Ingestion rejected."
+            )
+
+    # 3. Validate parent record if provided (GAP-003)
     if parent_record_id:
         parent = repo.get_record(parent_record_id, tenant_id)
-        if not parent:
+        if not parent or parent.tenant_id != tenant_id:
             raise MemoryNotFoundError(
                 f"Parent memory record '{parent_record_id}' not found for tenant '{tenant_id}'. "
                 f"Cross-tenant and nonexistent parent references are strictly prohibited."
             )
+        if parent.trust_state in ("QUARANTINED", "REJECTED"):
+            raise ValidationError(
+                f"Cannot derive memory from parent record '{parent_record_id}' in '{parent.trust_state}' state."
+            )
         _check_dag_cycle(repo, parent_record_id, record_id, tenant_id)
+        _get_lineage_depth(repo, parent_record_id, tenant_id)
 
     checksum = sha256_hex(content)
 
-    # 2. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
+    # 4. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
     record = MemoryRecord(
         id=record_id,
         tenant_id=tenant_id,
@@ -204,7 +236,7 @@ def ingest_memory(
     )
     repo.create_record(record)
 
-    # 3. Create MemoryVersion (Table 12: version 1, immutable)
+    # 5. Create MemoryVersion (Table 12: version 1, immutable)
     version = MemoryVersion(
         id=version_id,
         tenant_id=tenant_id,
@@ -216,7 +248,7 @@ def ingest_memory(
     )
     repo.create_version(version)
 
-    # 4. Create ProvenanceEdge if derived from parent (Table 14)
+    # 6. Create ProvenanceEdge if derived from parent (Table 14)
     if parent_record_id:
         edge = ProvenanceEdge(
             id=str(uuid.uuid4()),
@@ -241,7 +273,8 @@ def update_memory(
 
     Appends a new immutable version (current_version + 1) with an independent SHA-256
     checksum. Never edits or mutates historical versions.
-    Does NOT alter trust_state (M4 owns trust state lifecycle).
+    Enforces GAP-002: Invalidation of prior trust assessment. New unvalidated content
+    resets record.trust_state to UNVERIFIED until evaluated by M4.
     """
     if content is None or not content.strip():
         raise ValidationError("Updated memory content must not be empty.")
@@ -269,8 +302,10 @@ def update_memory(
     )
     repo.create_version(new_version)
 
-    # 2. Update record metadata (current_version and updated_at only; trust_state preserved)
+    # 2. Update record metadata and invalidate trust state (GAP-002)
+    # The new content has not been vetted by M4; it must become UNVERIFIED immediately
     record.current_version = new_version_num
+    record.trust_state = TrustState.UNVERIFIED.value
     record.updated_at = now
     repo.update_record(record)
 
@@ -281,26 +316,39 @@ def retrieve_memory(
     tenant_id: str,
     agent_id: Optional[str] = None,
     trust_state: Optional[str] = None,
-    exclude_quarantined: bool = True,
     limit: int = 50,
     offset: int = 0,
+    for_forensic: bool = False,
     repository: Optional[MemoryRepository] = None,
 ) -> List[MemoryRecord]:
     """Retrieve memory records for a tenant and optional agent.
 
-    Enforces:
+    Enforces GAP-001:
     1. Tenant scoping: only records belonging to `tenant_id` are returned.
-    2. Quarantine exclusion: QUARANTINED and REJECTED records are strictly excluded when exclude_quarantined=True.
-    3. Pagination: respects limit (max 100) and offset.
-    4. Cryptographic integrity: re-verifies stored checksums of all versions against content.
+    2. Trust state restriction: Normal agent retrieval returns ONLY eligible TRUSTED records.
+       UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, and SUPERSEDED records are strictly excluded.
+    3. Query parameter validation: Callers cannot request non-TRUSTED states unless for_forensic=True.
+    4. Pagination: respects limit (max 100) and offset.
+    5. Cryptographic integrity: re-verifies stored checksums of all versions against content.
        If any checksum mismatch is detected, raises MemoryIntegrityError and does not return the record.
     """
     repo = repository or get_default_repository()
+
+    # Enforce GAP-001: Normal agent retrieval returns ONLY eligible TRUSTED memory
+    if not for_forensic:
+        if trust_state is not None and trust_state.upper() != TrustState.TRUSTED.value:
+            raise ForbiddenError("Normal agent retrieval is strictly restricted to TRUSTED memory records.")
+        target_trust = TrustState.TRUSTED.value
+        only_trusted = True
+    else:
+        target_trust = trust_state
+        only_trusted = False
+
     records = repo.list_records(
         tenant_id=tenant_id,
         agent_id=agent_id,
-        trust_state=trust_state,
-        exclude_quarantined=exclude_quarantined,
+        trust_state=target_trust,
+        only_trusted=only_trusted,
         limit=limit,
         offset=offset,
     )
@@ -326,14 +374,18 @@ def get_memory_detail(
     tenant_id: str,
     record_id: str,
     allow_quarantined: bool = False,
+    for_forensic: bool = False,
     repository: Optional[MemoryRepository] = None,
 ) -> Tuple[MemoryRecord, List[MemoryVersion], List[ProvenanceEdge]]:
     """Fetch complete memory detail including full version history and provenance edges.
 
-    Enforces:
+    Enforces GAP-004:
     1. Tenant scoping: only records belonging to tenant_id are accessed.
-    2. Quarantine safety: QUARANTINED and REJECTED records are hidden from normal agent access (returns 404).
-    3. Cryptographic integrity: re-verifies checksums across all versions for tampering detection.
+    2. Trust safety: Normal detail access applies the exact same trust invariant as list retrieval.
+       Only eligible TRUSTED current memory may be exposed to normal agent-facing detail operations.
+       Non-TRUSTED records (UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED) return 404.
+    3. Forensic override: allow_quarantined=True or for_forensic=True permits authorized inspection.
+    4. Cryptographic integrity: re-verifies checksums across all versions for tampering detection.
     """
     repo = repository or get_default_repository()
     record = repo.get_record(record_id, tenant_id)
@@ -342,8 +394,8 @@ def get_memory_detail(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )
 
-    # Protect against unauthorized access to quarantined or rejected memory
-    if not allow_quarantined and record.trust_state in ("QUARANTINED", "REJECTED"):
+    # Enforce GAP-004: Normal detail access requires TRUSTED state
+    if not for_forensic and not allow_quarantined and record.trust_state != TrustState.TRUSTED.value:
         raise MemoryNotFoundError(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )
@@ -361,3 +413,31 @@ def get_memory_detail(
 
     edges = repo.get_edges_for_record(record_id, tenant_id)
     return record, versions, edges
+
+
+def transition_memory_trust_state(
+    tenant_id: str,
+    record_id: str,
+    new_trust_state: str,
+    reason: str = "Authorized M4 security policy transition",
+    analyst_id: Optional[str] = None,
+    repository: Optional[MemoryRepository] = None,
+) -> MemoryRecord:
+    """Transition a memory record's trust state according to M4 Security Engine lifecycle rules.
+
+    M4 owns trust decisions. This function allows authorized M4 workflows (and test harnesses)
+    to transition a record from UNVERIFIED -> TRUSTED, or SUSPICIOUS, or QUARANTINED.
+    """
+    valid_states = {s.value for s in TrustState}
+    target_state = new_trust_state.upper()
+    if target_state not in valid_states:
+        raise ValidationError(f"Invalid trust state '{new_trust_state}'. Must be one of {valid_states}.")
+
+    repo = repository or get_default_repository()
+    record = repo.get_record(record_id, tenant_id)
+    if not record:
+        raise MemoryNotFoundError(f"Memory record '{record_id}' not found for tenant '{tenant_id}'.")
+
+    record.trust_state = target_state
+    record.updated_at = datetime.now(timezone.utc)
+    return repo.update_record(record)
