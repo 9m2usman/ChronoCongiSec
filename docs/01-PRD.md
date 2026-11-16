@@ -295,7 +295,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | **FR-001** | §8 (Cat 1) | TRD §3.1 | Flow §1, §3 | Global Topbar | `tenants`, `memberships` | `/tenants` | M1, M6 | `test_three_company_tenant_isolation` |
 | **FR-004** | §8 (Cat 2) | TRD §2.2 | Flow §2 | Screen 02 | `agents`, `agent_versions` | `/agents` | M1, M2 | `test_agent_registration` |
 | **FR-007** | §8 (Cat 3) | TRD §4.1 | Flow §2 | Screen 03 | `memory_records`, `memory_versions` | `/memory` | M3 | `test_memory_ingestion_checksum` |
-| **FR-011** | §8 (Cat 3) | TRD §2.2 | Flow §2 | Screen 03 | `memory_records` | `/memory?exclude_quarantined=true` | M3, M4 | `test_quarantine_retrieval_exclusion` |
+| **FR-011** | §8 (Cat 3) | TRD §15.3 | Flow §4 | Screen 03 | `memory_records` | `/memory` (server-enforced eligible `TRUSTED` only) | M3, M4 | `test_trusted_retrieval_state_matrix` |
 | **FR-012** | §8 (Cat 4) | TRD §2.3 | Flow §2 | Screen 04 | `tool_proposals`, `tool_executions` | `/gateway/actions/propose` | M2, M4 | `test_security_gateway_allows_trusted_memory` |
 | **FR-014** | §8 (Cat 4) | TRD §2.3 | Flow §2 | Screen 04 | `policy_decisions` | `/gateway/actions/propose` | M4 | `test_security_gateway_blocks_untrusted_memory` |
 | **FR-018** | §8 (Cat 5) | TRD §2.4 | Flow §2 | Screen 04 | `memory_records` | `/memory/{id}/quarantine` | M4 | `test_quarantine_workflow` |
