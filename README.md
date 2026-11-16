@@ -53,6 +53,7 @@ The complete engineering specification is published in the `docs/` directory. Al
 | **05** | **Backend Database Schema & API Contract** | [docs/05-DATABASE-API-SCHEMA.md](docs/05-DATABASE-API-SCHEMA.md) | Canonical **ENGINEERING CONTRACT**. Defines relational DDL for all 32+ entities, ER diagram, multi-tenant isolation rules, complete REST API route inventory (`/api/v1`), and error envelopes. |
 | **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols for future implementation. |
 | **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Research foundations, inherited strengths from KnowledgeLine and AgentGuard, non-regression rules, memory poisoning/hallucination/rewind/tool-security research, evaluation methodology and team-wide engineering requirements. |
+| **08** | **Current Implementation Security Gap Register** | [docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md](docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md) | Evidence-based current-code audit of M1/M3 foundations, P0/P1 security gaps, owners, research mapping and acceptance tests. |
 
 For full reference to the master prompt that governed this specification, see [MASTER-PROMPT.md](MASTER-PROMPT.md).
 
@@ -146,7 +147,8 @@ ChronoCongiSec/
     ├── 04-UI-UX-DESIGN.md             # UI/UX Design & Screen Specifications
     ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
     ├── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
-    └── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
+    ├── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
+    └── 08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md # Current code audit and prioritized security gaps
 ```
 
 ---
