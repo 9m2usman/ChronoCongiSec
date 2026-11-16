@@ -15,12 +15,10 @@ if str(repo_root) not in sys.path:
 
 from backend.app.api.memory import get_repository
 from backend.app.core.config import get_settings
-from backend.app.core.dependencies import get_tenant_context
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.hashing import sha256_hex
 from backend.app.memory.repository import InMemoryMemoryRepository
-from backend.app.tenancy.context import TenantContext
 
 
 @pytest.fixture
@@ -204,10 +202,14 @@ def test_api_get_memory_detail_and_cross_tenant_rejection(app_and_client):
     assert res_b.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
 
 
-def test_api_exclude_quarantined_records_by_default(app_and_client):
-    """GET /api/v1/memory excludes QUARANTINED records by default; returns them when exclude_quarantined=false."""
+# ============================================================================
+# Finding 1 Regression Tests: Mandatory Quarantine Exclusion & No Bypass
+# ============================================================================
+
+def test_api_quarantined_records_excluded_and_bypass_prohibited(app_and_client):
+    """Quarantined records must never appear in normal retrieval, even if client attempts bypass."""
     _, client, repo = app_and_client
-    headers = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
 
     # Ingest clean record
     res1 = client.post("/api/v1/memory", json={"content": "Clean record."}, headers=headers)
@@ -218,23 +220,115 @@ def test_api_exclude_quarantined_records_by_default(app_and_client):
     id2 = res2.json()["id"]
     repo._records[id2].trust_state = "QUARANTINED"
 
-    # Default query (exclude_quarantined=true)
+    # 1. Standard retrieval excludes quarantined record
     res_active = client.get("/api/v1/memory", headers=headers)
     ids_active = [r["id"] for r in res_active.json()]
     assert id1 in ids_active
     assert id2 not in ids_active
 
-    # Forensic query (exclude_quarantined=false)
-    res_all = client.get("/api/v1/memory?exclude_quarantined=false", headers=headers)
-    ids_all = [r["id"] for r in res_all.json()]
-    assert id1 in ids_all
-    assert id2 in ids_all
+    # 2. Attempting to pass exclude_quarantined=false cannot bypass quarantine exclusion
+    res_bypass = client.get("/api/v1/memory?exclude_quarantined=false", headers=headers)
+    ids_bypass = [r["id"] for r in res_bypass.json()]
+    assert id1 in ids_bypass
+    assert id2 not in ids_bypass
+
+    # 3. Explicitly querying trust_state=QUARANTINED is forbidden (403)
+    res_forbidden = client.get("/api/v1/memory?trust_state=QUARANTINED", headers=headers)
+    assert res_forbidden.status_code == 403
+    assert res_forbidden.json()["error"]["code"] == "FORBIDDEN_ACTION"
+
+
+def test_api_detail_endpoint_hides_quarantined_and_rejected_records(app_and_client):
+    """GET /api/v1/memory/{id} returns 404 Not Found for QUARANTINED and REJECTED records."""
+    _, client, repo = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
+
+    # Ingest record and mark it QUARANTINED
+    res_q = client.post("/api/v1/memory", json={"content": "Poisoned data"}, headers=headers)
+    id_q = res_q.json()["id"]
+    repo._records[id_q].trust_state = "QUARANTINED"
+
+    # Detail access on quarantined record must return 404
+    detail_res_q = client.get(f"/api/v1/memory/{id_q}", headers=headers)
+    assert detail_res_q.status_code == 404
+    assert detail_res_q.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+
+    # Mark as REJECTED
+    repo._records[id_q].trust_state = "REJECTED"
+    detail_res_r = client.get(f"/api/v1/memory/{id_q}", headers=headers)
+    assert detail_res_r.status_code == 404
+
+
+# ============================================================================
+# Finding 3 Regression Tests: Bounded Pagination (TRD §22)
+# ============================================================================
+
+def test_api_pagination_defaults_and_limits(app_and_client):
+    """Listing supports default 50, custom limits, offset, and max 100 limit."""
+    _, client, _ = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
+
+    # Ingest 55 records
+    for i in range(55):
+        client.post(
+            "/api/v1/memory",
+            json={"content": f"Document index {i:02d}"},
+            headers=headers,
+        )
+
+    # 1. Default query returns exactly 50 records
+    res_default = client.get("/api/v1/memory", headers=headers)
+    assert res_default.status_code == 200
+    items_default = res_default.json()
+    assert len(items_default) == 50
+
+    # 2. Query with offset=50, limit=10 returns remaining 5 records
+    res_paged = client.get("/api/v1/memory?offset=50&limit=10", headers=headers)
+    assert res_paged.status_code == 200
+    items_paged = res_paged.json()
+    assert len(items_paged) == 5
+
+    # 3. Query with limit=100 returns all 55 records
+    res_100 = client.get("/api/v1/memory?limit=100", headers=headers)
+    assert res_100.status_code == 200
+    assert len(res_100.json()) == 55
+
+    # 4. Invalid limit > 100 rejected (400 VALIDATION_ERROR)
+    res_over = client.get("/api/v1/memory?limit=101", headers=headers)
+    assert res_over.status_code in (400, 422)
+
+    # 5. Invalid limit < 1 rejected
+    res_under = client.get("/api/v1/memory?limit=0", headers=headers)
+    assert res_under.status_code in (400, 422)
+
+    # 6. Negative offset rejected
+    res_neg = client.get("/api/v1/memory?offset=-1", headers=headers)
+    assert res_neg.status_code in (400, 422)
+
+
+def test_api_pagination_preserves_tenant_isolation(app_and_client):
+    """Pagination never crosses tenant boundaries."""
+    _, client, _ = app_and_client
+    headers_a = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
+    headers_b = _make_auth_header(tenant_id="tenant-b-uuid-002", user_id="user-b-analyst-003")
+
+    # Ingest 5 for Tenant A and 5 for Tenant B
+    for i in range(5):
+        client.post("/api/v1/memory", json={"content": f"A record {i}"}, headers=headers_a)
+        client.post("/api/v1/memory", json={"content": f"B record {i}"}, headers=headers_b)
+
+    # Tenant B paging with limit=100 only receives 5 records, all belonging to tenant-b
+    res_b = client.get("/api/v1/memory?limit=100", headers=headers_b)
+    items_b = res_b.json()
+    assert len(items_b) == 5
+    for item in items_b:
+        assert item["tenant_id"] == "tenant-b-uuid-002"
 
 
 def test_api_tampered_checksum_returns_sanitized_500(app_and_client):
     """If a memory version in DB is tampered with, API must return sanitized 500 error envelope."""
     _, client, repo = app_and_client
-    headers = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001")
 
     res = client.post("/api/v1/memory", json={"content": "Original authentic content."}, headers=headers)
     record_id = res.json()["id"]

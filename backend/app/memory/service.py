@@ -19,6 +19,10 @@ from .models import (
 )
 from .repository import MemoryRepository, get_default_repository
 
+# Documented governance limits for provenance DAG
+MAX_PROVENANCE_DEPTH = 5
+MAX_TRAVERSAL_BUDGET = 50
+
 
 class MemoryIntegrityError(AMSCException):
     """Raised when cryptographic checksum verification fails for a memory record."""
@@ -48,7 +52,7 @@ class MemoryNotFoundError(NotFoundError):
 
 
 class InvalidProvenanceError(AMSCException):
-    """Raised when a provenance edge violates tenant scoping, parent existence, or DAG acyclicity."""
+    """Raised when a provenance edge violates tenant scoping, parent existence, depth limits, or DAG acyclicity."""
 
     def __init__(
         self,
@@ -63,39 +67,91 @@ class InvalidProvenanceError(AMSCException):
         )
 
 
+def _get_lineage_depth(
+    repo: MemoryRepository,
+    record_id: str,
+    tenant_id: str,
+    visited: Optional[Set[str]] = None,
+    current_depth: int = 1,
+) -> int:
+    """Calculate the maximum upstream lineage depth leading into record_id within tenant scope."""
+    if visited is None:
+        visited = set()
+    if record_id in visited:
+        raise InvalidProvenanceError(f"Provenance cycle detected in ancestry for record '{record_id}'.")
+    if current_depth > MAX_PROVENANCE_DEPTH:
+        raise InvalidProvenanceError(
+            f"Provenance lineage depth limit exceeded: lineage depth exceeds maximum of {MAX_PROVENANCE_DEPTH}."
+        )
+    if len(visited) >= MAX_TRAVERSAL_BUDGET:
+        raise InvalidProvenanceError(
+            f"Provenance traversal node budget exceeded: maximum allowable traversal budget is {MAX_TRAVERSAL_BUDGET} nodes."
+        )
+
+    visited.add(record_id)
+    edges = repo.get_edges_for_record(record_id, tenant_id)
+    incoming_parents = [
+        edge.from_record_id
+        for edge in edges
+        if edge.to_record_id == record_id and edge.tenant_id == tenant_id
+    ]
+
+    if not incoming_parents:
+        return current_depth
+
+    max_ancestor_depth = current_depth
+    for parent_id in incoming_parents:
+        d = _get_lineage_depth(repo, parent_id, tenant_id, set(visited), current_depth + 1)
+        if d > max_ancestor_depth:
+            max_ancestor_depth = d
+    return max_ancestor_depth
+
+
 def _check_dag_cycle(
     repo: MemoryRepository,
     from_id: str,
     to_id: str,
     tenant_id: str,
 ) -> None:
-    """Verify that adding an edge from_id -> to_id does not create a cycle in the provenance graph.
-
-    Performs depth-first search traversal starting at to_id looking for from_id.
-    """
+    """Verify that adding an edge from_id -> to_id does not create a cycle or exceed depth/budget limits."""
     if from_id == to_id:
         raise InvalidProvenanceError(
             f"Self-referential provenance edge prohibited: record '{from_id}' cannot derive from itself."
         )
 
+    # 1. Check upstream ancestry depth of parent
+    parent_depth = _get_lineage_depth(repo, from_id, tenant_id)
+    if parent_depth + 1 > MAX_PROVENANCE_DEPTH:
+        raise InvalidProvenanceError(
+            f"Provenance lineage depth limit exceeded: maximum allowable lineage depth is {MAX_PROVENANCE_DEPTH}."
+        )
+
+    # 2. Downstream search: check if from_id is reachable from to_id (cycle detection)
     visited: Set[str] = set()
-    queue = [to_id]
+    queue: List[Tuple[str, int]] = [(to_id, 1)]
 
     while queue:
-        current = queue.pop(0)
+        current, depth = queue.pop(0)
         if current == from_id:
             raise InvalidProvenanceError(
                 f"Provenance cycle detected: adding edge from '{from_id}' to '{to_id}' creates a cyclic lineage."
             )
+        if depth > MAX_PROVENANCE_DEPTH:
+            raise InvalidProvenanceError(
+                f"Provenance traversal depth limit exceeded: maximum allowable lineage depth is {MAX_PROVENANCE_DEPTH}."
+            )
         if current in visited:
             continue
         visited.add(current)
+        if len(visited) > MAX_TRAVERSAL_BUDGET:
+            raise InvalidProvenanceError(
+                f"Provenance traversal node budget exceeded: maximum allowable traversal budget is {MAX_TRAVERSAL_BUDGET} nodes."
+            )
 
-        # Get outgoing edges where current is the source (from_record_id)
         edges = repo.get_edges_for_record(current, tenant_id)
         for edge in edges:
-            if edge.from_record_id == current and edge.to_record_id not in visited:
-                queue.append(edge.to_record_id)
+            if edge.from_record_id == current and edge.to_record_id not in visited and edge.tenant_id == tenant_id:
+                queue.append((edge.to_record_id, depth + 1))
 
 
 def ingest_memory(
@@ -112,7 +168,7 @@ def ingest_memory(
     Creates a MemoryRecord with trust_state UNVERIFIED (M4 owns trust state transitions)
     and a MemoryVersion with version 1 and cryptographic checksum from sha256_hex.
     Optionally records a DERIVED_FROM provenance edge if parent_record_id is supplied.
-    Strictly verifies parent record existence and tenant boundary.
+    Strictly verifies parent record existence, tenant boundary, and DAG depth/acyclicity.
     """
     if content is None or not content.strip():
         raise ValidationError("Memory content must not be empty or whitespace only.")
@@ -226,14 +282,17 @@ def retrieve_memory(
     agent_id: Optional[str] = None,
     trust_state: Optional[str] = None,
     exclude_quarantined: bool = True,
+    limit: int = 50,
+    offset: int = 0,
     repository: Optional[MemoryRepository] = None,
 ) -> List[MemoryRecord]:
     """Retrieve memory records for a tenant and optional agent.
 
     Enforces:
     1. Tenant scoping: only records belonging to `tenant_id` are returned.
-    2. Quarantine exclusion: QUARANTINED records are excluded by default (exclude_quarantined=True).
-    3. Cryptographic integrity: re-verifies stored checksums of all versions against content.
+    2. Quarantine exclusion: QUARANTINED and REJECTED records are strictly excluded when exclude_quarantined=True.
+    3. Pagination: respects limit (max 100) and offset.
+    4. Cryptographic integrity: re-verifies stored checksums of all versions against content.
        If any checksum mismatch is detected, raises MemoryIntegrityError and does not return the record.
     """
     repo = repository or get_default_repository()
@@ -242,6 +301,8 @@ def retrieve_memory(
         agent_id=agent_id,
         trust_state=trust_state,
         exclude_quarantined=exclude_quarantined,
+        limit=limit,
+        offset=offset,
     )
 
     verified_records: List[MemoryRecord] = []
@@ -264,15 +325,25 @@ def retrieve_memory(
 def get_memory_detail(
     tenant_id: str,
     record_id: str,
+    allow_quarantined: bool = False,
     repository: Optional[MemoryRepository] = None,
 ) -> Tuple[MemoryRecord, List[MemoryVersion], List[ProvenanceEdge]]:
     """Fetch complete memory detail including full version history and provenance edges.
 
-    Re-verifies checksums across all versions for tampering detection.
+    Enforces:
+    1. Tenant scoping: only records belonging to tenant_id are accessed.
+    2. Quarantine safety: QUARANTINED and REJECTED records are hidden from normal agent access (returns 404).
+    3. Cryptographic integrity: re-verifies checksums across all versions for tampering detection.
     """
     repo = repository or get_default_repository()
     record = repo.get_record(record_id, tenant_id)
     if not record:
+        raise MemoryNotFoundError(
+            f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
+        )
+
+    # Protect against unauthorized access to quarantined or rejected memory
+    if not allow_quarantined and record.trust_state in ("QUARANTINED", "REJECTED"):
         raise MemoryNotFoundError(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )

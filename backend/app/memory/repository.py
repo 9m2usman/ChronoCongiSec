@@ -13,6 +13,9 @@ from .models import MemoryRecord, MemoryVersion, ProvenanceEdge
 class MemoryRepository(ABC):
     """Abstract interface for memory persistence, matching M6 relational tables."""
 
+    is_persistent: bool = False
+    is_in_memory: bool = False
+
     @abstractmethod
     def create_record(self, record: MemoryRecord) -> MemoryRecord:
         """Persist a new memory record."""
@@ -30,8 +33,10 @@ class MemoryRepository(ABC):
         agent_id: Optional[str] = None,
         trust_state: Optional[str] = None,
         exclude_quarantined: bool = True,
+        limit: int = 50,
+        offset: int = 0,
     ) -> List[MemoryRecord]:
-        """Query memory records with optional filters and strict tenant scoping."""
+        """Query memory records with optional filters, pagination, and strict tenant scoping."""
         pass
 
     @abstractmethod
@@ -73,6 +78,7 @@ class MemoryRepository(ABC):
 class InMemoryMemoryRepository(MemoryRepository):
     """In-memory reference implementation of MemoryRepository for standalone operation and tests."""
 
+    is_persistent: bool = False
     is_in_memory: bool = True
 
     def __init__(self) -> None:
@@ -102,7 +108,12 @@ class InMemoryMemoryRepository(MemoryRepository):
         agent_id: Optional[str] = None,
         trust_state: Optional[str] = None,
         exclude_quarantined: bool = True,
+        limit: int = 50,
+        offset: int = 0,
     ) -> List[MemoryRecord]:
+        safe_limit = max(1, min(limit, 100))
+        safe_offset = max(0, offset)
+
         results: List[MemoryRecord] = []
         for rec in self._records.values():
             if rec.tenant_id != tenant_id:
@@ -111,12 +122,13 @@ class InMemoryMemoryRepository(MemoryRepository):
                 continue
             if trust_state is not None and rec.trust_state != trust_state:
                 continue
-            if exclude_quarantined and rec.trust_state == "QUARANTINED":
+            if exclude_quarantined and rec.trust_state in ("QUARANTINED", "REJECTED"):
                 continue
             results.append(deepcopy(rec))
+
         # Sort by created_at asc
         results.sort(key=lambda r: (r.created_at or 0))
-        return results
+        return results[safe_offset : safe_offset + safe_limit]
 
     def update_record(self, record: MemoryRecord) -> MemoryRecord:
         existing = self._records.get(record.id)
