@@ -1,0 +1,16 @@
+# Core Backend Technology Baseline
+# Approved in AMSC-DOC-002 (Combined TRD & SRS) Section 5
+fastapi==0.162.4
+uvicorn==0.54.0
+pydantic==2.14.3
+pydantic-settings==2.16.2
+sqlalchemy==2.1.8
+aiosqlite==0.22.1
+asyncpg==0.29.0
+httpx==0.28.1
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+python-dotenv==1.2.4
+argon2-cffi==25.1.0
+pyjwt==2.15.1
+
