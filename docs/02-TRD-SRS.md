@@ -285,7 +285,7 @@ AMSC integrates cleanly with diverse external agent frameworks (LangChain, CrewA
 
 ### Protocol Steps:
 1. **Agent Bootstrapping:** Agent is registered in the AMSC Agent Registry, receiving an `agent_id` and an agent bearer token.
-2. **Context Retrieval:** Agent queries the AMSC Memory Service (`GET /api/v1/memory?agent_id=...&exclude_quarantined=true`). Quarantined records are automatically excluded.
+2. **Context Retrieval:** Agent queries the AMSC Memory Service (`GET /api/v1/memory?agent_id=...`). The server returns only eligible `TRUSTED` records for that authenticated tenant, agent and purpose; all other trust states are excluded from normal agent context.
 3. **Action Proposal:** When the agent decides to invoke an external tool (e.g., send wire, restart VM), it does **not** call the tool directly. It posts an `ActionProposal` payload to the AMSC Security Gateway (`POST /api/v1/gateway/actions/propose`).
 4. **Gateway Mediation:** The Gateway evaluates identity, permissions, and memory trust, returning a signed decision response.
 5. **Execution or Denial:** If allowed, the Gateway invokes the tool adapter and returns the result to the agent. If blocked, the Gateway returns `decision: BLOCK` along with human-readable security reasons.
@@ -407,8 +407,7 @@ graph TD
     Preview --> Validate[Validate Checkpoint Integrity Checksum]
     Validate --> Preserve[Capture and Commit Pre-Recovery Snapshot of Contaminated State]
     Preserve --> Rollback[Atomically Roll Back Target Records to CP-001 Version]
-    Rollback --> MarkTrusted[Mark Restored Records as TRUSTED]
-    MarkTrusted --> Revalidate[Revalidate restored source, lineage, integrity, freshness and policy]
+    Rollback --> Revalidate[Revalidate restored source, lineage, integrity, freshness and policy]
     Revalidate -->|Pass| Trusted[Set eligible records TRUSTED]
     Revalidate -->|Fail or uncertain| Unverified[Keep UNVERIFIED or quarantine]
     Trusted --> Reindex[Reindex eligible descendants & Emit Audit Event]
