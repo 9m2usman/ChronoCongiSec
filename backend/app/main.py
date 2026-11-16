@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from backend.app.api.auth import router as auth_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.core.config import Settings, get_settings
+from backend.app.core.dependencies import InMemoryRateLimiter
 from backend.app.core.exceptions import register_exception_handlers
 from backend.app.core.logging import setup_logging
 
@@ -90,6 +91,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
         f"Starting {settings.APP_NAME} v{settings.APP_VERSION} [{settings.APP_ENV}]"
     )
+
+    # Production startup validation: Enforce real database repository configuration
+    if settings.APP_ENV == "production":
+        auth_repo = getattr(app.state, "auth_repo", None)
+        if auth_repo is None or getattr(auth_repo, "is_demo", False):
+            raise RuntimeError(
+                "Production startup failure: Real database authentication repository is not configured. "
+                "In-memory demo authentication is strictly forbidden in production."
+            )
+
     yield
     logger.info(f"Shutting down {settings.APP_NAME}")
 
@@ -111,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.rate_limiter = InMemoryRateLimiter()
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)

@@ -104,6 +104,8 @@ class InMemoryAuthRepository:
     Serves as the documented interface boundary until M6 completes PostgreSQL models.
     """
 
+    is_demo: bool = True
+
     def __init__(self) -> None:
         self.users: Dict[str, UserRecord] = {}
         self.users_by_email: Dict[str, UserRecord] = {}
@@ -149,136 +151,167 @@ class InMemoryAuthRepository:
         ]
 
 
-# Singleton default repository instance for runtime baseline
+# Singleton default repository instance for dev/test runtime baseline
 _default_auth_repo: Optional[AuthRepositoryProtocol] = None
 
 
-def get_default_auth_repository() -> AuthRepositoryProtocol:
-    """Factory returning the configured Auth repository."""
+def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
+    """Pre-seed canonical Company A, B, and C tenant and user records.
+
+    SECURITY REQUIREMENT:
+    Allowed ONLY in development and testing environments.
+    Strictly forbidden in staging and production.
+    """
+    from backend.app.core.security import hash_password
+
+    # Pre-seed canonical Company A, B, and C tenant records
+    t_a = TenantRecord(
+        id="tenant-a-uuid-001",
+        name="Company A (Attack Lab)",
+        slug="company-a",
+        status="ACTIVE",
+    )
+    t_b = TenantRecord(
+        id="tenant-b-uuid-002",
+        name="Company B (External Partner)",
+        slug="company-b",
+        status="ACTIVE",
+    )
+    t_c = TenantRecord(
+        id="tenant-c-uuid-003",
+        name="Company C (Strict Isolation)",
+        slug="company-c",
+        status="ACTIVE",
+    )
+    t_suspended = TenantRecord(
+        id="tenant-suspended-uuid-999",
+        name="Suspended Corp",
+        slug="suspended-corp",
+        status="SUSPENDED",
+    )
+    for t in [t_a, t_b, t_c, t_suspended]:
+        repo.add_tenant(t)
+
+    # Standard password for demo/seed: "SecurePassword123!"
+    seed_hash = hash_password("SecurePassword123!")
+
+    # Pre-seed canonical users
+    u_analyst_a = UserRecord(
+        id="user-a-analyst-001",
+        email="analyst@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Alice Analyst",
+        status="ACTIVE",
+    )
+    u_admin_a = UserRecord(
+        id="user-a-admin-002",
+        email="admin@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Adam Admin",
+        status="ACTIVE",
+    )
+    u_analyst_b = UserRecord(
+        id="user-b-analyst-003",
+        email="analyst@company-b.com",
+        hashed_password=seed_hash,
+        full_name="Bob Analyst",
+        status="ACTIVE",
+    )
+    u_analyst_c = UserRecord(
+        id="user-c-analyst-004",
+        email="analyst@company-c.com",
+        hashed_password=seed_hash,
+        full_name="Charlie Analyst",
+        status="ACTIVE",
+    )
+    u_inactive = UserRecord(
+        id="user-inactive-005",
+        email="inactive@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Ian Inactive",
+        status="INACTIVE",
+    )
+
+    for u in [u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive]:
+        repo.add_user(u)
+
+    # Pre-seed memberships
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-001",
+            tenant_id=t_a.id,
+            user_id=u_analyst_a.id,
+            role="SECURITY_ANALYST",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-002",
+            tenant_id=t_a.id,
+            user_id=u_admin_a.id,
+            role="TENANT_ADMIN",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-003",
+            tenant_id=t_b.id,
+            user_id=u_analyst_b.id,
+            role="SECURITY_ANALYST",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-004",
+            tenant_id=t_c.id,
+            user_id=u_analyst_c.id,
+            role="SECURITY_ANALYST",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-005",
+            tenant_id=t_a.id,
+            user_id=u_inactive.id,
+            role="SECURITY_ANALYST",
+        )
+    )
+    return repo
+
+
+def create_demo_auth_repository(settings: Optional[Settings] = None) -> InMemoryAuthRepository:
+    """Factory creating and seeding an in-memory auth repository for dev/test only."""
+    cfg = settings or get_settings()
+    if cfg.APP_ENV == "production":
+        raise RuntimeError(
+            "Security violation: In-memory demo authentication repository cannot be created in production."
+        )
+    if not cfg.ALLOW_IN_MEMORY_AUTH:
+        raise RuntimeError(
+            "Security violation: In-memory demo authentication is disabled by configuration."
+        )
+    repo = InMemoryAuthRepository()
+    return seed_demo_accounts(repo)
+
+
+def get_default_auth_repository(settings: Optional[Settings] = None) -> AuthRepositoryProtocol:
+    """Factory returning the configured Auth repository for local dev or tests."""
     global _default_auth_repo
+    cfg = settings or get_settings()
+    if cfg.APP_ENV == "production":
+        raise RuntimeError(
+            "Security violation: In-memory demo authentication repository cannot be accessed in production."
+        )
+    if not cfg.ALLOW_IN_MEMORY_AUTH:
+        raise RuntimeError(
+            "Security violation: In-memory demo authentication is disabled by configuration."
+        )
     if _default_auth_repo is None:
-        from backend.app.core.security import hash_password
-
-        repo = InMemoryAuthRepository()
-
-        # Pre-seed canonical Company A, B, and C tenant records
-        t_a = TenantRecord(
-            id="tenant-a-uuid-001",
-            name="Company A (Attack Lab)",
-            slug="company-a",
-            status="ACTIVE",
-        )
-        t_b = TenantRecord(
-            id="tenant-b-uuid-002",
-            name="Company B (External Partner)",
-            slug="company-b",
-            status="ACTIVE",
-        )
-        t_c = TenantRecord(
-            id="tenant-c-uuid-003",
-            name="Company C (Strict Isolation)",
-            slug="company-c",
-            status="ACTIVE",
-        )
-        t_suspended = TenantRecord(
-            id="tenant-suspended-uuid-999",
-            name="Suspended Corp",
-            slug="suspended-corp",
-            status="SUSPENDED",
-        )
-        for t in [t_a, t_b, t_c, t_suspended]:
-            repo.add_tenant(t)
-
-        # Standard password for demo/seed: "SecurePassword123!"
-        seed_hash = hash_password("SecurePassword123!")
-
-        # Pre-seed canonical users
-        u_analyst_a = UserRecord(
-            id="user-a-analyst-001",
-            email="analyst@company-a.com",
-            hashed_password=seed_hash,
-            full_name="Alice Analyst",
-            status="ACTIVE",
-        )
-        u_admin_a = UserRecord(
-            id="user-a-admin-002",
-            email="admin@company-a.com",
-            hashed_password=seed_hash,
-            full_name="Adam Admin",
-            status="ACTIVE",
-        )
-        u_analyst_b = UserRecord(
-            id="user-b-analyst-003",
-            email="analyst@company-b.com",
-            hashed_password=seed_hash,
-            full_name="Bob Analyst",
-            status="ACTIVE",
-        )
-        u_analyst_c = UserRecord(
-            id="user-c-analyst-004",
-            email="analyst@company-c.com",
-            hashed_password=seed_hash,
-            full_name="Charlie Analyst",
-            status="ACTIVE",
-        )
-        u_inactive = UserRecord(
-            id="user-inactive-005",
-            email="inactive@company-a.com",
-            hashed_password=seed_hash,
-            full_name="Ian Inactive",
-            status="INACTIVE",
-        )
-
-        for u in [u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive]:
-            repo.add_user(u)
-
-        # Pre-seed memberships
-        repo.add_membership(
-            MembershipRecord(
-                id="mem-001",
-                tenant_id=t_a.id,
-                user_id=u_analyst_a.id,
-                role="SECURITY_ANALYST",
-            )
-        )
-        repo.add_membership(
-            MembershipRecord(
-                id="mem-002",
-                tenant_id=t_a.id,
-                user_id=u_admin_a.id,
-                role="TENANT_ADMIN",
-            )
-        )
-        repo.add_membership(
-            MembershipRecord(
-                id="mem-003",
-                tenant_id=t_b.id,
-                user_id=u_analyst_b.id,
-                role="SECURITY_ANALYST",
-            )
-        )
-        repo.add_membership(
-            MembershipRecord(
-                id="mem-004",
-                tenant_id=t_c.id,
-                user_id=u_analyst_c.id,
-                role="SECURITY_ANALYST",
-            )
-        )
-        repo.add_membership(
-            MembershipRecord(
-                id="mem-005",
-                tenant_id=t_a.id,
-                user_id=u_inactive.id,
-                role="SECURITY_ANALYST",
-            )
-        )
-        _default_auth_repo = repo
-
+        _default_auth_repo = create_demo_auth_repository(cfg)
     return _default_auth_repo
 
 
-def set_default_auth_repository(repo: AuthRepositoryProtocol) -> None:
+def set_default_auth_repository(repo: Optional[AuthRepositoryProtocol]) -> None:
     """Override repository implementation (used in integration tests or M6 injection)."""
     global _default_auth_repo
     _default_auth_repo = repo
@@ -334,7 +367,11 @@ async def resolve_tenant_context_from_request(
             )
 
     # Re-verify against database repository
-    repository = repo or get_default_auth_repository()
+    repository = repo or getattr(request.app.state, "auth_repo", None)
+    if repository is None:
+        if app_settings.APP_ENV == "production" or not app_settings.ALLOW_IN_MEMORY_AUTH:
+            raise SecurityDependencyError("Authentication database repository is not configured.")
+        repository = get_default_auth_repository(app_settings)
 
     try:
         user = await repository.get_user_by_id(user_id)

@@ -40,6 +40,8 @@ def tenancy_client():
         APP_ENV="test",
         JWT_SECRET="a-test-secret-with-plenty-of-entropy-and-more-than-32-chars",
         CORS_ORIGINS=["http://localhost:5173"],
+        LOGIN_RATE_LIMIT_IP_MAX_REQUESTS=1000,
+        LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS=1000,
     )
     app = create_app(settings=settings)
     transport = httpx.ASGITransport(app=app)

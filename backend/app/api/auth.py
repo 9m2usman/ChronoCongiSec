@@ -11,17 +11,22 @@ Follows:
 
 import re
 from typing import Annotated
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from backend.app.core.config import Settings
 from backend.app.core.dependencies import (
     AuthRepoDep,
     CurrentUserDep,
+    RateLimiterDep,
     SettingsDep,
     TenantContextDep,
 )
-from backend.app.core.exceptions import AuthenticationError, SecurityDependencyError
+from backend.app.core.exceptions import (
+    AuthenticationError,
+    RateLimitExceededError,
+    SecurityDependencyError,
+)
 from backend.app.core.security import (
     create_access_token,
     dummy_verify_password,
@@ -118,22 +123,62 @@ class UserProfileResponse(BaseModel):
 )
 async def login(
     body: LoginRequest,
+    request: Request,
     repo: AuthRepoDep,
+    rate_limiter: RateLimiterDep,
     settings: SettingsDep,
 ) -> LoginResponse:
-    """Execute Day 2 secure authentication flow.
+    """Execute Day 2 secure authentication flow with rate limiting.
 
-    1. Normalizes email and tenant slug.
-    2. Retrieves user from repository.
-    3. Verifies password against stored Argon2id hash.
-    4. Validates user is ACTIVE.
-    5. Retrieves target tenant and verifies status is ACTIVE.
-    6. Verifies user holds valid membership in target tenant.
-    7. Employs constant-time dummy verification on missing entities to thwart enumeration.
-    8. Issues signed JWT with sub, tenant_id, role, and standard claims.
+    1. Applies source-IP and account-based rate limiting via M7 protocol.
+    2. Normalizes email and tenant slug.
+    3. Retrieves user from repository.
+    4. Verifies password against stored Argon2id hash.
+    5. Validates user is ACTIVE.
+    6. Retrieves target tenant and verifies status is ACTIVE.
+    7. Verifies user holds valid membership in target tenant.
+    8. Employs constant-time dummy verification on missing entities to thwart enumeration.
+    9. Issues signed JWT with sub, tenant_id, role, and standard claims.
     """
     normalized_email = body.email.strip().lower()
     normalized_slug = body.tenant_slug.strip().lower()
+
+    # Rate Limiting: 1. Source IP throttling
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    try:
+        ip_check = await rate_limiter.check_rate_limit(
+            key=f"login:ip:{client_ip}",
+            max_requests=settings.LOGIN_RATE_LIMIT_IP_MAX_REQUESTS,
+            window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except SecurityDependencyError:
+        if settings.RATE_LIMIT_REDIS_FAILURE_POLICY == "fail_closed":
+            raise
+        ip_check = None
+
+    if ip_check is not None and not ip_check.allowed:
+        raise RateLimitExceededError(
+            message="Too many login attempts from this network address. Please try again later.",
+            retry_after=ip_check.retry_after,
+        )
+
+    # Rate Limiting: 2. Target account throttling
+    try:
+        acct_check = await rate_limiter.check_rate_limit(
+            key=f"login:account:{normalized_email}",
+            max_requests=settings.LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS,
+            window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except SecurityDependencyError:
+        if settings.RATE_LIMIT_REDIS_FAILURE_POLICY == "fail_closed":
+            raise
+        acct_check = None
+
+    if acct_check is not None and not acct_check.allowed:
+        raise RateLimitExceededError(
+            message="Too many login attempts for this account. Please try again later.",
+            retry_after=acct_check.retry_after,
+        )
 
     # Step 1: User retrieval
     try:

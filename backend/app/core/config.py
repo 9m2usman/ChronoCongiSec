@@ -125,6 +125,30 @@ class Settings(BaseSettings):
         default=60,
         description="Access token lifespan in minutes",
     )
+    AUTH_BACKEND: str = Field(
+        default="in_memory_demo",
+        description="Authentication repository backend: 'in_memory_demo' or 'database'",
+    )
+    ALLOW_IN_MEMORY_AUTH: bool = Field(
+        default=True,
+        description="Explicit flag permitting in-memory demo authentication (strictly forbidden in production)",
+    )
+    RATE_LIMIT_REDIS_FAILURE_POLICY: str = Field(
+        default="fail_closed",
+        description="Behavior when Redis is unavailable during login rate limiting: 'fail_closed' or 'fail_open'",
+    )
+    LOGIN_RATE_LIMIT_IP_MAX_REQUESTS: int = Field(
+        default=10,
+        description="Max login attempts allowed per IP per window in production/dev",
+    )
+    LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS: int = Field(
+        default=5,
+        description="Max login attempts allowed per target account per window in production/dev",
+    )
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(
+        default=60,
+        description="Sliding window duration for login rate limiting in seconds",
+    )
 
     # --- 6. Persistence & Cache Connection Placeholders (M6/M7 Alignment) ---
     DATABASE_URL: str = Field(
@@ -225,10 +249,13 @@ class Settings(BaseSettings):
                 raise ValueError("Security violation: DEBUG mode must be False in production.")
 
             # 2. Insecure default secret check
-            insecure_markers = {"insecure", "dev", "change", "replace", "default", "example"}
+            insecure_markers = {
+                "insecure", "dev", "change", "replace", "default",
+                "example", "placeholder",
+            }
             if any(marker in self.JWT_SECRET.lower() for marker in insecure_markers):
                 raise ValueError(
-                    "Security violation: Default or development JWT_SECRET cannot be used in production."
+                    "Security violation: Default, placeholder, or development JWT_SECRET cannot be used in production."
                 )
             if len(self.JWT_SECRET) < 32:
                 raise ValueError(
@@ -243,6 +270,38 @@ class Settings(BaseSettings):
             if not self.CORS_ORIGINS:
                 raise ValueError(
                     "Security configuration error: At least one explicit origin must be defined in production."
+                )
+
+            # 4. In-memory demo authentication strictly forbidden in production
+            if self.ALLOW_IN_MEMORY_AUTH:
+                raise ValueError(
+                    "Security violation: ALLOW_IN_MEMORY_AUTH must be False in production."
+                )
+            if self.AUTH_BACKEND != "database":
+                raise ValueError(
+                    f"Security violation: AUTH_BACKEND '{self.AUTH_BACKEND}' is prohibited in production. Real 'database' backend required."
+                )
+
+            # 5. Database connection configuration in production
+            if not self.DATABASE_URL:
+                raise ValueError(
+                    "Security configuration error: Production DATABASE_URL must be explicitly configured."
+                )
+            insecure_db_markers = ["amsc_dev_password", "localhost", "127.0.0.1"]
+            if any(marker in self.DATABASE_URL.lower() for marker in insecure_db_markers):
+                raise ValueError(
+                    "Security violation: Production DATABASE_URL must use production credentials and a non-localhost host."
+                )
+
+            # 6. Redis connection configuration in production
+            if not self.REDIS_URL:
+                raise ValueError(
+                    "Security configuration error: Production REDIS_URL must be explicitly configured."
+                )
+            insecure_redis_markers = ["localhost", "127.0.0.1"]
+            if any(marker in self.REDIS_URL.lower() for marker in insecure_redis_markers):
+                raise ValueError(
+                    "Security violation: Production REDIS_URL must use a non-localhost host."
                 )
 
         return self
