@@ -142,12 +142,16 @@ class InMemoryAuthRepository:
         return self.memberships.get((user_id, tenant_id))
 
     async def list_user_tenants(self, user_id: str) -> List[TenantRecord]:
-        user_tenant_ids = [
-            t_id for (u_id, t_id) in self.memberships.keys() if u_id == user_id
+        user_active_tenant_ids = [
+            t_id
+            for (u_id, t_id), m in self.memberships.items()
+            if u_id == user_id
+            and getattr(m, "status", None) is not None
+            and str(getattr(m, "status", "")).strip().upper() == "ACTIVE"
         ]
         return [
             self.tenants[t_id]
-            for t_id in user_tenant_ids
+            for t_id in user_active_tenant_ids
             if t_id in self.tenants and self.tenants[t_id].status == "ACTIVE"
         ]
 
@@ -473,8 +477,9 @@ async def resolve_tenant_context_from_request(
     if not membership:
         raise TenantAccessForbiddenError("User is not an active member of the requested tenant.")
 
-    # Membership status enforcement: active membership required (reject INACTIVE, REVOKED, SUSPENDED)
-    if getattr(membership, "status", None) != "ACTIVE":
+    # Membership status enforcement: active membership required (reject INACTIVE, REVOKED, SUSPENDED, and missing status)
+    mem_status = getattr(membership, "status", None)
+    if mem_status is None or str(mem_status).strip().upper() != "ACTIVE":
         raise TenantAccessForbiddenError("User is not an active member of the requested tenant.")
 
     # Return immutable request-scoped context

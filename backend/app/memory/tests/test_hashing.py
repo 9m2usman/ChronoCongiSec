@@ -106,3 +106,20 @@ def test_sha256_hex_none_and_default_arg():
     """Verify sha256_hex with None or no argument yields canonical empty digest."""
     assert sha256_hex(None) == EMPTY_SHA256
     assert sha256_hex() == EMPTY_SHA256
+
+
+def test_sha256_hex_non_string_type_raises_type_error():
+    """Verify sha256_hex raises TypeError when passed non-string and non-None types."""
+    import pytest
+
+    with pytest.raises(TypeError) as exc:
+        sha256_hex(12345)  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc.value)
+
+    with pytest.raises(TypeError) as exc2:
+        sha256_hex(b"bytes-not-str")  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc2.value)
+
+    with pytest.raises(TypeError) as exc3:
+        sha256_hex({"key": "val"})  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc3.value)

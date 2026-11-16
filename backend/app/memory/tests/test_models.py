@@ -284,3 +284,30 @@ def test_valid_uppercase_and_lowercase_checksums_accepted():
     )
     # Checksum must be preserved as supplied, not silently lowercased
     assert ver_upper.checksum == upper_checksum
+
+
+def test_memory_ingest_request_invalid_record_type_rejected():
+    """Verify MemoryIngestRequest rejects unrecognized record_type values at validation boundary."""
+    import pytest
+    from pydantic import ValidationError
+    from backend.app.memory.models import MemoryIngestRequest
+
+    with pytest.raises(ValidationError):
+        MemoryIngestRequest(
+            content="Valid test memory content",
+            record_type="INVALID_RECORD_TYPE",
+        )
+
+
+def test_memory_record_response_invalid_checksum_rejected():
+    """Verify MemoryRecordResponse rejects malformed SHA-256 checksum strings."""
+    import pytest
+    from pydantic import ValidationError
+    from backend.app.memory.models import MemoryRecordResponse
+
+    with pytest.raises(ValidationError):
+        MemoryRecordResponse(
+            id="rec-001",
+            tenant_id="tenant-alpha",
+            checksum="too-short-checksum",
+        )

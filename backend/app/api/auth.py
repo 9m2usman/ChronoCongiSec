@@ -38,6 +38,31 @@ from backend.app.tenancy.context import TenantContext, UserRecord
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+def is_trusted_proxy(ip_str: str, trusted_proxies: list[str]) -> bool:
+    """Determine whether an IP address matches any trusted proxy definition (IP or CIDR)."""
+    import ipaddress
+    try:
+        client_obj = ipaddress.ip_address(ip_str.strip())
+    except ValueError:
+        return False
+
+    for trusted in trusted_proxies:
+        trusted_clean = trusted.strip()
+        if not trusted_clean:
+            continue
+        try:
+            if "/" in trusted_clean:
+                if client_obj in ipaddress.ip_network(trusted_clean, strict=False):
+                    return True
+            else:
+                if client_obj == ipaddress.ip_address(trusted_clean):
+                    return True
+        except ValueError:
+            if ip_str.strip() == trusted_clean:
+                return True
+    return False
+
+
 def get_client_ip(request: Request, settings: Settings) -> str:
     """Extract client IP address with strict trusted proxy validation.
 
@@ -45,15 +70,22 @@ def get_client_ip(request: Request, settings: Settings) -> str:
     Do NOT blindly trust X-Forwarded-For or other forwarded headers from arbitrary clients.
     Forwarded headers are only evaluated when the direct connection originates from an
     explicitly configured trusted proxy in settings.TRUSTED_PROXIES.
+
+    When requests pass through trusted proxies, traverse X-Forwarded-For from right to left,
+    skipping trusted intermediaries, to find the true client IP (RFC 7239 / standard reverse proxy handling).
     """
     direct_ip = request.client.host if request.client else "127.0.0.1"
-    if settings.TRUSTED_PROXIES and direct_ip in settings.TRUSTED_PROXIES:
+    if settings.TRUSTED_PROXIES and is_trusted_proxy(direct_ip, settings.TRUSTED_PROXIES):
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            for part in forwarded.split(","):
-                ip = part.strip()
-                if ip:
+            ips = [p.strip() for p in forwarded.split(",") if p.strip()]
+            # Walk right-to-left: the first IP that is NOT a trusted proxy is the real client
+            for ip in reversed(ips):
+                if not is_trusted_proxy(ip, settings.TRUSTED_PROXIES):
                     return ip
+            # If all forwarded IPs are trusted proxies, fall back to the first hop
+            if ips:
+                return ips[0]
     return direct_ip
 
 
@@ -185,8 +217,8 @@ async def login(
     # Rate Limiting: 2. Target account throttling
     # Uses hashed identifier scoped to the client IP to prevent an attacker from exhausting
     # another user's login allowance (DoS mitigation) while protecting against credential guessing
-    # and preventing raw PII leakage in Redis keys.
-    account_hash = hashlib.sha256(f"{normalized_email}:{normalized_slug}".encode("utf-8")).hexdigest()[:16]
+    # and preventing raw PII leakage in Redis keys. Uses full SHA-256 hex digest to eliminate collisions.
+    account_hash = hashlib.sha256(f"{normalized_email}:{normalized_slug}".encode("utf-8")).hexdigest()
     account_key = f"login:account:{client_ip}:{account_hash}"
     try:
         acct_check = await rate_limiter.check_rate_limit(
@@ -248,7 +280,8 @@ async def login(
     if not membership:
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
-    if getattr(membership, "status", None) != "ACTIVE":
+    mem_status = getattr(membership, "status", None)
+    if mem_status is None or str(mem_status).strip().upper() != "ACTIVE":
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
     # Step 6: Issue signed JWT scoped to authorized tenant

@@ -388,3 +388,71 @@ def test_sensitive_data_redactor_scrubs_jwt_and_bearer_tokens():
     bearer_log = "Header: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
     redacted_bearer = SensitiveDataFilter.redact(bearer_log)
     assert "Bearer [REDACTED]" in redacted_bearer
+
+
+def test_sensitive_data_redactor_scrubs_unquoted_passwords_and_keys():
+    """Verify unquoted passwords and API keys in CLI/YAML/key-value style logs are redacted."""
+    from backend.app.core.logging import SensitiveDataFilter
+
+    log_colon = "Auth config: password: MySecretPassword123 with trailing text"
+    redacted_colon = SensitiveDataFilter.redact(log_colon)
+    assert "MySecretPassword123" not in redacted_colon
+    assert "password: [REDACTED] with trailing text" in redacted_colon
+
+    log_eq = "User attempted auth: password = TopSecretPassWord!"
+    redacted_eq = SensitiveDataFilter.redact(log_eq)
+    assert "TopSecretPassWord!" not in redacted_eq
+    assert "password = [REDACTED]" in redacted_eq
+
+    log_key = "Header received: api_key: secret-api-key-value-999"
+    redacted_key = SensitiveDataFilter.redact(log_key)
+    assert "secret-api-key-value-999" not in redacted_key
+    assert "api_key: [REDACTED]" in redacted_key
+
+
+def test_sensitive_data_filter_handles_record_args_and_logging_format():
+    """Verify SensitiveDataFilter scrubs record.args whether dict, tuple, or formatted string."""
+    import logging
+    from backend.app.core.logging import RedactingFormatter, SensitiveDataFilter
+
+    logger = logging.getLogger("test_redact_logger")
+    logger.handlers.clear()
+
+    class CapturingHandler(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(self.format(record))
+
+    handler = CapturingHandler()
+    handler.setFormatter(RedactingFormatter(fmt="%(message)s"))
+    handler.addFilter(SensitiveDataFilter())
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+    logger.info("Login payload: %s", '{"password": "secret-pass-in-arg"}')
+    assert len(handler.records) == 1
+    assert "secret-pass-in-arg" not in handler.records[0]
+    assert '"password": "[REDACTED]"' in handler.records[0]
+
+
+@pytest.mark.asyncio
+async def test_verify_password_non_string_types_fail_safely():
+    """Verify verify_password and verify_password_async handle non-string types safely."""
+    from backend.app.core.security import verify_password, verify_password_async
+
+    # Synchronous
+    assert verify_password(None, "$argon2id$fake") is False
+    assert verify_password("password", None) is False
+    assert verify_password(12345, "$argon2id$fake") is False
+    assert verify_password("password", 67890) is False
+    assert verify_password({}, []) is False
+
+    # Asynchronous
+    assert await verify_password_async(None, "$argon2id$fake") is False
+    assert await verify_password_async("password", None) is False
+    assert await verify_password_async(12345, "$argon2id$fake") is False
+    assert await verify_password_async("password", 67890) is False
+    assert await verify_password_async({}, []) is False

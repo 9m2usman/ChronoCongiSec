@@ -51,26 +51,42 @@ _DUMMY_ARGON2_HASH = _password_hasher.hash("amsc-timing-mitigation-dummy-passwor
 # Bounded to 4 worker threads to prevent thread explosion under attack
 _AUTH_WORKER_COUNT = 4
 _auth_thread_pool: Optional[ThreadPoolExecutor] = None
-_auth_semaphore: Optional[asyncio.Semaphore] = None
 
 
-def get_auth_executor() -> ThreadPoolExecutor:
+def get_auth_executor(max_workers: int = _AUTH_WORKER_COUNT) -> ThreadPoolExecutor:
     """Return dedicated singleton ThreadPoolExecutor for Argon2 operations."""
     global _auth_thread_pool
     if _auth_thread_pool is None:
         _auth_thread_pool = ThreadPoolExecutor(
-            max_workers=_AUTH_WORKER_COUNT,
+            max_workers=max_workers,
             thread_name_prefix="amsc-argon2",
         )
     return _auth_thread_pool
 
 
+def shutdown_auth_executor() -> None:
+    """Gracefully terminate dedicated auth thread pool during app shutdown."""
+    global _auth_thread_pool
+    if _auth_thread_pool is not None:
+        _auth_thread_pool.shutdown(wait=False)
+        _auth_thread_pool = None
+
+
 def get_auth_semaphore(max_concurrency: int = 8) -> asyncio.Semaphore:
-    """Return singleton semaphore bounding concurrent Argon2 operations."""
-    global _auth_semaphore
-    if _auth_semaphore is None:
-        _auth_semaphore = asyncio.Semaphore(max_concurrency)
-    return _auth_semaphore
+    """Return per-event-loop semaphore bounding concurrent Argon2 operations.
+
+    Binding to the active event loop avoids cross-loop future binding contamination
+    in async tests and multi-loop environments.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.Semaphore(max_concurrency)
+
+    if not hasattr(loop, "_amsc_auth_semaphore") or getattr(loop, "_amsc_auth_concurrency", None) != max_concurrency:
+        loop._amsc_auth_semaphore = asyncio.Semaphore(max_concurrency)
+        loop._amsc_auth_concurrency = max_concurrency
+    return loop._amsc_auth_semaphore
 
 
 # ============================================================================
@@ -92,6 +108,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
     Fails safely on corrupted, mismatched, or unsupported hash strings.
     """
+    if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+        return False
     if not plain_password or not hashed_password:
         return False
 
@@ -102,6 +120,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
         return _password_hasher.verify(hashed_password, plain_password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
+        return False
+    except Exception:
         return False
 
 
@@ -123,6 +143,8 @@ async def verify_password_async(
     Offloads CPU/memory-intensive Argon2id operations to a dedicated bounded thread pool
     so the asyncio event loop remains responsive.
     """
+    if not isinstance(plain_password, str) or not isinstance(hashed_password, str):
+        return False
     if not plain_password or not hashed_password:
         return False
     if not hashed_password.startswith("$argon2"):

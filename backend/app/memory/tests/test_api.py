@@ -79,6 +79,21 @@ def test_api_ingest_memory_success(app_and_client):
     assert "id" in data
 
 
+def test_api_ingest_memory_invalid_record_type_returns_400(app_and_client):
+    """POST /api/v1/memory with invalid record_type must fail at schema validation with 400 Bad Request."""
+    _, client, _ = app_and_client
+    headers = _make_auth_header(tenant_id="tenant-a-uuid-001", user_id="user-a-analyst-001")
+    payload = {
+        "content": "Operating memo on dual custody approval thresholds.",
+        "record_type": "BOGUS_INVALID_TYPE",
+    }
+
+    response = client.post("/api/v1/memory", json=payload, headers=headers)
+    assert response.status_code == 400
+    err_envelope = response.json()
+    assert err_envelope["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_api_query_memory_and_strict_tenant_isolation(app_and_client):
     """GET /api/v1/memory must scope results to caller's tenant and exclude other tenants."""
     _, client, repo = app_and_client

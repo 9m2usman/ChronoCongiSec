@@ -121,6 +121,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
     yield
+    from backend.app.core.security import shutdown_auth_executor
+    shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 

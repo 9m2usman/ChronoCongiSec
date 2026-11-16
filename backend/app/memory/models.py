@@ -125,8 +125,10 @@ class SourceRecord(BaseModel):
 
 class MemoryIngestRequest(BaseModel):
     """Request payload for POST /memory matching Document 05 Section 5.1 Route Catalog."""
+    model_config = ConfigDict(use_enum_values=True)
+
     content: str = Field(..., min_length=1, max_length=1_000_000, description="Memory content chunk")
-    record_type: str = Field("KNOWLEDGE", max_length=64)
+    record_type: RecordType = Field(default=RecordType.KNOWLEDGE)
     source_id: Optional[str] = Field(None, max_length=128)
     parent_record_id: Optional[str] = Field(None, max_length=128)
     agent_id: Optional[str] = Field(None, max_length=128)

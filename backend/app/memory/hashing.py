@@ -27,6 +27,8 @@ def sha256_hex(content: Optional[str] = None) -> str:
     """
     if content is None:
         content = ""
+    elif not isinstance(content, str):
+        raise TypeError(f"content must be a string or None, got {type(content).__name__}")
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     stripped = normalized.strip()
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()

@@ -654,3 +654,126 @@ async def test_trusted_proxy_correctly_resolves_forwarded_ip():
             },
         )
         assert diff_client.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_membership_missing_status_attribute_fails_closed():
+    """Verify that a membership record lacking a 'status' attribute fails closed."""
+    from dataclasses import dataclass
+    from backend.app.core.security import create_access_token
+    from backend.app.tenancy.context import create_demo_auth_repository
+
+    @dataclass(frozen=True)
+    class LegacyMembershipNoStatus:
+        id: str
+        tenant_id: str
+        user_id: str
+        role: str
+
+    repo = create_demo_auth_repository()
+    # Inject a membership missing the status attribute
+    repo.memberships[("user-a-analyst-001", "tenant-a-uuid-001")] = LegacyMembershipNoStatus(
+        id="mem-legacy",
+        tenant_id="tenant-a-uuid-001",
+        user_id="user-a-analyst-001",
+        role="SECURITY_ANALYST",
+    )
+
+    test_settings = Settings(
+        APP_ENV="test",
+        JWT_SECRET="a-test-secret-with-plenty-of-entropy-and-more-than-32-chars",
+    )
+    app = create_app(settings=test_settings)
+    app.state.auth_repo = repo
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Login must fail closed because membership has no status attribute
+        login_res = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "analyst@company-a.com",
+                "password": "SecurePassword123!",
+                "tenant_slug": "company-a",
+            },
+        )
+        assert login_res.status_code == 401
+
+        # Token resolution on protected endpoint must also fail closed with 403
+        token = create_access_token(
+            user_id="user-a-analyst-001",
+            tenant_id="tenant-a-uuid-001",
+            role="SECURITY_ANALYST",
+            settings=test_settings,
+        )
+        me_res = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me_res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_user_tenants_excludes_revoked_suspended_and_inactive():
+    """Verify repo.list_user_tenants strictly filters out tenants where user membership is not ACTIVE."""
+    from backend.app.tenancy.context import create_demo_auth_repository
+
+    repo = create_demo_auth_repository()
+
+    # user-revoked-mem-006 has REVOKED membership in tenant-a-uuid-001
+    revoked_tenants = await repo.list_user_tenants("user-revoked-mem-006")
+    assert len(revoked_tenants) == 0
+
+    # user-suspended-mem-007 has SUSPENDED membership
+    suspended_tenants = await repo.list_user_tenants("user-suspended-mem-007")
+    assert len(suspended_tenants) == 0
+
+    # user-inactive-mem-008 has INACTIVE membership
+    inactive_tenants = await repo.list_user_tenants("user-inactive-mem-008")
+    assert len(inactive_tenants) == 0
+
+    # user-a-analyst-001 has ACTIVE membership in tenant-a
+    active_tenants = await repo.list_user_tenants("user-a-analyst-001")
+    assert len(active_tenants) == 1
+    assert active_tenants[0].slug == "company-a"
+
+
+@pytest.mark.asyncio
+async def test_trusted_proxy_cidr_and_spoofed_chain_handling():
+    """Verify CIDR trusted proxy matching and right-to-left traversal of X-Forwarded-For."""
+    test_settings = Settings(
+        APP_ENV="test",
+        JWT_SECRET="a-test-secret-with-plenty-of-entropy-and-more-than-32-chars",
+        LOGIN_RATE_LIMIT_IP_MAX_REQUESTS=2,
+        LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS=100,
+        LOGIN_RATE_LIMIT_WINDOW_SECONDS=60,
+        TRUSTED_PROXIES=["10.0.0.0/24"],  # CIDR network
+    )
+    app = create_app(settings=test_settings)
+    # Peer IP inside 10.0.0.0/24 subnet
+    transport = httpx.ASGITransport(app=app, client=("10.0.0.42", 55000))
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Attacker injects a spoofed IP at the start of X-Forwarded-For: "1.2.3.4, 203.0.113.50"
+        # The true client IP before the trusted proxy is 203.0.113.50
+        for _ in range(2):
+            res = await client.post(
+                "/api/v1/auth/login",
+                headers={"X-Forwarded-For": "1.2.3.4, 203.0.113.50"},
+                json={
+                    "email": "analyst@company-a.com",
+                    "password": "WrongPassword!",
+                    "tenant_slug": "company-a",
+                },
+            )
+            assert res.status_code == 401
+
+        # 3rd request with the same client IP (203.0.113.50) but different spoofed prefix must be throttled
+        blocked = await client.post(
+            "/api/v1/auth/login",
+            headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.50"},
+            json={
+                "email": "analyst@company-a.com",
+                "password": "WrongPassword!",
+                "tenant_slug": "company-a",
+            },
+        )
+        assert blocked.status_code == 429
+        assert blocked.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"

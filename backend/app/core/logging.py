@@ -23,12 +23,12 @@ SENSITIVE_PATTERNS = [
     (re.compile(r"ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]+"), r"[JWT_REDACTED]"),
     # Database and cache connection URIs with embedded credentials (e.g., postgresql+asyncpg://user:pass@host, redis://:pass@host)
     (re.compile(r"([a-zA-Z0-9\+\.\-]+://(?:[^:\s]*:))([^@\s]+)(@)"), r"\1[REDACTED]\3"),
-    # Password parameters / fields in JSON, query strings, or key-value pairs (including passwords with spaces inside quotes)
-    (re.compile(r"((?:password|passwd|hashed_password|current_password|new_password|client_secret|secret_key)['\"]?\s*[:=]\s*['\"])[^'\"]*(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
+    # Quoted password/secret parameters in JSON, dicts, or strings (including passwords with spaces inside quotes)
+    (re.compile(r"((?:password|passwd|hashed_password|current_password|new_password|client_secret|secret_key|api[_-]?key|access_token|refresh_token|private_key)['\"]?\s*[:=]\s*['\"])(?:\\.|[^'\"])*(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
+    # Unquoted password/secret parameters in key-value, YAML, CLI, or log outputs (e.g., password: MySecret or password = MySecret)
+    (re.compile(r"((?:password|passwd|hashed_password|current_password|new_password|client_secret|secret_key|api[_-]?key|access_token|refresh_token|private_key)['\"]?\s*[:=]\s*)(?!['\"])[^\s,;}{)\]&]+", re.IGNORECASE), r"\1[REDACTED]"),
     # Query / URL parameters with passwords, tokens, or keys
-    (re.compile(r"((?:token|secret|password|passwd|api[_-]?key|client[_-]?secret)=)[^&\s]+", re.IGNORECASE), r"\1[REDACTED]"),
-    # Secret keys / tokens / private keys
-    (re.compile(r"((?:api[_-]?key|secret|token|private_key)['\"]?\s*[:=]\s*['\"])[^'\"]*(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
+    (re.compile(r"((?:token|secret|password|passwd|api[_-]?key|client[_-]?secret)\s*=\s*)[^\s&]+", re.IGNORECASE), r"\1[REDACTED]"),
 ]
 
 
