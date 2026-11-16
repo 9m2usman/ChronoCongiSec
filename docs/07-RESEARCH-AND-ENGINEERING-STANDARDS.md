@@ -335,6 +335,8 @@ AMSC application:
 - Do not use repeated self-generated claims as independent corroboration.
 - Require external evidence for sensitive action justifications.
 
+**Important naming distinction:** the arXiv:2605.29960 paper also names its proposed attack *MemPoison*. It is a separate work from the arXiv:2607.14651 paper titled *MemPoison: Uncovering Persistent Memory Threats and Structural Blind Spots in LLM Agents*. Do not merge their threat taxonomies, datasets or findings.
+
 **Hijacking Agent Memory: Stealthy Trojan Attacks Through Conversational Interaction** — arXiv:2605.29960 (2026), preprint.
 
 Source: https://arxiv.org/abs/2605.29960
@@ -725,6 +727,7 @@ The following sources are the initial selected register. The team must update st
 | R-018 | Securing Tool-Using AI Agents Against Injection and Authority Misuse, Computation 2026 | Published research; simulation-based | Least privilege, allowlisting, verification, approvals, trade-offs |
 | R-019 | Runtime Protection Practice, IEEE 2026 | Conference paper | On-demand behavioral sandbox |
 | R-020 | Runtime Policy Enforcement for MCP-Based LLM Agents, Electronics 2026 | Published research | Tool-boundary PEP and information-flow labels |
+| R-021 | Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall, arXiv:2604.12948 | Preprint | Fact-plus-contextual-trace memory encoding; distinct from AMSC's execution/memory observability Dual Trace |
 
 ### Standards and implementation guidance
 
