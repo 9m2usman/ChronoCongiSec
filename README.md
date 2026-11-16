@@ -33,7 +33,7 @@ AMSC answers five foundational operational questions for every agent interaction
 ## 3. Current Project Stage: Backend Foundation & Architecture Implementation
 
 > [!IMPORTANT]
- > **Current Project Status: Backend foundation and security architecture implementation in progress.**
+> **Current Project Status: Backend foundation and security architecture implementation in progress.**
 > The repository contains backend authentication/tenant-context work and memory/provenance services alongside the approved product and technical specifications. The complete seven-member end-to-end product is not yet verified as finished; implementation status must be judged from merged code, tests and integration evidence rather than documentation labels alone.
 
 The documentation is the architecture and requirements baseline. Backend, frontend, database and infrastructure capabilities are delivered incrementally under the M1–M7 ownership plan.
