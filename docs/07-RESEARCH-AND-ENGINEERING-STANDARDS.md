@@ -230,6 +230,23 @@ AMSC application:
 - Distinguish this paper's multimodal memory architecture from the separate 2026 ChronoMem semantic version-control paper.
 
 ### 6.2 Memory poisoning and trust propagation
+**Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall in LLM Agents** — arXiv:2604.12948 (2026), preprint.
+
+Source: https://arxiv.org/abs/2604.12948
+
+Relevance:
+- Pairs a factual memory with a contextual/scene trace describing when and how the fact was learned.
+- Reports gains on cross-session recall and temporal reasoning in its evaluated LongMemEval-S setting.
+
+AMSC application:
+- Consider storing a compact contextual evidence trace alongside selected facts: source event, time, interaction/session, observed evidence and derivation.
+- Use this as an optional memory-quality and explainability enhancement, not as proof of truth or authority.
+- Preserve a strict separation between the paper's **dual-trace memory encoding** (fact + contextual scene) and AMSC's **Dual Trace observability feature** (execution trace + memory/evidence trace). They are related research ideas but are not the same architecture.
+- Evaluate whether contextual traces improve recall and temporal reasoning without increasing privacy exposure, prompt-injection carryover, storage cost or retrieval noise.
+
+Caution:
+- The work is a preprint, not a validated security mechanism. Contextual scene traces can themselves contain untrusted or sensitive material and must inherit provenance, trust, sensitivity and retention controls.
+
 
 **Memory Injection Attacks on LLM Agents via Query-Only Interaction (MINJA)** — NeurIPS 2025.
 
