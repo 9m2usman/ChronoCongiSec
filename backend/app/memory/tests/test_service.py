@@ -9,9 +9,9 @@ repo_root = Path(__file__).resolve().parents[4]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from backend.app.core.exceptions import ValidationError
+from backend.app.core.exceptions import ForbiddenError, ValidationError
 from backend.app.memory.hashing import sha256_hex
-from backend.app.memory.models import TrustState
+from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import (
     InMemoryMemoryRepository,
     MemoryRepository,
@@ -26,6 +26,7 @@ from backend.app.memory.service import (
     get_memory_detail,
     ingest_memory,
     retrieve_memory,
+    transition_memory_trust_state,
     update_memory,
 )
 
@@ -40,6 +41,16 @@ def test_version_1_on_create(repo):
     """Ingesting memory must create MemoryRecord with version 1, UNVERIFIED trust state, and valid SHA-256."""
     content = "Standard Treasury wire verification threshold: $500.00."
     tenant_id = "tenant-alpha"
+
+    # Pre-register active agent for tenant-alpha (GAP-003)
+    repo.create_agent(
+        AgentRecord(
+            id="agent-001",
+            tenant_id=tenant_id,
+            name="Test Agent",
+            status="ACTIVE",
+        )
+    )
 
     record, version = ingest_memory(
         tenant_id=tenant_id,
@@ -139,6 +150,8 @@ def test_tampered_checksum_detected_on_retrieval(repo):
         content="Original authentic payload content.",
         repository=repo,
     )
+    # Transition to TRUSTED so normal retrieval queries it
+    transition_memory_trust_state(tenant_id, record.id, TrustState.TRUSTED.value, repository=repo)
 
     # Verify retrieval succeeds before tampering
     verified = retrieve_memory(tenant_id=tenant_id, repository=repo)
@@ -167,8 +180,9 @@ def test_quarantined_and_rejected_records_excluded_from_normal_retrieval_and_det
     """QUARANTINED and REJECTED records must be strictly excluded from normal retrieval and detail."""
     tenant_id = "tenant-alpha"
 
-    # Ingest clean record 1
+    # Ingest clean record 1 and transition to TRUSTED
     rec1, _ = ingest_memory(tenant_id=tenant_id, content="Legitimate vendor profile.", repository=repo)
+    transition_memory_trust_state(tenant_id, rec1.id, TrustState.TRUSTED.value, repository=repo)
 
     # Ingest record 2 and simulate QUARANTINED state (as applied by M4 Quarantine Engine)
     rec2, _ = ingest_memory(tenant_id=tenant_id, content="Suspicious prompt injection payload.", repository=repo)
@@ -179,21 +193,21 @@ def test_quarantined_and_rejected_records_excluded_from_normal_retrieval_and_det
     repo._records[rec3.id].trust_state = "REJECTED"
 
     # Normal agent retrieval strictly excludes quarantined and rejected records
-    active_records = retrieve_memory(tenant_id=tenant_id, exclude_quarantined=True, repository=repo)
+    active_records = retrieve_memory(tenant_id=tenant_id, repository=repo)
     active_ids = [r.id for r in active_records]
     assert rec1.id in active_ids
     assert rec2.id not in active_ids
     assert rec3.id not in active_ids
 
-    # get_memory_detail for normal agent access (allow_quarantined=False) must raise MemoryNotFoundError (404)
+    # get_memory_detail for normal agent access (for_forensic=False) must raise MemoryNotFoundError (404)
     with pytest.raises(MemoryNotFoundError):
-        get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, allow_quarantined=False, repository=repo)
+        get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, for_forensic=False, repository=repo)
 
     with pytest.raises(MemoryNotFoundError):
-        get_memory_detail(tenant_id=tenant_id, record_id=rec3.id, allow_quarantined=False, repository=repo)
+        get_memory_detail(tenant_id=tenant_id, record_id=rec3.id, for_forensic=False, repository=repo)
 
-    # Forensic access (allow_quarantined=True) by authorized security analysts permits detail inspection
-    detail_rec, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, allow_quarantined=True, repository=repo)
+    # Forensic access (for_forensic=True) by authorized security analysts permits detail inspection
+    detail_rec, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, for_forensic=True, repository=repo)
     assert detail_rec.id == rec2.id
     assert detail_rec.trust_state == "QUARANTINED"
 
@@ -208,6 +222,7 @@ def test_tenant_isolation_cannot_read_other_tenant_records(repo):
         content="Confidential Company A financial strategy.",
         repository=repo,
     )
+    transition_memory_trust_state(tenant_a, rec_a.id, TrustState.TRUSTED.value, repository=repo)
 
     # 1. Tenant B querying retrieve_memory gets an empty list
     tenant_b_records = retrieve_memory(tenant_id=tenant_b, repository=repo)
@@ -379,7 +394,7 @@ class MockPersistentMemoryRepository(MemoryRepository):
 
     def create_record(self, record): return record
     def get_record(self, record_id, tenant_id): return None
-    def list_records(self, tenant_id, agent_id=None, trust_state=None, exclude_quarantined=True, limit=50, offset=0): return []
+    def list_records(self, tenant_id, agent_id=None, trust_state=None, exclude_quarantined=True, only_trusted=True, limit=50, offset=0): return []
     def update_record(self, record): return record
     def create_version(self, version): return version
     def get_versions(self, record_id, tenant_id): return []
@@ -387,6 +402,10 @@ class MockPersistentMemoryRepository(MemoryRepository):
     def get_latest_version(self, record_id, tenant_id): return None
     def create_edge(self, edge): return edge
     def get_edges_for_record(self, record_id, tenant_id): return []
+    def get_agent(self, agent_id, tenant_id): return None
+    def create_agent(self, agent): return agent
+    def get_source(self, source_id, tenant_id): return None
+    def create_source(self, source): return source
 
 
 def test_production_rejects_missing_memory_repository(monkeypatch):
@@ -484,5 +503,301 @@ def test_development_and_test_environments_usable_with_in_memory_repository(repo
     record, ver = ingest_memory(tenant_id="dev-tenant", content="Dev content", repository=repo)
     assert record.id is not None
     assert ver.version == 1
+    # Transition to TRUSTED for retrieval
+    transition_memory_trust_state("dev-tenant", record.id, TrustState.TRUSTED.value, repository=repo)
     records = retrieve_memory(tenant_id="dev-tenant", repository=repo)
     assert len(records) == 1
+
+
+# ============================================================================
+# GAP-001, GAP-002, GAP-003, GAP-004 Dedicated P0 Security Tests
+# ============================================================================
+
+def test_gap_001_retrieval_returns_only_trusted_records(repo):
+    """GAP-001: Normal memory retrieval must return ONLY eligible TRUSTED memory records.
+
+    UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, and SUPERSEDED must be excluded.
+    """
+    tenant_id = "tenant-gap1"
+
+    # Ingest records representing all lifecycle trust states
+    states = [
+        TrustState.UNVERIFIED.value,
+        TrustState.SUSPICIOUS.value,
+        TrustState.QUARANTINED.value,
+        TrustState.REJECTED.value,
+        TrustState.SUPERSEDED.value,
+        TrustState.TRUSTED.value,
+    ]
+    created = {}
+    for st in states:
+        rec, _ = ingest_memory(tenant_id=tenant_id, content=f"Payload for state {st}", repository=repo)
+        repo._records[rec.id].trust_state = st
+        created[st] = rec
+
+    # Normal agent retrieval must return exactly 1 record: the TRUSTED one
+    results = retrieve_memory(tenant_id=tenant_id, repository=repo)
+    assert len(results) == 1
+    assert results[0].id == created[TrustState.TRUSTED.value].id
+    assert results[0].trust_state == TrustState.TRUSTED.value
+
+    # Passing any trust_state other than TRUSTED to retrieve_memory must fail-closed with ForbiddenError
+    for invalid_filter in ["UNVERIFIED", "SUSPICIOUS", "QUARANTINED", "REJECTED", "SUPERSEDED"]:
+        with pytest.raises(ForbiddenError):
+            retrieve_memory(tenant_id=tenant_id, trust_state=invalid_filter, repository=repo)
+
+
+def test_gap_002_update_invalidates_trust_state_to_unverified(repo):
+    """GAP-002: Updating memory appends a new immutable version and invalidates trust state to UNVERIFIED."""
+    tenant_id = "tenant-gap2"
+
+    # 1. Ingest clean memory
+    rec_v1, ver_v1 = ingest_memory(
+        tenant_id=tenant_id,
+        content="Original wire threshold $500.",
+        repository=repo,
+    )
+    assert rec_v1.current_version == 1
+    assert rec_v1.trust_state == TrustState.UNVERIFIED.value
+
+    # 2. Simulate M4 validation promoting it to TRUSTED
+    transition_memory_trust_state(tenant_id, rec_v1.id, TrustState.TRUSTED.value, repository=repo)
+    assert repo.get_record(rec_v1.id, tenant_id).trust_state == TrustState.TRUSTED.value
+
+    # Eligible for normal retrieval
+    eligible = retrieve_memory(tenant_id=tenant_id, repository=repo)
+    assert len(eligible) == 1
+
+    # 3. Update memory with new content
+    rec_v2, ver_v2 = update_memory(
+        tenant_id=tenant_id,
+        record_id=rec_v1.id,
+        content="Updated wire threshold $50,000 (potential tampering).",
+        repository=repo,
+    )
+
+    # Invariant checks:
+    # - current_version incremented
+    assert rec_v2.current_version == 2
+    # - trust_state invalidated back to UNVERIFIED
+    assert rec_v2.trust_state == TrustState.UNVERIFIED.value
+    # - New version persisted
+    assert ver_v2.version == 2
+    assert ver_v2.checksum == sha256_hex("Updated wire threshold $50,000 (potential tampering).")
+    # - Historical version 1 remains unchanged
+    versions = repo.get_versions(rec_v1.id, tenant_id)
+    assert len(versions) == 2
+    assert versions[0].version == 1
+    assert versions[0].content == "Original wire threshold $500."
+
+    # - Because trust_state was invalidated to UNVERIFIED, normal retrieval now excludes it
+    post_update_eligible = retrieve_memory(tenant_id=tenant_id, repository=repo)
+    assert len(post_update_eligible) == 0
+
+
+def test_gap_003_agent_validation(repo):
+    """GAP-003: Ingestion validates agent existence, tenant ownership, and ACTIVE status."""
+    tenant_a = "tenant-company-main"
+    tenant_b = "tenant-company-other"
+
+    # Register active agent for tenant_a
+    repo.create_agent(
+        AgentRecord(
+            id="agent-active-001",
+            tenant_id=tenant_a,
+            name="Valid Active Agent",
+            status="ACTIVE",
+            branch_id="branch-lahore",
+        )
+    )
+    # Register isolated (inactive) agent for tenant_a
+    repo.create_agent(
+        AgentRecord(
+            id="agent-isolated-001",
+            tenant_id=tenant_a,
+            name="Compromised Isolated Agent",
+            status="ISOLATED",
+            branch_id="branch-lahore",
+        )
+    )
+    # Register active agent for tenant_b
+    repo.create_agent(
+        AgentRecord(
+            id="agent-b-001",
+            tenant_id=tenant_b,
+            name="Other Tenant Agent",
+            status="ACTIVE",
+        )
+    )
+
+    # 1. Valid active agent -> Success
+    rec, _ = ingest_memory(
+        tenant_id=tenant_a,
+        content="Valid ingest from active agent.",
+        agent_id="agent-active-001",
+        repository=repo,
+    )
+    assert rec.agent_id == "agent-active-001"
+
+    # 2. Nonexistent agent -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from nonexistent agent.",
+            agent_id="agent-ghost-999",
+            repository=repo,
+        )
+    assert "does not exist or does not belong to company" in str(exc.value)
+
+    # 3. Cross-tenant agent -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from cross-tenant agent.",
+            agent_id="agent-b-001",
+            repository=repo,
+        )
+    assert "does not exist or does not belong to company" in str(exc.value)
+
+    # 4. Inactive / ISOLATED agent -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from isolated agent.",
+            agent_id="agent-isolated-001",
+            repository=repo,
+        )
+    assert "is not ACTIVE" in str(exc.value)
+
+
+def test_gap_003_source_validation(repo):
+    """GAP-003: Ingestion validates source existence, tenant ownership, and ACTIVE status."""
+    tenant_a = "tenant-company-main"
+    tenant_b = "tenant-company-other"
+
+    repo.create_source(
+        SourceRecord(
+            id="src-active-001",
+            tenant_id=tenant_a,
+            name="Active Document Source",
+            source_type="DOCUMENT_FEED",
+            status="ACTIVE",
+        )
+    )
+    repo.create_source(
+        SourceRecord(
+            id="src-inactive-001",
+            tenant_id=tenant_a,
+            name="Revoked Source",
+            source_type="DOCUMENT_FEED",
+            status="INACTIVE",
+        )
+    )
+    repo.create_source(
+        SourceRecord(
+            id="src-other-001",
+            tenant_id=tenant_b,
+            name="Tenant B Source",
+            source_type="API_CONNECTOR",
+            status="ACTIVE",
+        )
+    )
+
+    # 1. Valid active source -> Success
+    rec, _ = ingest_memory(
+        tenant_id=tenant_a,
+        content="Ingest from active source.",
+        source_id="src-active-001",
+        repository=repo,
+    )
+    assert rec.source_id == "src-active-001"
+
+    # 2. Nonexistent source -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from nonexistent source.",
+            source_id="src-nonexistent-999",
+            repository=repo,
+        )
+    assert "does not exist or does not belong to company" in str(exc.value)
+
+    # 3. Cross-tenant source -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from cross-tenant source.",
+            source_id="src-other-001",
+            repository=repo,
+        )
+    assert "does not exist or does not belong to company" in str(exc.value)
+
+    # 4. Inactive source -> ValidationError
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_a,
+            content="Ingest from inactive source.",
+            source_id="src-inactive-001",
+            repository=repo,
+        )
+    assert "is not ACTIVE" in str(exc.value)
+
+
+def test_gap_003_parent_record_state_validation(repo):
+    """GAP-003: Ingestion rejects parent_record_id if parent is in QUARANTINED or REJECTED state."""
+    tenant_id = "tenant-gap3-parent"
+
+    # Parent in QUARANTINED state
+    p_quarantine, _ = ingest_memory(tenant_id=tenant_id, content="Parent quarantined.", repository=repo)
+    repo._records[p_quarantine.id].trust_state = TrustState.QUARANTINED.value
+
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_id,
+            content="Child referencing quarantined parent.",
+            parent_record_id=p_quarantine.id,
+            repository=repo,
+        )
+    assert "QUARANTINED" in str(exc.value)
+
+    # Parent in REJECTED state
+    p_rejected, _ = ingest_memory(tenant_id=tenant_id, content="Parent rejected.", repository=repo)
+    repo._records[p_rejected.id].trust_state = TrustState.REJECTED.value
+
+    with pytest.raises(ValidationError) as exc:
+        ingest_memory(
+            tenant_id=tenant_id,
+            content="Child referencing rejected parent.",
+            parent_record_id=p_rejected.id,
+            repository=repo,
+        )
+    assert "REJECTED" in str(exc.value)
+
+
+def test_gap_004_memory_detail_access_controls(repo):
+    """GAP-004: Normal memory detail access returns 404 for non-TRUSTED records; forensic access permitted for M4."""
+    tenant_id = "tenant-gap4"
+
+    # Ingest record (defaults to UNVERIFIED)
+    rec, _ = ingest_memory(tenant_id=tenant_id, content="Unverified initial memory.", repository=repo)
+    assert rec.trust_state == TrustState.UNVERIFIED.value
+
+    # Normal agent detail access (for_forensic=False) must raise MemoryNotFoundError (404)
+    with pytest.raises(MemoryNotFoundError):
+        get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=False, repository=repo)
+
+    # Transition to TRUSTED -> normal access succeeds
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
+    normal_detail, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=False, repository=repo)
+    assert normal_detail.id == rec.id
+    assert normal_detail.trust_state == TrustState.TRUSTED.value
+
+    # Change to SUSPICIOUS -> normal access fails with MemoryNotFoundError (404)
+    repo._records[rec.id].trust_state = TrustState.SUSPICIOUS.value
+    with pytest.raises(MemoryNotFoundError):
+        get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=False, repository=repo)
+
+    # Forensic access (for_forensic=True) succeeds and returns the record for security investigation
+    forensic_detail, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=True, repository=repo)
+    assert forensic_detail.id == rec.id
+    assert forensic_detail.trust_state == TrustState.SUSPICIOUS.value

@@ -113,7 +113,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 ## 7. Product Scope: In-Scope vs. Out-of-Scope
 
 ### 7.1 In-Scope (7-Day Integrated MVP Baseline)
-- **Multi-Tenant Workspaces:** Server-side tenant resolution, JWT/API key authentication, tenant-scoped queries across Company A, Company B, and Company C.
+- **Single-Company Enterprise & Multi-Branch Governance:** Server-side company resolution, JWT authentication, branch-scoped role-based access control (Head Office, Branch Lahore, Branch Karachi, Branch Islamabad), with internal tenant abstraction preserved for future multi-organization expansion.
 - **Agent Registry:** Agent registration, versioned system prompts, runtime metadata, granular tool permission assigner.
 - **Memory Management & Provenance:** Ingestion API, canonical SHA-256 content hashing, version incrementing, provenance edge creation (`DERIVED_FROM`, `TRANSFORMED_INTO`, `SUPERSEDES`).
 - **Security Gateway & Fail-Closed Policy Engine:** Ingress action proposal protocol, schema validation, idempotency caching, memory trust evaluation, allow/block/requires_approval decisions, server-side tool execution adapters.
@@ -278,12 +278,12 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
   5. Gateway rejects proposal immediately with reason: *"Amount exceeds ceiling of 500.0"*.
   6. Proves complete mediation and credential containment.
 
-### Demo Scenario 3: Three-Company Tenant Isolation
-- **Context:** Three independent organizations: Company A (AlphaCorp), Company B (BetaDynamics), Company C (CyberGlobal).
+### Demo Scenario 3: Single-Company Multi-Branch Governance & Boundary Enforcement
+- **Context:** One Company (ChronoCongiSec Enterprise) operating across Head Office, Branch Lahore, and Branch Karachi, with strict boundary enforcement against unauthorized branch or cross-organization access.
 - **Storyline:**
-  1. User A logs in under AlphaCorp; User B logs in under BetaDynamics.
-  2. User A queries memory, agents, and audit events -> Sees only AlphaCorp records.
-  3. User A attempts to forge request header `X-Tenant-ID: <BetaDynamics-UUID>` -> Gateway immediately returns `HTTP 403 Forbidden: Access denied`.
+  1. User A logs in as Lahore Branch Analyst; User B logs in as Karachi Branch Analyst.
+  2. User A queries memory, agents, and branch records -> Sees only authorized Lahore Branch records and global company knowledge.
+  3. User A attempts to forge request header `X-Tenant-ID: <External-UUID>` or access unauthorized branch data -> Gateway immediately returns `HTTP 403 Forbidden: Access denied`.
   4. Automated isolation test suite asserts zero data bleed across all query filters, graph traversals, and cache lookups.
 
 ---

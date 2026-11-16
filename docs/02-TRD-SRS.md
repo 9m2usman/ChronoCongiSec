@@ -169,7 +169,7 @@ The frontend is structured as a high-density, multi-panel technical security wor
 
 ### 6.1 Layout Shell & Workspace Isolation
 - **Collapsible Global Sidebar:** Grouped navigation with real-time incident counters and route indicators.
-- **Top Navigation Bar:** Tenant switcher dropdown (Company A, B, C), W3C Trace context indicator, global search palette, theme toggle.
+- **Top Navigation Bar:** Active Company Indicator & Branch Selector (Head Office, Lahore, Karachi, Islamabad), W3C Trace context indicator, global search palette, theme toggle.
 - **Main Viewport:** High-density data tables, synchronized split timelines, and topological graph canvases.
 - **Contextual Inspector Drawer:** Slides out from the right margin upon selecting any table row, trace span, or graph node, exposing complete raw JSON payloads, cryptographic SHA-256 hashes, parent provenance trees, and authorized action triggers.
 
@@ -254,7 +254,17 @@ Where asynchronous background processing is required (e.g., deep graph re-indexi
 
 ---
 
-## 12. Multi-Tenant Architecture & Data Isolation
+## 12. Enterprise Company & Branch Architecture (Multi-Tenant Extensible)
+
+### 12.1 Single-Company Enterprise & Subordinate Branch Governance
+For the current MVP, AMSC is configured and deployed for **One Company / Organization** with regional branches:
+- **Head Office:** Central security governance, global policies, and cross-branch audit oversight.
+- **Regional Branches:** Branch Lahore, Branch Karachi, Branch Islamabad, and other operational units.
+- **Key Architecture Rules:**
+  1. A branch is **NOT a separate tenant**. Branches are subordinate organizational units within the same company.
+  2. The internal `tenant_id` represents the Company / Organization root boundary, preserving the capability to support multi-company SaaS in future phases without redesigning the schema.
+  3. Branch authorization is explicit: being in the same company does not grant implicit access to restricted branch-specific memory or records.
+  4. Only ONE company is seeded in the MVP environment.
 
 Multi-tenancy in AMSC is enforced through defense-in-depth across multiple application layers:
 

@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Dict, List, Optional
 
-from .models import MemoryRecord, MemoryVersion, ProvenanceEdge
+from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, SourceRecord, TrustState
 
 
 class MemoryRepository(ABC):
@@ -32,11 +32,15 @@ class MemoryRepository(ABC):
         tenant_id: str,
         agent_id: Optional[str] = None,
         trust_state: Optional[str] = None,
-        exclude_quarantined: bool = True,
+        only_trusted: bool = True,
         limit: int = 50,
         offset: int = 0,
     ) -> List[MemoryRecord]:
-        """Query memory records with optional filters, pagination, and strict tenant scoping."""
+        """Query memory records with optional filters, pagination, and strict tenant scoping.
+
+        When only_trusted=True (default for normal retrieval), only records with
+        trust_state == TRUSTED are returned.
+        """
         pass
 
     @abstractmethod
@@ -74,6 +78,26 @@ class MemoryRepository(ABC):
         """Fetch all provenance edges connecting to or from a record within tenant."""
         pass
 
+    @abstractmethod
+    def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        """Fetch an agent entity by ID within company/tenant boundary."""
+        pass
+
+    @abstractmethod
+    def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        """Persist an agent entity."""
+        pass
+
+    @abstractmethod
+    def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        """Fetch a knowledge source by ID within company/tenant boundary."""
+        pass
+
+    @abstractmethod
+    def create_source(self, source: SourceRecord) -> SourceRecord:
+        """Persist a knowledge source entity."""
+        pass
+
 
 class InMemoryMemoryRepository(MemoryRepository):
     """In-memory reference implementation of MemoryRepository for standalone operation and tests."""
@@ -88,6 +112,82 @@ class InMemoryMemoryRepository(MemoryRepository):
         self._versions: Dict[str, List[MemoryVersion]] = {}
         # Key: edge_id -> ProvenanceEdge
         self._edges: Dict[str, ProvenanceEdge] = {}
+        # Key: (agent_id, tenant_id) -> AgentRecord
+        self._agents: Dict[str, AgentRecord] = {}
+        # Key: (source_id, tenant_id) -> SourceRecord
+        self._sources: Dict[str, SourceRecord] = {}
+
+        self._seed_defaults()
+
+    def _seed_defaults(self) -> None:
+        """Seed canonical agents and sources for default organization and branches."""
+        # Canonical organization: tenant-a-uuid-001 (ChronoCongiSec Enterprise)
+        t_a = "tenant-a-uuid-001"
+        self.create_agent(
+            AgentRecord(
+                id="agent-001",
+                tenant_id=t_a,
+                name="Finance Bot",
+                status="ACTIVE",
+                branch_id="branch-lhr-002",
+            )
+        )
+        self.create_agent(
+            AgentRecord(
+                id="agent-head-office-001",
+                tenant_id=t_a,
+                name="Head Office Lead Bot",
+                status="ACTIVE",
+                branch_id="branch-ho-001",
+            )
+        )
+        self.create_agent(
+            AgentRecord(
+                id="agent-inactive-001",
+                tenant_id=t_a,
+                name="Deprecated Bot",
+                status="ISOLATED",
+                branch_id="branch-lhr-002",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-doc-001",
+                tenant_id=t_a,
+                name="Treasury Policy Memo",
+                source_type="DOCUMENT_FEED",
+                status="ACTIVE",
+                branch_id="branch-ho-001",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-inactive-001",
+                tenant_id=t_a,
+                name="Old Inactive Feed",
+                source_type="DOCUMENT_FEED",
+                status="INACTIVE",
+            )
+        )
+
+        # Secondary tenant for cross-company isolation tests
+        t_b = "tenant-b-uuid-002"
+        self.create_agent(
+            AgentRecord(
+                id="agent-b-001",
+                tenant_id=t_b,
+                name="External Agent",
+                status="ACTIVE",
+            )
+        )
+        self.create_source(
+            SourceRecord(
+                id="src-b-001",
+                tenant_id=t_b,
+                name="External Partner Source",
+                status="ACTIVE",
+            )
+        )
 
     def create_record(self, record: MemoryRecord) -> MemoryRecord:
         stored = deepcopy(record)
@@ -107,7 +207,7 @@ class InMemoryMemoryRepository(MemoryRepository):
         tenant_id: str,
         agent_id: Optional[str] = None,
         trust_state: Optional[str] = None,
-        exclude_quarantined: bool = True,
+        only_trusted: bool = True,
         limit: int = 50,
         offset: int = 0,
     ) -> List[MemoryRecord]:
@@ -120,9 +220,10 @@ class InMemoryMemoryRepository(MemoryRepository):
                 continue
             if agent_id is not None and rec.agent_id != agent_id:
                 continue
-            if trust_state is not None and rec.trust_state != trust_state:
+            # Enforce GAP-001: Normal retrieval must return ONLY eligible TRUSTED memory
+            if only_trusted and rec.trust_state != TrustState.TRUSTED.value:
                 continue
-            if exclude_quarantined and rec.trust_state in ("QUARANTINED", "REJECTED"):
+            if trust_state is not None and rec.trust_state != trust_state:
                 continue
             results.append(deepcopy(rec))
 
@@ -182,6 +283,28 @@ class InMemoryMemoryRepository(MemoryRepository):
             if edge.from_record_id == record_id or edge.to_record_id == record_id:
                 edges.append(deepcopy(edge))
         return edges
+
+    def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        key = f"{tenant_id}:{agent_id}"
+        agent = self._agents.get(key)
+        return deepcopy(agent) if agent else None
+
+    def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        stored = deepcopy(agent)
+        key = f"{stored.tenant_id}:{stored.id}"
+        self._agents[key] = stored
+        return deepcopy(stored)
+
+    def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        key = f"{tenant_id}:{source_id}"
+        src = self._sources.get(key)
+        return deepcopy(src) if src else None
+
+    def create_source(self, source: SourceRecord) -> SourceRecord:
+        stored = deepcopy(source)
+        key = f"{stored.tenant_id}:{stored.id}"
+        self._sources[key] = stored
+        return deepcopy(stored)
 
 
 # Global in-memory repository instance for runtime dependency injection
