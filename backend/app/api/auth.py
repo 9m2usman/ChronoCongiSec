@@ -9,6 +9,7 @@ Follows:
 - Master Implementation Specification: M1 Day 2 Authentication
 """
 
+import hashlib
 import re
 from typing import Annotated
 from fastapi import APIRouter, Depends, Request, status
@@ -29,12 +30,31 @@ from backend.app.core.exceptions import (
 )
 from backend.app.core.security import (
     create_access_token,
-    dummy_verify_password,
-    verify_password,
+    dummy_verify_password_async,
+    verify_password_async,
 )
 from backend.app.tenancy.context import TenantContext, UserRecord
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
+def get_client_ip(request: Request, settings: Settings) -> str:
+    """Extract client IP address with strict trusted proxy validation.
+
+    CRITICAL SECURITY REQUIREMENT:
+    Do NOT blindly trust X-Forwarded-For or other forwarded headers from arbitrary clients.
+    Forwarded headers are only evaluated when the direct connection originates from an
+    explicitly configured trusted proxy in settings.TRUSTED_PROXIES.
+    """
+    direct_ip = request.client.host if request.client else "127.0.0.1"
+    if settings.TRUSTED_PROXIES and direct_ip in settings.TRUSTED_PROXIES:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            for part in forwarded.split(","):
+                ip = part.strip()
+                if ip:
+                    return ip
+    return direct_ip
 
 
 # ============================================================================
@@ -143,8 +163,8 @@ async def login(
     normalized_email = body.email.strip().lower()
     normalized_slug = body.tenant_slug.strip().lower()
 
-    # Rate Limiting: 1. Source IP throttling
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    # Rate Limiting: 1. Source IP throttling with trusted proxy validation
+    client_ip = get_client_ip(request, settings)
     try:
         ip_check = await rate_limiter.check_rate_limit(
             key=f"login:ip:{client_ip}",
@@ -163,9 +183,14 @@ async def login(
         )
 
     # Rate Limiting: 2. Target account throttling
+    # Uses hashed identifier scoped to the client IP to prevent an attacker from exhausting
+    # another user's login allowance (DoS mitigation) while protecting against credential guessing
+    # and preventing raw PII leakage in Redis keys.
+    account_hash = hashlib.sha256(f"{normalized_email}:{normalized_slug}".encode("utf-8")).hexdigest()[:16]
+    account_key = f"login:account:{client_ip}:{account_hash}"
     try:
         acct_check = await rate_limiter.check_rate_limit(
-            key=f"login:account:{normalized_email}",
+            key=account_key,
             max_requests=settings.LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS,
             window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
         )
@@ -187,11 +212,17 @@ async def login(
         raise SecurityDependencyError("Security verification database is unavailable.") from exc
 
     if not user:
-        dummy_verify_password()
+        await dummy_verify_password_async(
+            max_concurrency=settings.AUTH_MAX_CONCURRENT_VERIFICATIONS
+        )
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
-    # Step 2: Password verification
-    is_valid_pw = verify_password(body.password, user.hashed_password)
+    # Step 2: Password verification (bounded async thread pool to keep event loop responsive)
+    is_valid_pw = await verify_password_async(
+        body.password,
+        user.hashed_password,
+        max_concurrency=settings.AUTH_MAX_CONCURRENT_VERIFICATIONS,
+    )
     if not is_valid_pw:
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
@@ -208,13 +239,16 @@ async def login(
     if not tenant or tenant.status != "ACTIVE":
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
-    # Step 5: Membership & Role verification
+    # Step 5: Membership & Role verification (guarantee membership is ACTIVE and not revoked/suspended)
     try:
         membership = await repo.get_membership(user.id, tenant.id)
     except Exception as exc:
         raise SecurityDependencyError("Security verification database is unavailable.") from exc
 
     if not membership:
+        raise AuthenticationError("Invalid email, password, or tenant access.")
+
+    if getattr(membership, "status", None) != "ACTIVE":
         raise AuthenticationError("Invalid email, password, or tenant access.")
 
     # Step 6: Issue signed JWT scoped to authorized tenant

@@ -9,6 +9,8 @@ Follows:
 - Master Implementation Specification: M1 Day 2 Authentication Baseline
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -44,6 +46,31 @@ _password_hasher = PasswordHasher(
 
 # Pre-computed dummy hash for timing-attack mitigation when user is not found
 _DUMMY_ARGON2_HASH = _password_hasher.hash("amsc-timing-mitigation-dummy-password")
+
+# Dedicated bounded thread pool for Argon2 operations to keep event loop responsive
+# Bounded to 4 worker threads to prevent thread explosion under attack
+_AUTH_WORKER_COUNT = 4
+_auth_thread_pool: Optional[ThreadPoolExecutor] = None
+_auth_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def get_auth_executor() -> ThreadPoolExecutor:
+    """Return dedicated singleton ThreadPoolExecutor for Argon2 operations."""
+    global _auth_thread_pool
+    if _auth_thread_pool is None:
+        _auth_thread_pool = ThreadPoolExecutor(
+            max_workers=_AUTH_WORKER_COUNT,
+            thread_name_prefix="amsc-argon2",
+        )
+    return _auth_thread_pool
+
+
+def get_auth_semaphore(max_concurrency: int = 8) -> asyncio.Semaphore:
+    """Return singleton semaphore bounding concurrent Argon2 operations."""
+    global _auth_semaphore
+    if _auth_semaphore is None:
+        _auth_semaphore = asyncio.Semaphore(max_concurrency)
+    return _auth_semaphore
 
 
 # ============================================================================
@@ -86,6 +113,47 @@ def dummy_verify_password() -> None:
         pass
 
 
+async def verify_password_async(
+    plain_password: str,
+    hashed_password: str,
+    max_concurrency: int = 8,
+) -> bool:
+    """Verify a password against Argon2id hash off the event loop with bounded concurrency.
+
+    Offloads CPU/memory-intensive Argon2id operations to a dedicated bounded thread pool
+    so the asyncio event loop remains responsive.
+    """
+    if not plain_password or not hashed_password:
+        return False
+    if not hashed_password.startswith("$argon2"):
+        return False
+
+    sem = get_auth_semaphore(max_concurrency)
+    executor = get_auth_executor()
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with sem:
+            return await loop.run_in_executor(
+                executor, verify_password, plain_password, hashed_password
+            )
+    except Exception:
+        return False
+
+
+async def dummy_verify_password_async(max_concurrency: int = 8) -> None:
+    """Perform dummy Argon2id verification off event loop to equalize response timing."""
+    sem = get_auth_semaphore(max_concurrency)
+    executor = get_auth_executor()
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with sem:
+            await loop.run_in_executor(executor, dummy_verify_password)
+    except Exception:
+        pass
+
+
 def needs_rehash(hashed_password: str) -> bool:
     """Check if the stored hash requires rehashing due to parameter updates."""
     try:
@@ -96,6 +164,27 @@ def needs_rehash(hashed_password: str) -> bool:
 
 # ============================================================================
 # 2. JWT Generation & Verification (HS256)
+# ============================================================================
+#
+# Production Lifecycle & Revocation Architecture Note:
+# ----------------------------------------------------
+# 1. Unique Token Identifier (jti):
+#    Every access token generated below contains a cryptographically unique
+#    UUIDv4 'jti' claim. However, the presence of a 'jti' claim alone does NOT
+#    provide revocation. Revocation requires an active, stateful check against
+#    a revocation registry (such as an M7 distributed Redis blocklist with TTL
+#    equal to the remaining token lifetime, or an M6 database session table).
+#    Until an external revocation store is wired into the token validation path,
+#    token invalidation relies strictly on short expiration windows (exp).
+#
+# 2. Key Rotation Requirements:
+#    In the current baseline, tokens are signed using a symmetric secret key
+#    (JWT_SECRET). For production key rotation:
+#    - Introduce a key identifier ('kid') in the JWT header.
+#    - Maintain a keyring supporting the current active signing key and previous
+#      valid keys for graceful verification during rotation periods.
+#    - Implement an emergency key revocation and rollover runbook to revoke all
+#      tokens signed with a compromised secret key.
 # ============================================================================
 
 def create_access_token(

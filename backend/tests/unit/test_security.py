@@ -296,3 +296,95 @@ def test_jwt_secret_too_short_rejected_at_startup():
             JWT_SECRET="short-secret-under-32-chars",
         )
     assert "JWT_SECRET must be at least 32 characters" in str(exc.value)
+
+
+# ============================================================================
+# 3. Async Bounded Password Verification Tests (M1 Day 2 Performance)
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_verify_password_async_success():
+    """Verify asynchronous password verification succeeds for valid password."""
+    from backend.app.core.security import verify_password_async
+
+    plain = "SuperSecurePassword123!"
+    hashed = hash_password(plain)
+
+    result = await verify_password_async(plain, hashed)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_verify_password_async_failure():
+    """Verify asynchronous password verification returns False for invalid password."""
+    from backend.app.core.security import verify_password_async
+
+    plain = "SuperSecurePassword123!"
+    hashed = hash_password(plain)
+
+    result = await verify_password_async("WrongPassword999!", hashed)
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_verify_password_async_safe_on_malformed_hash():
+    """Verify asynchronous verification fails safely on malformed or empty hashes."""
+    from backend.app.core.security import verify_password_async
+
+    assert await verify_password_async("password", "") is False
+    assert await verify_password_async("", "$argon2id$fake") is False
+    assert await verify_password_async("password", "plain-sha256-hash") is False
+    assert await verify_password_async("password", "$argon2id$invalid$structure") is False
+
+
+@pytest.mark.asyncio
+async def test_dummy_verify_password_async_executes():
+    """Verify async dummy verification executes cleanly off event loop."""
+    from backend.app.core.security import dummy_verify_password_async
+
+    await dummy_verify_password_async()
+
+
+# ============================================================================
+# 4. Sensitive Data Redaction Regression Tests (M1 Day 1 Logging)
+# ============================================================================
+
+def test_sensitive_data_redactor_scrubs_passwords_with_spaces():
+    """Verify passwords containing spaces inside quotes are properly redacted."""
+    from backend.app.core.logging import SensitiveDataFilter
+
+    log_msg = 'Received payload {"email": "user@example.com", "password": "my secret password with spaces"}'
+    redacted = SensitiveDataFilter.redact(log_msg)
+
+    assert "my secret password with spaces" not in redacted
+    assert '"password": "[REDACTED]"' in redacted
+
+
+def test_sensitive_data_redactor_scrubs_connection_uris():
+    """Verify database and Redis URIs with credentials are redacted."""
+    from backend.app.core.logging import SensitiveDataFilter
+
+    pg_log = "Connected to postgresql+asyncpg://db_admin:SecretPass123!@db.internal:5432/amsc_db"
+    redacted_pg = SensitiveDataFilter.redact(pg_log)
+    assert "SecretPass123!" not in redacted_pg
+    assert "postgresql+asyncpg://db_admin:[REDACTED]@db.internal:5432/amsc_db" in redacted_pg
+
+    redis_log = "Connected to redis://:SuperSecretRedisPass@cache.internal:6379/0"
+    redacted_redis = SensitiveDataFilter.redact(redis_log)
+    assert "SuperSecretRedisPass" not in redacted_redis
+    assert "redis://:[REDACTED]@cache.internal:6379/0" in redacted_redis
+
+
+def test_sensitive_data_redactor_scrubs_jwt_and_bearer_tokens():
+    """Verify Bearer tokens and generic JWT strings are redacted from logs."""
+    from backend.app.core.logging import SensitiveDataFilter
+
+    jwt_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+    log_jwt = f"User token: {jwt_token}"
+    redacted_jwt = SensitiveDataFilter.redact(log_jwt)
+    assert jwt_token not in redacted_jwt
+    assert "[JWT_REDACTED]" in redacted_jwt
+
+    bearer_log = "Header: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    redacted_bearer = SensitiveDataFilter.redact(bearer_log)
+    assert "Bearer [REDACTED]" in redacted_bearer

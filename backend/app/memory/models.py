@@ -5,8 +5,12 @@ Matches database schema in Document 05 (Section 3.3 Knowledge, Memory & Provenan
 
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+SHA256_HEX_REGEX = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class RecordType(str, Enum):
@@ -35,15 +39,15 @@ class ProvenanceRelationType(str, Enum):
 
 class MemoryRecord(BaseModel):
     """Memory record entity matching Document 05 Table 11 (memory_records)."""
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
     id: str
     tenant_id: str
     agent_id: Optional[str] = None
     source_id: Optional[str] = None
-    record_type: str = "KNOWLEDGE"
-    trust_state: str = TrustState.UNVERIFIED.value
-    current_version: int = 1
+    record_type: RecordType = RecordType.KNOWLEDGE
+    trust_state: TrustState = TrustState.UNVERIFIED
+    current_version: int = Field(default=1, ge=1)
     created_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -59,23 +63,30 @@ class MemoryVersion(BaseModel):
     id: str
     tenant_id: str
     record_id: str
-    version: int
+    version: int = Field(..., ge=1)
     content: str
     checksum: str
     created_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
+    @field_validator("checksum")
+    @classmethod
+    def validate_checksum(cls, v: str) -> str:
+        if not isinstance(v, str) or not SHA256_HEX_REGEX.match(v):
+            raise ValueError("Checksum must be a 64-character hexadecimal SHA-256 string.")
+        return v
+
 
 class ProvenanceEdge(BaseModel):
     """Provenance edge entity matching Document 05 Table 14 (provenance_edges)."""
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
     id: str
     tenant_id: str
     from_record_id: str
     to_record_id: str
-    relation_type: str = ProvenanceRelationType.DERIVED_FROM.value
+    relation_type: ProvenanceRelationType = ProvenanceRelationType.DERIVED_FROM
     created_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -123,19 +134,27 @@ class MemoryIngestRequest(BaseModel):
 
 class MemoryRecordResponse(BaseModel):
     """Response item for memory record query."""
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
 
     id: str
     tenant_id: str
     agent_id: Optional[str] = None
     source_id: Optional[str] = None
-    record_type: str = "KNOWLEDGE"
-    trust_state: str = TrustState.UNVERIFIED.value
-    current_version: int = 1
+    record_type: RecordType = RecordType.KNOWLEDGE
+    trust_state: TrustState = TrustState.UNVERIFIED
+    current_version: int = Field(default=1, ge=1)
     checksum: Optional[str] = None
     content: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @field_validator("checksum")
+    @classmethod
+    def validate_checksum(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            if not isinstance(v, str) or not SHA256_HEX_REGEX.match(v):
+                raise ValueError("Checksum must be a 64-character hexadecimal SHA-256 string.")
+        return v
 
 
 class MemoryDetailResponse(BaseModel):

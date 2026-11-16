@@ -17,16 +17,18 @@ from typing import Optional
 SENSITIVE_PATTERNS = [
     # Authorization header / Bearer token
     (re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.]{10,}", re.IGNORECASE), r"\1[REDACTED]"),
-    # JWT tokens in general
+    # General Authorization and API Key headers in key-value or JSON structures
+    (re.compile(r"((?:authorization|x-api-key)['\"]?\s*[:=]\s*['\"]?)(?:Bearer\s+)?[^\s,'\"]+(['\"]?)", re.IGNORECASE), r"\1[REDACTED]\2"),
+    # JWT tokens in general (header.payload.signature)
     (re.compile(r"ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]+"), r"[JWT_REDACTED]"),
-    # Database and cache connection URIs with embedded credentials (e.g., postgresql://user:pass@host)
-    (re.compile(r"(://[^:\s]+:)([^@\s]+)(@)"), r"\1[REDACTED]\3"),
-    # Password parameters / fields in JSON, query strings, or key-value pairs
-    (re.compile(r"(password['\"]?\s*[:=]\s*['\"])[^'\",\s]+(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
+    # Database and cache connection URIs with embedded credentials (e.g., postgresql+asyncpg://user:pass@host, redis://:pass@host)
+    (re.compile(r"([a-zA-Z0-9\+\.\-]+://(?:[^:\s]*:))([^@\s]+)(@)"), r"\1[REDACTED]\3"),
+    # Password parameters / fields in JSON, query strings, or key-value pairs (including passwords with spaces inside quotes)
+    (re.compile(r"((?:password|passwd|hashed_password|current_password|new_password|client_secret|secret_key)['\"]?\s*[:=]\s*['\"])[^'\"]*(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
     # Query / URL parameters with passwords, tokens, or keys
-    (re.compile(r"((?:token|secret|password|api[_-]?key)=)[^&\s]+", re.IGNORECASE), r"\1[REDACTED]"),
+    (re.compile(r"((?:token|secret|password|passwd|api[_-]?key|client[_-]?secret)=)[^&\s]+", re.IGNORECASE), r"\1[REDACTED]"),
     # Secret keys / tokens / private keys
-    (re.compile(r"((?:api[_-]?key|secret|token|private_key)['\"]?\s*[:=]\s*['\"])[^'\",\s]+(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
+    (re.compile(r"((?:api[_-]?key|secret|token|private_key)['\"]?\s*[:=]\s*['\"])[^'\"]*(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
 ]
 
 
@@ -42,7 +44,7 @@ class SensitiveDataFilter(logging.Filter):
                     k: (self.redact(v) if isinstance(v, str) else v)
                     for k, v in record.args.items()
                 }
-            elif isinstance(record.args, tuple):
+            elif isinstance(record.args, (tuple, list)):
                 record.args = tuple(
                     (self.redact(arg) if isinstance(arg, str) else arg)
                     for arg in record.args

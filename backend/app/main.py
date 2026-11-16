@@ -210,5 +210,9 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
+    from backend.app.core.config import get_settings
 
-    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=True)
+    settings = get_settings()
+    # Reload behavior is explicitly development-only; production never runs with reload=True
+    is_dev = settings.APP_ENV == "development"
+    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=is_dev)
