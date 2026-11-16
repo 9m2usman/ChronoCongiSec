@@ -434,7 +434,7 @@ AMSC application:
 Important distinction:
 - AMSC is a memory integrity and action-governance control plane. It cannot guarantee that an underlying LLM never hallucinates. It can preserve evidence, detect certain inconsistencies, require verification and block actions whose required evidence is missing.
 
-### 6.6 Memory consolidation, evidence assembly and hallucination attribution
+### 6.5 Memory consolidation, evidence assembly and hallucination attribution
 
 **TrustMem: Learning Trustworthy Memory Consolidation for LLM Agents with Long-Term Memory** — Findings of EMNLP 2026, peer-reviewed conference findings paper.
 
@@ -476,7 +476,7 @@ AMSC application:
 - Treat model-generated attribution as an investigative hypothesis. Correlate it with immutable spans, actual memory versions, policy decisions and independently observed tool effects.
 - Do not use automated attribution as a standalone verdict or authorization input.
 
-### 6.7 Tool execution and agent security
+### 6.6 Tool execution and agent security
 
 **AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents** — NeurIPS 2024.
 
@@ -518,6 +518,24 @@ AMSC application:
 
 Caution:
 - Paper-reported benchmark results are not universal. Sandbox isolation must be independently verified and cannot guarantee containment of every side effect.
+
+**MCP-Secure: A Runtime Access Control Layer for Privilege-Aware LLM Agent Tooling** — IEEE Open Journal of the Computer Society, 2026.
+
+Source: https://doi.org/10.1109/OJCS.2026.3664314
+
+Relevance:
+- Evaluates a runtime access-control wrapper that mediates tool invocations, tracks session-level permissions and supports read-only modes and approval-gated privilege elevation.
+- The paper reports 1,080 executions across multiple models, tasks and adversarial simulations.
+
+AMSC application:
+- Consider a session-scoped privilege state machine for agent tool capabilities.
+- Make read-only the initial/default tool privilege where possible; require explicit policy authorization for mutation and separately approved privilege elevation.
+- Bind each decision to the agent identity, tenant, delegated principal, tool, operation, resource and current session.
+- Re-evaluate permission at each tool call rather than assuming that a prior approval grants permanent authority.
+- Measure benign completion and false blocks as privilege scopes tighten.
+
+Caution:
+- The paper's benchmark and reported results are not a universal guarantee. AMSC must reproduce relevant scenarios using its own adapters and independent state-based outcome checks.
 
 **Runtime Policy Enforcement for MCP-Based LLM Agents** — Electronics, 2026.
 
@@ -789,14 +807,16 @@ The following sources are the initial selected register. The team must update st
 | R-022 | TrustMem: Learning Trustworthy Memory Consolidation, Findings of EMNLP 2026 | Peer-reviewed findings paper | Transition-level coverage, preservation and faithfulness checks |
 | R-023 | MemBook: A Hierarchical Reasoning-based Memory Framework, Findings of EMNLP 2026 | Peer-reviewed findings paper | Hierarchical temporal/logical memory retrieval; evaluate as optional retrieval layer |
 | R-024 | AgentHallu: Benchmarking Automated Hallucination Attribution, EMNLP 2026 | Peer-reviewed main-conference paper | Candidate attribution of hallucination origins across agent trajectories |
+| R-026 | MCP-Secure: A Runtime Access Control Layer for Privilege-Aware LLM Agent Tooling, IEEE OJCS 2026 | Peer-reviewed journal paper | Session-scoped privileges, read-only defaults and approval-gated elevation |
 
 ### Standards and implementation guidance
 
-- OWASP Top 10 for Agentic Applications 2026: https://owasp.org/www-project-top-10-for-large-language-model-applications/
+- OWASP Top 10 for Agentic Applications 2026: https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/
 - OWASP AI Agent Security Cheat Sheet: https://cheatsheetseries.owasp.org/
 - OWASP ASVS: https://owasp.org/www-project-application-security-verification-standard/
 - IETF RFC 8725 (JWT Best Current Practices): https://www.rfc-editor.org/rfc/rfc8725
 - NIST SP 800-207 (Zero Trust Architecture): https://csrc.nist.gov/pubs/sp/800/207/final
+- NIST NCCoE concept paper on software-agent identity and authorization (emerging guidance, not a finalized standard): https://www.nist.gov/news-events/news/2026/02/new-concept-paper-identity-and-authority-software-agents
 - OpenTelemetry GenAI semantic conventions: https://opentelemetry.io/docs/specs/semconv/gen-ai/
 
 ## 14. Research governance: how this document stays useful
