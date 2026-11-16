@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         f"Starting {settings.APP_NAME} v{settings.APP_VERSION} [{settings.APP_ENV}]"
     )
 
-    # Production startup validation: Enforce real database repository and Redis rate limiter configuration
+    # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
         auth_repo = getattr(app.state, "auth_repo", None)
         if auth_repo is None or getattr(auth_repo, "is_demo", False):
@@ -107,6 +107,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError(
                 "Production startup failure: Redis-backed rate limiter is not configured. "
                 "In-memory rate limiting is strictly forbidden in production."
+            )
+
+        memory_repo = getattr(app.state, "memory_repo", None)
+        if (
+            memory_repo is None
+            or getattr(memory_repo, "is_in_memory", True)
+            or not getattr(memory_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database memory repository from M6 is not configured. "
+                "In-memory memory repository is strictly forbidden in production."
             )
 
     yield
@@ -136,6 +147,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.rate_limiter = InMemoryRateLimiter()
     else:
         app.state.rate_limiter = None
+
+    # Memory repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.memory.repository import get_default_repository
+        app.state.memory_repo = get_default_repository()
+    else:
+        app.state.memory_repo = None
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)

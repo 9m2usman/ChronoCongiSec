@@ -4,14 +4,15 @@ Module: backend.app.api.memory
 Owner: M3 — Knowledge & Memory Systems Lead
 
 Implements Document 05 Section 5.1 Route Catalog:
-- GET  /api/v1/memory      (Query memory records)
+- GET  /api/v1/memory      (Query memory records with pagination & strict quarantine exclusion)
 - POST /api/v1/memory      (Ingest knowledge chunk & hash)
 - GET  /api/v1/memory/{id} (Get memory detail, versions & provenance)
 
 Security & Governance:
 - Authenticated Tenant Context: Verified via M1's `get_tenant_context` dependency.
-- Zero Information Leakage: Never returns raw tracebacks, internal database errors, or file paths.
-- Quarantine Exclusion: Quarantined records excluded by default for agent safety.
+- Mandatory Quarantine Exclusion: Standard agent retrieval strictly excludes QUARANTINED and REJECTED states.
+- Bound Pagination: TRD §22 pagination limits enforced (default 50, maximum 100).
+- Production Safety: Rejects in-memory repository fallbacks in production.
 - Cryptographic Integrity: SHA-256 verified on retrieval and detail endpoints.
 """
 
@@ -19,8 +20,9 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
 
+from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
-from backend.app.core.exceptions import NotFoundError, ValidationError
+from backend.app.core.exceptions import ForbiddenError, NotFoundError, SecurityDependencyError, ValidationError
 from backend.app.memory.models import (
     MemoryDetailResponse,
     MemoryIngestRequest,
@@ -54,7 +56,14 @@ async def get_memory_tenant_id(
 
 async def get_repository(request: Request) -> MemoryRepository:
     """Dependency provider for MemoryRepository."""
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     repo = getattr(request.app.state, "memory_repo", None)
+
+    if settings.APP_ENV == "production":
+        if repo is None or getattr(repo, "is_in_memory", True) or not getattr(repo, "is_persistent", False):
+            raise SecurityDependencyError("Production database memory repository is not configured.")
+        return repo
+
     if repo is not None:
         return repo
     return get_default_repository()
@@ -112,23 +121,26 @@ async def api_ingest_memory(
 async def api_query_memory(
     agent_id: Optional[str] = Query(None, description="Filter by agent identifier"),
     trust_state: Optional[str] = Query(None, description="Filter by trust state"),
-    exclude_quarantined: bool = Query(
-        True, description="Exclude QUARANTINED records from retrieval"
-    ),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of records to return (1-100, default 50)"),
+    offset: int = Query(0, ge=0, description="Number of records to skip (default 0)"),
     tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> List[MemoryRecordResponse]:
-    """Query memory records with optional filters.
+    """Query memory records with mandatory quarantine filtering and bounded pagination.
 
-    Matches Document 05 Section 5.1 Route Catalog.
-    Quarantined records are excluded by default for agent safety (Doc 02 §13).
-    Stored checksums are cryptographically re-verified.
+    Matches Document 05 Section 5.1 Route Catalog and TRD §22 pagination rules.
+    Quarantined and rejected records are unconditionally excluded from normal agent retrieval.
     """
+    if trust_state and trust_state.upper() in ("QUARANTINED", "REJECTED"):
+        raise ForbiddenError("Access to quarantined or rejected memory states is restricted.")
+
     records = retrieve_memory(
         tenant_id=tenant_id,
         agent_id=agent_id,
         trust_state=trust_state,
-        exclude_quarantined=exclude_quarantined,
+        exclude_quarantined=True,
+        limit=limit,
+        offset=offset,
         repository=repo,
     )
 
@@ -166,10 +178,13 @@ async def api_get_memory_detail(
 ) -> MemoryDetailResponse:
     """Fetch complete memory detail including full revision history and provenance lineage.
 
-    Matches Document 05 Section 5.1 Route Catalog.
+    Quarantined and rejected records are strictly hidden from standard agent access.
     """
     record, versions, provenance = get_memory_detail(
-        tenant_id=tenant_id, record_id=id, repository=repo
+        tenant_id=tenant_id,
+        record_id=id,
+        allow_quarantined=False,
+        repository=repo,
     )
 
     return MemoryDetailResponse(

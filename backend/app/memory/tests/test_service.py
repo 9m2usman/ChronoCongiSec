@@ -12,8 +12,14 @@ if str(repo_root) not in sys.path:
 from backend.app.core.exceptions import ValidationError
 from backend.app.memory.hashing import sha256_hex
 from backend.app.memory.models import TrustState
-from backend.app.memory.repository import InMemoryMemoryRepository, get_default_repository
+from backend.app.memory.repository import (
+    InMemoryMemoryRepository,
+    MemoryRepository,
+    get_default_repository,
+)
 from backend.app.memory.service import (
+    MAX_PROVENANCE_DEPTH,
+    MAX_TRAVERSAL_BUDGET,
     InvalidProvenanceError,
     MemoryIntegrityError,
     MemoryNotFoundError,
@@ -157,29 +163,39 @@ def test_tampered_checksum_detected_on_retrieval(repo):
         get_memory_detail(tenant_id=tenant_id, record_id=record.id, repository=repo)
 
 
-def test_quarantined_records_excluded_by_default(repo):
-    """QUARANTINED records must be excluded when exclude_quarantined=True, but retrievable when False."""
+def test_quarantined_and_rejected_records_excluded_from_normal_retrieval_and_detail(repo):
+    """QUARANTINED and REJECTED records must be strictly excluded from normal retrieval and detail."""
     tenant_id = "tenant-alpha"
 
     # Ingest clean record 1
     rec1, _ = ingest_memory(tenant_id=tenant_id, content="Legitimate vendor profile.", repository=repo)
 
-    # Ingest record 2 and simulate quarantine state (as applied by M4 Quarantine Engine)
+    # Ingest record 2 and simulate QUARANTINED state (as applied by M4 Quarantine Engine)
     rec2, _ = ingest_memory(tenant_id=tenant_id, content="Suspicious prompt injection payload.", repository=repo)
-    rec2_obj = repo._records[rec2.id]
-    rec2_obj.trust_state = "QUARANTINED"
+    repo._records[rec2.id].trust_state = "QUARANTINED"
 
-    # By default, exclude_quarantined=True -> only rec1 returned
+    # Ingest record 3 and simulate REJECTED state
+    rec3, _ = ingest_memory(tenant_id=tenant_id, content="Malicious rejected payload.", repository=repo)
+    repo._records[rec3.id].trust_state = "REJECTED"
+
+    # Normal agent retrieval strictly excludes quarantined and rejected records
     active_records = retrieve_memory(tenant_id=tenant_id, exclude_quarantined=True, repository=repo)
     active_ids = [r.id for r in active_records]
     assert rec1.id in active_ids
     assert rec2.id not in active_ids
+    assert rec3.id not in active_ids
 
-    # When exclude_quarantined=False (e.g., forensic view in Security Center) -> both returned
-    all_records = retrieve_memory(tenant_id=tenant_id, exclude_quarantined=False, repository=repo)
-    all_ids = [r.id for r in all_records]
-    assert rec1.id in all_ids
-    assert rec2.id in all_ids
+    # get_memory_detail for normal agent access (allow_quarantined=False) must raise MemoryNotFoundError (404)
+    with pytest.raises(MemoryNotFoundError):
+        get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, allow_quarantined=False, repository=repo)
+
+    with pytest.raises(MemoryNotFoundError):
+        get_memory_detail(tenant_id=tenant_id, record_id=rec3.id, allow_quarantined=False, repository=repo)
+
+    # Forensic access (allow_quarantined=True) by authorized security analysts permits detail inspection
+    detail_rec, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec2.id, allow_quarantined=True, repository=repo)
+    assert detail_rec.id == rec2.id
+    assert detail_rec.trust_state == "QUARANTINED"
 
 
 def test_tenant_isolation_cannot_read_other_tenant_records(repo):
@@ -261,10 +277,122 @@ def test_empty_content_rejected(repo):
         ingest_memory(tenant_id=tenant_id, content="   \n\t  ", repository=repo)
 
 
-def test_production_rejects_in_memory_repository(monkeypatch):
-    """In production environment, accessing default in-memory repository must raise RuntimeError."""
+# ============================================================================
+# Provenance DAG Traversal & Boundary Tests (Finding 4)
+# ============================================================================
+
+def test_provenance_normal_graph(repo):
+    """Normal provenance hierarchy within depth limit succeeds."""
+    tenant_id = "tenant-alpha"
+
+    # Chain of depth 3: doc0 -> doc1 -> doc2
+    doc0, _ = ingest_memory(tenant_id=tenant_id, content="Root source document.", repository=repo)
+    doc1, _ = ingest_memory(tenant_id=tenant_id, content="Intermediate extraction.", parent_record_id=doc0.id, repository=repo)
+    doc2, _ = ingest_memory(tenant_id=tenant_id, content="Final synthesis summary.", parent_record_id=doc1.id, repository=repo)
+
+    edges = repo.get_edges_for_record(doc2.id, tenant_id)
+    assert len(edges) == 1
+    assert edges[0].from_record_id == doc1.id
+    assert edges[0].to_record_id == doc2.id
+
+
+def test_provenance_cyclic_graph_rejected(repo):
+    """Direct and indirect cycle creation must be detected and rejected."""
+    tenant_id = "tenant-alpha"
+
+    docA, _ = ingest_memory(tenant_id=tenant_id, content="Node A", repository=repo)
+    docB, _ = ingest_memory(tenant_id=tenant_id, content="Node B", parent_record_id=docA.id, repository=repo)
+
+    # Attempting to link A to derive from B creates A -> B -> A cycle
+    from backend.app.memory.service import _check_dag_cycle
+    with pytest.raises(InvalidProvenanceError) as exc_info:
+        _check_dag_cycle(repo, from_id=docB.id, to_id=docA.id, tenant_id=tenant_id)
+
+    assert "Provenance cycle detected" in str(exc_info.value)
+
+
+def test_provenance_graph_deeper_than_permitted_depth_rejected(repo):
+    """Lineage chains exceeding MAX_PROVENANCE_DEPTH (5) must be rejected."""
+    tenant_id = "tenant-alpha"
+
+    # Build chain: d1 -> d2 -> d3 -> d4 -> d5 (depth 5 is allowed)
+    prev, _ = ingest_memory(tenant_id=tenant_id, content="Root 1", repository=repo)
+    for i in range(2, 6):
+        prev, _ = ingest_memory(
+            tenant_id=tenant_id,
+            content=f"Descendant {i}",
+            parent_record_id=prev.id,
+            repository=repo,
+        )
+
+    # Attempting to add 6th level exceeds MAX_PROVENANCE_DEPTH (5)
+    with pytest.raises(InvalidProvenanceError) as exc_info:
+        ingest_memory(
+            tenant_id=tenant_id,
+            content="Descendant 6 (exceeds depth limit)",
+            parent_record_id=prev.id,
+            repository=repo,
+        )
+
+    assert "depth limit exceeded" in str(exc_info.value)
+
+
+def test_provenance_large_graph_exceeding_budget_rejected(repo):
+    """Traversals exceeding MAX_TRAVERSAL_BUDGET must fail safely."""
+    tenant_id = "tenant-alpha"
+
+    # Pre-populate repository with wide branching tree exceeding budget
+    from backend.app.memory.models import MemoryRecord, ProvenanceEdge
+    import uuid
+
+    root_id = "root-node"
+    repo.create_record(MemoryRecord(id=root_id, tenant_id=tenant_id, trust_state="UNVERIFIED"))
+
+    # Create 55 outgoing edges from root
+    for i in range(55):
+        child_id = f"child-{i}"
+        repo.create_record(MemoryRecord(id=child_id, tenant_id=tenant_id, trust_state="UNVERIFIED"))
+        repo.create_edge(
+            ProvenanceEdge(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                from_record_id=root_id,
+                to_record_id=child_id,
+            )
+        )
+
+    from backend.app.memory.service import _check_dag_cycle
+    with pytest.raises(InvalidProvenanceError) as exc_info:
+        _check_dag_cycle(repo, from_id="new-parent", to_id=root_id, tenant_id=tenant_id)
+
+    assert "budget exceeded" in str(exc_info.value)
+
+
+# ============================================================================
+# Production Persistence Validation Tests (Finding 2)
+# ============================================================================
+
+class MockPersistentMemoryRepository(MemoryRepository):
+    """Mock repository representing an approved persistent M6 PostgreSQL repository."""
+    is_persistent: bool = True
+    is_in_memory: bool = False
+
+    def create_record(self, record): return record
+    def get_record(self, record_id, tenant_id): return None
+    def list_records(self, tenant_id, agent_id=None, trust_state=None, exclude_quarantined=True, limit=50, offset=0): return []
+    def update_record(self, record): return record
+    def create_version(self, version): return version
+    def get_versions(self, record_id, tenant_id): return []
+    def get_version(self, record_id, version, tenant_id): return None
+    def get_latest_version(self, record_id, tenant_id): return None
+    def create_edge(self, edge): return edge
+    def get_edges_for_record(self, record_id, tenant_id): return []
+
+
+def test_production_rejects_missing_memory_repository(monkeypatch):
+    """In production, application startup must fail if memory_repo is missing."""
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("JWT_SECRET", "a_super_secret_key_that_is_long_enough_32_chars_prod")
+    monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@db.prod.internal:5432/amsc")
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
@@ -273,10 +401,88 @@ def test_production_rejects_in_memory_repository(monkeypatch):
     monkeypatch.setenv("RATE_LIMITER_BACKEND", "redis")
 
     from backend.app.core.config import get_settings
+    from backend.app.main import create_app
     get_settings.cache_clear()
+
+    settings = get_settings()
+    app = create_app(settings)
+    app.state.auth_repo = object()  # Mock real auth repo
+    app.state.rate_limiter = object()  # Mock real rate limiter
+    app.state.memory_repo = None  # Missing memory repo
+
+    from fastapi.testclient import TestClient
 
     with pytest.raises(RuntimeError) as exc_info:
-        get_default_repository()
+        with TestClient(app):
+            pass
 
-    assert "In-memory memory repository fallback is prohibited in production" in str(exc_info.value)
+    assert "Persistent database memory repository from M6 is not configured" in str(exc_info.value)
     get_settings.cache_clear()
+
+
+def test_production_rejects_in_memory_memory_repository(monkeypatch):
+    """In production, application startup must fail if memory_repo is an in-memory repository."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@db.prod.internal:5432/amsc")
+    monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
+    monkeypatch.setenv("AUTH_BACKEND", "database")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_RATE_LIMITER", "false")
+    monkeypatch.setenv("RATE_LIMITER_BACKEND", "redis")
+
+    from backend.app.core.config import get_settings
+    from backend.app.main import create_app
+    from fastapi.testclient import TestClient
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    app = create_app(settings)
+    app.state.auth_repo = object()
+    app.state.rate_limiter = object()
+    app.state.memory_repo = InMemoryMemoryRepository()  # In-memory repo explicitly attached
+
+    with pytest.raises(RuntimeError) as exc_info:
+        with TestClient(app):
+            pass
+
+    assert "In-memory memory repository is strictly forbidden in production" in str(exc_info.value)
+    get_settings.cache_clear()
+
+
+def test_production_startup_succeeds_with_approved_persistent_repository(monkeypatch):
+    """In production, application startup succeeds when an approved persistent repository is attached."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@db.prod.internal:5432/amsc")
+    monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
+    monkeypatch.setenv("AUTH_BACKEND", "database")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_RATE_LIMITER", "false")
+    monkeypatch.setenv("RATE_LIMITER_BACKEND", "redis")
+
+    from backend.app.core.config import get_settings
+    from backend.app.main import create_app
+    from fastapi.testclient import TestClient
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    app = create_app(settings)
+    app.state.auth_repo = object()
+    app.state.rate_limiter = object()
+    app.state.memory_repo = MockPersistentMemoryRepository()  # Approved persistent repo attached
+
+    # Lifespan executes cleanly without error
+    with TestClient(app):
+        pass
+
+    get_settings.cache_clear()
+
+
+def test_development_and_test_environments_usable_with_in_memory_repository(repo):
+    """Development and test environments continue to function seamlessly with in-memory storage."""
+    record, ver = ingest_memory(tenant_id="dev-tenant", content="Dev content", repository=repo)
+    assert record.id is not None
+    assert ver.version == 1
+    records = retrieve_memory(tenant_id="dev-tenant", repository=repo)
+    assert len(records) == 1
