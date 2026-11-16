@@ -19,6 +19,7 @@ from .repository import (
     reset_default_repository,
 )
 from .service import (
+    InvalidProvenanceError,
     MemoryIntegrityError,
     MemoryNotFoundError,
     get_memory_detail,
@@ -47,5 +48,6 @@ __all__ = [
     "get_memory_detail",
     "MemoryIntegrityError",
     "MemoryNotFoundError",
+    "InvalidProvenanceError",
     "sha256_hex",
 ]

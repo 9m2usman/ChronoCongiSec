@@ -39,7 +39,7 @@ def test_memory_record_fields_and_defaults():
     assert record.agent_id is None
     assert record.source_id is None
     assert record.record_type == "KNOWLEDGE"
-    assert record.trust_state == "TRUSTED"
+    assert record.trust_state == "UNVERIFIED"
     assert record.current_version == 1
     assert isinstance(record.created_at, datetime)
     assert isinstance(record.updated_at, datetime)

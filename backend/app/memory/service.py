@@ -5,27 +5,97 @@ Implements Document 02 §13 & §15, Document 05 §3.3 & §5.1, and Document 06 M
 
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
+from backend.app.core.exceptions import AMSCException, NotFoundError, ValidationError
 from .hashing import sha256_hex
 from .models import (
     MemoryRecord,
     MemoryVersion,
     ProvenanceEdge,
+    ProvenanceRelationType,
     RecordType,
     TrustState,
 )
 from .repository import MemoryRepository, get_default_repository
 
 
-class MemoryIntegrityError(Exception):
+class MemoryIntegrityError(AMSCException):
     """Raised when cryptographic checksum verification fails for a memory record."""
-    pass
+
+    def __init__(
+        self,
+        message: str = "Cryptographic checksum verification failed.",
+        details: Any = None,
+    ):
+        super().__init__(
+            message=message,
+            code="MEMORY_INTEGRITY_VIOLATION",
+            status_code=500,
+            details=details,
+        )
 
 
-class MemoryNotFoundError(Exception):
+class MemoryNotFoundError(NotFoundError):
     """Raised when a requested memory record is not found."""
-    pass
+
+    def __init__(
+        self,
+        message: str = "The requested memory record was not found.",
+        details: Any = None,
+    ):
+        super().__init__(message=message, details=details)
+
+
+class InvalidProvenanceError(AMSCException):
+    """Raised when a provenance edge violates tenant scoping, parent existence, or DAG acyclicity."""
+
+    def __init__(
+        self,
+        message: str = "Invalid provenance relationship.",
+        details: Any = None,
+    ):
+        super().__init__(
+            message=message,
+            code="INVALID_PROVENANCE",
+            status_code=400,
+            details=details,
+        )
+
+
+def _check_dag_cycle(
+    repo: MemoryRepository,
+    from_id: str,
+    to_id: str,
+    tenant_id: str,
+) -> None:
+    """Verify that adding an edge from_id -> to_id does not create a cycle in the provenance graph.
+
+    Performs depth-first search traversal starting at to_id looking for from_id.
+    """
+    if from_id == to_id:
+        raise InvalidProvenanceError(
+            f"Self-referential provenance edge prohibited: record '{from_id}' cannot derive from itself."
+        )
+
+    visited: Set[str] = set()
+    queue = [to_id]
+
+    while queue:
+        current = queue.pop(0)
+        if current == from_id:
+            raise InvalidProvenanceError(
+                f"Provenance cycle detected: adding edge from '{from_id}' to '{to_id}' creates a cyclic lineage."
+            )
+        if current in visited:
+            continue
+        visited.add(current)
+
+        # Get outgoing edges where current is the source (from_record_id)
+        edges = repo.get_edges_for_record(current, tenant_id)
+        for edge in edges:
+            if edge.from_record_id == current and edge.to_record_id not in visited:
+                queue.append(edge.to_record_id)
 
 
 def ingest_memory(
@@ -42,15 +112,29 @@ def ingest_memory(
     Creates a MemoryRecord with trust_state UNVERIFIED (M4 owns trust state transitions)
     and a MemoryVersion with version 1 and cryptographic checksum from sha256_hex.
     Optionally records a DERIVED_FROM provenance edge if parent_record_id is supplied.
+    Strictly verifies parent record existence and tenant boundary.
     """
+    if content is None or not content.strip():
+        raise ValidationError("Memory content must not be empty or whitespace only.")
+
     repo = repository or get_default_repository()
     now = datetime.now(timezone.utc)
     record_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
 
+    # 1. Validate parent record if provided
+    if parent_record_id:
+        parent = repo.get_record(parent_record_id, tenant_id)
+        if not parent:
+            raise MemoryNotFoundError(
+                f"Parent memory record '{parent_record_id}' not found for tenant '{tenant_id}'. "
+                f"Cross-tenant and nonexistent parent references are strictly prohibited."
+            )
+        _check_dag_cycle(repo, parent_record_id, record_id, tenant_id)
+
     checksum = sha256_hex(content)
 
-    # 1. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
+    # 2. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
     record = MemoryRecord(
         id=record_id,
         tenant_id=tenant_id,
@@ -64,7 +148,7 @@ def ingest_memory(
     )
     repo.create_record(record)
 
-    # 2. Create MemoryVersion (Table 12: version 1, immutable)
+    # 3. Create MemoryVersion (Table 12: version 1, immutable)
     version = MemoryVersion(
         id=version_id,
         tenant_id=tenant_id,
@@ -76,14 +160,14 @@ def ingest_memory(
     )
     repo.create_version(version)
 
-    # 3. Create ProvenanceEdge if derived from parent (Table 14)
+    # 4. Create ProvenanceEdge if derived from parent (Table 14)
     if parent_record_id:
         edge = ProvenanceEdge(
             id=str(uuid.uuid4()),
             tenant_id=tenant_id,
             from_record_id=parent_record_id,
             to_record_id=record_id,
-            relation_type="DERIVED_FROM",
+            relation_type=ProvenanceRelationType.DERIVED_FROM.value,
             created_at=now,
         )
         repo.create_edge(edge)
@@ -103,6 +187,9 @@ def update_memory(
     checksum. Never edits or mutates historical versions.
     Does NOT alter trust_state (M4 owns trust state lifecycle).
     """
+    if content is None or not content.strip():
+        raise ValidationError("Updated memory content must not be empty.")
+
     repo = repository or get_default_repository()
     record = repo.get_record(record_id, tenant_id)
     if not record:

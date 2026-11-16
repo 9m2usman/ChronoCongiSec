@@ -42,7 +42,7 @@ class MemoryRecord(BaseModel):
     agent_id: Optional[str] = None
     source_id: Optional[str] = None
     record_type: str = "KNOWLEDGE"
-    trust_state: str = "TRUSTED"
+    trust_state: str = TrustState.UNVERIFIED.value
     current_version: int = 1
     created_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -75,7 +75,7 @@ class ProvenanceEdge(BaseModel):
     tenant_id: str
     from_record_id: str
     to_record_id: str
-    relation_type: str = "DERIVED_FROM"
+    relation_type: str = ProvenanceRelationType.DERIVED_FROM.value
     created_at: Optional[datetime] = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -83,21 +83,23 @@ class ProvenanceEdge(BaseModel):
 
 class MemoryIngestRequest(BaseModel):
     """Request payload for POST /memory matching Document 05 Section 5.1 Route Catalog."""
-    content: str
-    record_type: str = "KNOWLEDGE"
-    source_id: Optional[str] = None
-    parent_record_id: Optional[str] = None
-    agent_id: Optional[str] = None
+    content: str = Field(..., min_length=1, max_length=1_000_000, description="Memory content chunk")
+    record_type: str = Field("KNOWLEDGE", max_length=64)
+    source_id: Optional[str] = Field(None, max_length=128)
+    parent_record_id: Optional[str] = Field(None, max_length=128)
+    agent_id: Optional[str] = Field(None, max_length=128)
 
 
 class MemoryRecordResponse(BaseModel):
     """Response item for memory record query."""
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     tenant_id: str
     agent_id: Optional[str] = None
     source_id: Optional[str] = None
     record_type: str = "KNOWLEDGE"
-    trust_state: str = "TRUSTED"
+    trust_state: str = TrustState.UNVERIFIED.value
     current_version: int = 1
     checksum: Optional[str] = None
     content: Optional[str] = None
@@ -107,6 +109,8 @@ class MemoryRecordResponse(BaseModel):
 
 class MemoryDetailResponse(BaseModel):
     """Response payload for GET /memory/{id} matching Document 05 Section 5.1."""
+    model_config = ConfigDict(from_attributes=True)
+
     record: MemoryRecord
     versions: List[MemoryVersion] = []
     provenance: List[ProvenanceEdge] = []

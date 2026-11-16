@@ -73,6 +73,8 @@ class MemoryRepository(ABC):
 class InMemoryMemoryRepository(MemoryRepository):
     """In-memory reference implementation of MemoryRepository for standalone operation and tests."""
 
+    is_in_memory: bool = True
+
     def __init__(self) -> None:
         # Key: record_id -> MemoryRecord
         self._records: Dict[str, MemoryRecord] = {}
@@ -174,8 +176,21 @@ class InMemoryMemoryRepository(MemoryRepository):
 _default_repository = InMemoryMemoryRepository()
 
 
-def get_default_repository() -> InMemoryMemoryRepository:
-    """Return the default singleton in-memory repository."""
+def get_default_repository() -> MemoryRepository:
+    """Return the default memory repository.
+
+    Fails closed in production if a persistent M6 database repository is not configured.
+    """
+    try:
+        from backend.app.core.config import get_settings
+        settings = get_settings()
+        if settings.APP_ENV == "production":
+            raise RuntimeError(
+                "Production startup failure: Real database memory repository from M6 is not configured. "
+                "In-memory memory repository fallback is prohibited in production."
+            )
+    except ImportError:
+        pass
     return _default_repository
 
 

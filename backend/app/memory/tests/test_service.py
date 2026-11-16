@@ -9,10 +9,12 @@ repo_root = Path(__file__).resolve().parents[4]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
+from backend.app.core.exceptions import ValidationError
 from backend.app.memory.hashing import sha256_hex
 from backend.app.memory.models import TrustState
-from backend.app.memory.repository import InMemoryMemoryRepository
+from backend.app.memory.repository import InMemoryMemoryRepository, get_default_repository
 from backend.app.memory.service import (
+    InvalidProvenanceError,
     MemoryIntegrityError,
     MemoryNotFoundError,
     get_memory_detail,
@@ -213,3 +215,68 @@ def test_tenant_isolation_cannot_read_other_tenant_records(repo):
     assert len(a_records) == 1
     assert a_records[0].id == rec_a.id
     assert a_records[0].current_version == 1
+
+
+def test_cross_tenant_parent_record_reference_rejected(repo):
+    """Attempting to link a child record to another tenant's parent record must fail."""
+    tenant_a = "tenant-alpha"
+    tenant_b = "tenant-beta"
+
+    parent_a, _ = ingest_memory(tenant_id=tenant_a, content="Parent doc in Tenant A.", repository=repo)
+
+    # Tenant B tries to create a memory claiming parent_a as its parent_record_id
+    with pytest.raises(MemoryNotFoundError) as exc_info:
+        ingest_memory(
+            tenant_id=tenant_b,
+            content="Child doc in Tenant B attempting cross-tenant linkage.",
+            parent_record_id=parent_a.id,
+            repository=repo,
+        )
+
+    assert "not found for tenant" in str(exc_info.value)
+    assert "Cross-tenant" in str(exc_info.value)
+
+
+def test_nonexistent_parent_record_reference_rejected(repo):
+    """Supplying a nonexistent parent_record_id must fail."""
+    tenant_id = "tenant-alpha"
+
+    with pytest.raises(MemoryNotFoundError):
+        ingest_memory(
+            tenant_id=tenant_id,
+            content="Child doc referencing nonexistent parent.",
+            parent_record_id="nonexistent-rec-uuid",
+            repository=repo,
+        )
+
+
+def test_empty_content_rejected(repo):
+    """Empty or whitespace-only memory content must be rejected."""
+    tenant_id = "tenant-alpha"
+
+    with pytest.raises(ValidationError):
+        ingest_memory(tenant_id=tenant_id, content="", repository=repo)
+
+    with pytest.raises(ValidationError):
+        ingest_memory(tenant_id=tenant_id, content="   \n\t  ", repository=repo)
+
+
+def test_production_rejects_in_memory_repository(monkeypatch):
+    """In production environment, accessing default in-memory repository must raise RuntimeError."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("JWT_SECRET", "a_super_secret_key_that_is_long_enough_32_chars_prod")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@db.prod.internal:5432/amsc")
+    monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
+    monkeypatch.setenv("AUTH_BACKEND", "database")
+    monkeypatch.setenv("ALLOW_IN_MEMORY_RATE_LIMITER", "false")
+    monkeypatch.setenv("RATE_LIMITER_BACKEND", "redis")
+
+    from backend.app.core.config import get_settings
+    get_settings.cache_clear()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        get_default_repository()
+
+    assert "In-memory memory repository fallback is prohibited in production" in str(exc_info.value)
+    get_settings.cache_clear()

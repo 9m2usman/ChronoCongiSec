@@ -1,57 +1,62 @@
 """FastAPI router for Memory & Provenance endpoints.
 
+Module: backend.app.api.memory
+Owner: M3 — Knowledge & Memory Systems Lead
+
 Implements Document 05 Section 5.1 Route Catalog:
-- GET  /memory      (Query memory records)
-- POST /memory      (Ingest knowledge chunk & hash)
-- GET  /memory/{id} (Get memory detail, versions & provenance)
+- GET  /api/v1/memory      (Query memory records)
+- POST /api/v1/memory      (Ingest knowledge chunk & hash)
+- GET  /api/v1/memory/{id} (Get memory detail, versions & provenance)
+
+Security & Governance:
+- Authenticated Tenant Context: Verified via M1's `get_tenant_context` dependency.
+- Zero Information Leakage: Never returns raw tracebacks, internal database errors, or file paths.
+- Quarantine Exclusion: Quarantined records excluded by default for agent safety.
+- Cryptographic Integrity: SHA-256 verified on retrieval and detail endpoints.
 """
 
+import logging
 from typing import List, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 
-from ..memory.models import (
+from backend.app.core.dependencies import get_tenant_context
+from backend.app.core.exceptions import NotFoundError, ValidationError
+from backend.app.memory.models import (
     MemoryDetailResponse,
     MemoryIngestRequest,
-    MemoryRecord,
     MemoryRecordResponse,
 )
-from ..memory.repository import MemoryRepository, get_default_repository
-from ..memory.service import (
+from backend.app.memory.repository import MemoryRepository, get_default_repository
+from backend.app.memory.service import (
     MemoryIntegrityError,
     MemoryNotFoundError,
     get_memory_detail,
     ingest_memory,
     retrieve_memory,
 )
+from backend.app.tenancy.context import TenantContext
 
-# ============================================================================
-# PLACEHOLDER: Auth & Tenancy Context Dependency (Member M1 Domain)
-# ----------------------------------------------------------------------------
-# TODO (Member M1): Per docs/02-TRD-SRS.md line 253 (Server-Side Tenant Resolution):
-# "Client-provided headers (`X-Tenant-ID`) are never trusted in isolation.
-# The server verifies that the authenticated user possesses an active `Membership`
-# in the specified tenant before executing any request."
-#
-# Replace this temporary placeholder with M1's `get_tenant_context` once M1's
-# `backend/app/tenancy/context.py` and `backend/app/api/auth.py` are landed.
-# ============================================================================
-def get_current_tenant_id(
-    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID")
+logger = logging.getLogger("amsc.api.memory")
+
+
+# --- Dependencies ---
+
+async def get_memory_tenant_id(
+    context: TenantContext = Depends(get_tenant_context),
 ) -> str:
-    """Extract tenant_id from request header or reject with 403 Forbidden.
+    """Extract verified tenant_id from M1's authenticated TenantContext.
 
-    To be replaced by M1's authenticated TenantContext verification.
+    Guarantees client-provided X-Tenant-ID headers are never trusted in isolation,
+    and request body cannot spoof tenant ownership.
     """
-    if not x_tenant_id or not x_tenant_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Missing mandatory X-Tenant-ID header. Valid tenant context required.",
-        )
-    return x_tenant_id.strip()
+    return context.tenant_id
 
 
-def get_repository() -> MemoryRepository:
+async def get_repository(request: Request) -> MemoryRepository:
     """Dependency provider for MemoryRepository."""
+    repo = getattr(request.app.state, "memory_repo", None)
+    if repo is not None:
+        return repo
     return get_default_repository()
 
 
@@ -64,15 +69,15 @@ router = APIRouter(prefix="/memory", tags=["memory"])
     status_code=status.HTTP_201_CREATED,
     summary="Ingest knowledge chunk & hash",
 )
-def api_ingest_memory(
+async def api_ingest_memory(
     payload: MemoryIngestRequest,
-    tenant_id: str = Depends(get_current_tenant_id),
+    tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> MemoryRecordResponse:
     """Ingest a new knowledge chunk, assign version 1, and compute SHA-256 hash.
 
     Matches Document 05 Section 5.1 Route Catalog.
-    Tenant ID is strictly sourced from auth/tenant context, never from request body.
+    Tenant ID is strictly derived from verified authentication context.
     """
     record, version = ingest_memory(
         tenant_id=tenant_id,
@@ -104,13 +109,13 @@ def api_ingest_memory(
     status_code=status.HTTP_200_OK,
     summary="Query memory records",
 )
-def api_query_memory(
+async def api_query_memory(
     agent_id: Optional[str] = Query(None, description="Filter by agent identifier"),
     trust_state: Optional[str] = Query(None, description="Filter by trust state"),
     exclude_quarantined: bool = Query(
         True, description="Exclude QUARANTINED records from retrieval"
     ),
-    tenant_id: str = Depends(get_current_tenant_id),
+    tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> List[MemoryRecordResponse]:
     """Query memory records with optional filters.
@@ -119,19 +124,13 @@ def api_query_memory(
     Quarantined records are excluded by default for agent safety (Doc 02 §13).
     Stored checksums are cryptographically re-verified.
     """
-    try:
-        records = retrieve_memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            trust_state=trust_state,
-            exclude_quarantined=exclude_quarantined,
-            repository=repo,
-        )
-    except MemoryIntegrityError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Security Alert: {str(e)}",
-        )
+    records = retrieve_memory(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        trust_state=trust_state,
+        exclude_quarantined=exclude_quarantined,
+        repository=repo,
+    )
 
     responses: List[MemoryRecordResponse] = []
     for rec in records:
@@ -160,29 +159,18 @@ def api_query_memory(
     status_code=status.HTTP_200_OK,
     summary="Get memory detail, versions & provenance",
 )
-def api_get_memory_detail(
+async def api_get_memory_detail(
     id: str,
-    tenant_id: str = Depends(get_current_tenant_id),
+    tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> MemoryDetailResponse:
     """Fetch complete memory detail including full revision history and provenance lineage.
 
     Matches Document 05 Section 5.1 Route Catalog.
     """
-    try:
-        record, versions, provenance = get_memory_detail(
-            tenant_id=tenant_id, record_id=id, repository=repo
-        )
-    except MemoryNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Memory record '{id}' not found in current tenant scope.",
-        )
-    except MemoryIntegrityError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Security Alert: {str(e)}",
-        )
+    record, versions, provenance = get_memory_detail(
+        tenant_id=tenant_id, record_id=id, repository=repo
+    )
 
     return MemoryDetailResponse(
         record=record,
