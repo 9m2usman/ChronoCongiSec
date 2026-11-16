@@ -30,6 +30,7 @@ Read this document together with:
 - `docs/03-APPLICATION-FLOW.md` — workflows, Dual Trace and rewind.
 - `docs/05-DATABASE-API-SCHEMA.md` — canonical data/API contract.
 - `docs/06-TEAM-IMPLEMENTATION-PLAN.md` — team ownership and delivery plan.
+- `docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md` — current source-backed implementation findings, priorities, owners and acceptance tests.
 
 If a research paper conflicts with an approved product requirement, do not silently change the requirement. Record the conflict, assess the evidence and obtain an architecture decision.
 
