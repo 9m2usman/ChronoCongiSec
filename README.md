@@ -3,7 +3,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Architecture: High-Assurance Gateway](https://img.shields.io/badge/Architecture-High--Assurance_Gateway-06B6D4.svg)](#)
-[![Stage: Documentation & Architecture Preparation](https://img.shields.io/badge/Stage: Documentation_Baseline-amber.svg)](#)
+[![Stage: Documentation & Architecture Preparation](https://img.shields.io/badge/Stage-Documentation_Baseline-amber.svg)](#)
 
 ---
 
@@ -52,7 +52,7 @@ The complete engineering specification is published in the `docs/` directory. Al
 | **04** | **UI/UX Design & Screen Specifications** | [docs/04-UI-UX-DESIGN.md](docs/04-UI-UX-DESIGN.md) | Defines the **WORKSTATION INTERFACE**. Contains complete specifications for all 11 core screens, layout shell, color tokens, contextual inspector drawer, and accessibility rules. |
 | **05** | **Backend Database Schema & API Contract** | [docs/05-DATABASE-API-SCHEMA.md](docs/05-DATABASE-API-SCHEMA.md) | Canonical **ENGINEERING CONTRACT**. Defines relational DDL for all 32+ entities, ER diagram, multi-tenant isolation rules, complete REST API route inventory (`/api/v1`), and error envelopes. |
 | **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols for future implementation. |
-| **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Establishes research foundations, inherited strengths from KnowledgeLine and AgentGuard, non-regression rules, memory-poisoning/hallucination/rewind/tool-security research, evaluation methodology and team-wide engineering requirements. |
+| **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Research foundations, inherited strengths from KnowledgeLine and AgentGuard, non-regression rules, memory poisoning/hallucination/rewind/tool-security research, evaluation methodology and team-wide engineering requirements. |
 
 For full reference to the master prompt that governed this specification, see [MASTER-PROMPT.md](MASTER-PROMPT.md).
 
@@ -82,14 +82,74 @@ AMSC implements a **hybrid technical security operations workstation** engineere
                      |
                      | HTTPS / JSON (JWT / Scoped API Key)
                      v
-[FastAPI Security Gateway] ---- [Policy & Trust Engine]
-          |                               |
-          v                               v
-[Memory & Provenance Engine]       [Tool Execution Adapters]
-          |                               |
-          v                               v
-[PostgreSQL + pgvector]           [Isolated Execution Boundary]
-          |
-          v
-[Redis: transient cache, locks, rate limits]
+  [FastAPI Asynchronous Gateway & Ingress Layer]
+   - Tenancy Middleware (Header/JWT Validation)
+   - Idempotency & Replay Filter (Redis / DB)
+   - Server-Side Policy & Trust Engine (Fail-Closed)
+                     |
+                     +---------------------------------------+
+                     |                                       |
+                     v                                       v
+   [PostgreSQL 16+ System of Record]       [Server-Side Protected Adapters]
+    - Memory Records & Versions (SHA-256)   - Sandbox Financial Wire Adapter
+    - Provenance Edges & Lineage Graph      - Cloud Infrastructure Adapter
+    - Checkpoints & Pre-Recovery Snapshots   - Proprietary Data Export Adapter
+    - Append-Only Forensic Audit Events     (Credentials never sent to agents!)
 ```
+
+---
+
+## 7. Seven-Person Engineering Team Structure
+
+During future implementation, the engineering team will operate under strict ownership boundaries:
+
+- **M1 — Platform Backend & API Integration Lead:** FastAPI framework, authentication, tenancy middleware, OpenAPI canonical contract ownership.
+- **M2 — Agent Runtime & Gateway Adapters Lead:** Agent proposal protocol, sandbox mock tool adapters, adapter credential containment.
+- **M3 — Knowledge & Memory Systems Lead:** Ingestion pipelines, SHA-256 content hashing, version tree, provenance graph edge traversals, checkpoint snapshotting.
+- **M4 — Security Engine & Incident Lead:** Deterministic policy rule evaluator, memory trust verification, quarantine state machine, rollback blast-radius calculator.
+- **M5 — Frontend & UX Engineering Lead:** React 19, TypeScript, Tailwind, AppShell, all 11 core screens, Dual Trace timeline scrubber, React Flow knowledge graph.
+- **M6 — Database Architect & Governance Lead:** PostgreSQL relational DDL, Alembic migrations, composite tenant constraints, RBAC mapping, append-only audit persistence.
+- **M7 — DevOps, Testing & QA Lead:** Docker Compose orchestration, automated pytest test harness, cross-tenant isolation testing, seed fixtures, demo runner scripts.
+
+---
+
+## 8. One-Week (Seven-Day) MVP Target Schedule
+
+```text
++-------+------------------------------------------------------------------------------------+
+| Day   | Milestone / Gate                                                                   |
++-------+------------------------------------------------------------------------------------+
+| Day 1 | Architecture, Contracts, Schema DDL & Shared Development Baseline (Gate G1)       |
+| Day 2 | Foundation: Auth, Tenancy Context, DB Repositories & UI Shell (Gate G2)            |
+| Day 3 | Knowledge Ingestion, Lineage, Agent Registry & Explorer (Gate G3)                  |
+| Day 4 | Protected Tool Gateway & Fail-Closed Enforcement Vertical Slice (Gate G4 - P0)     |
+| Day 5 | Forensics, Quarantine, ChroniMem Diffing & Rollback Engine (Gate G5)               |
+| Day 6 | Observability, Dual Trace, Knowledge Graph & 3 Demos (Gate G6)                     |
+| Day 7 | Hardening, Security Validation, End-to-End Test Suite & Handover (Gate G7)         |
++-------+------------------------------------------------------------------------------------+
+```
+
+---
+
+## 9. Repository Structure
+
+```text
+ChronoCongiSec/
+│
+├── README.md                          # Primary overview, links, and project guidance
+├── MASTER-PROMPT.md                   # Preserved master build prompt and requirements
+│
+└── docs/
+    ├── 01-PRD.md                      # Product Requirements Document
+    ├── 02-TRD-SRS.md                  # Combined TRD & SRS
+    ├── 03-APPLICATION-FLOW.md         # Application Flow & System Workflows
+    ├── 04-UI-UX-DESIGN.md             # UI/UX Design & Screen Specifications
+    ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
+    └── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+```
+
+---
+
+## 10. License
+
+This project documentation and architecture baseline is licensed under the [MIT License](LICENSE).
