@@ -19,9 +19,13 @@ SENSITIVE_PATTERNS = [
     (re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.]{10,}", re.IGNORECASE), r"\1[REDACTED]"),
     # JWT tokens in general
     (re.compile(r"ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]+"), r"[JWT_REDACTED]"),
-    # Password parameters / fields
+    # Database and cache connection URIs with embedded credentials (e.g., postgresql://user:pass@host)
+    (re.compile(r"(://[^:\s]+:)([^@\s]+)(@)"), r"\1[REDACTED]\3"),
+    # Password parameters / fields in JSON, query strings, or key-value pairs
     (re.compile(r"(password['\"]?\s*[:=]\s*['\"])[^'\",\s]+(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
-    # Secret keys / tokens
+    # Query / URL parameters with passwords, tokens, or keys
+    (re.compile(r"((?:token|secret|password|api[_-]?key)=)[^&\s]+", re.IGNORECASE), r"\1[REDACTED]"),
+    # Secret keys / tokens / private keys
     (re.compile(r"((?:api[_-]?key|secret|token|private_key)['\"]?\s*[:=]\s*['\"])[^'\",\s]+(['\"])", re.IGNORECASE), r"\1[REDACTED]\2"),
 ]
 
@@ -34,9 +38,17 @@ class SensitiveDataFilter(logging.Filter):
             record.msg = self.redact(record.msg)
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: self.redact(str(v)) for k, v in record.args.items()}
+                record.args = {
+                    k: (self.redact(v) if isinstance(v, str) else v)
+                    for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
-                record.args = tuple(self.redact(str(arg)) for arg in record.args)
+                record.args = tuple(
+                    (self.redact(arg) if isinstance(arg, str) else arg)
+                    for arg in record.args
+                )
+        if hasattr(record, "exc_text") and record.exc_text:
+            record.exc_text = self.redact(record.exc_text)
         return True
 
     @staticmethod
@@ -45,6 +57,18 @@ class SensitiveDataFilter(logging.Filter):
         for pattern, replacement in SENSITIVE_PATTERNS:
             text = pattern.sub(replacement, text)
         return text
+
+
+class RedactingFormatter(logging.Formatter):
+    """Logging formatter that scrubs sensitive patterns from messages and tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        s = super().format(record)
+        return SensitiveDataFilter.redact(s)
+
+    def formatException(self, ei) -> str:
+        s = super().formatException(ei)
+        return SensitiveDataFilter.redact(s)
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -61,20 +85,23 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
+    formatter = RedactingFormatter(
+        fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    data_filter = SensitiveDataFilter()
+
     # Avoid duplicate handlers if setup_logging is called multiple times
     if not root_logger.handlers:
         handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
         handler.setFormatter(formatter)
-        handler.addFilter(SensitiveDataFilter())
+        handler.addFilter(data_filter)
         root_logger.addHandler(handler)
     else:
         for handler in root_logger.handlers:
             handler.setLevel(numeric_level)
-            handler.addFilter(SensitiveDataFilter())
+            handler.setFormatter(formatter)
+            handler.addFilter(data_filter)
 
     logger = logging.getLogger("amsc")
     logger.setLevel(numeric_level)

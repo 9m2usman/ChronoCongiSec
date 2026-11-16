@@ -37,14 +37,20 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     """Middleware to populate request_id and propagate tracing headers."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        incoming_id = request.headers.get("x-request-id") or request.headers.get("x-trace-id")
-        request_id = incoming_id or f"req-{uuid.uuid4().hex[:12]}"
+        incoming_req_id = request.headers.get("x-request-id")
+        incoming_trace_id = request.headers.get("x-trace-id")
+
+        request_id = incoming_req_id or incoming_trace_id or f"req-{uuid.uuid4().hex[:12]}"
+        trace_id = incoming_trace_id
 
         # Bind to request state for downstream handlers and error formatting
         request.state.request_id = request_id
+        request.state.trace_id = trace_id
 
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
         return response
 
 
@@ -82,13 +88,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
 
-    # 2. Configure CORS Middleware
+    # 2. Configure CORS Middleware with explicit settings
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-        allow_headers=["*"],
+        allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+        allow_methods=settings.CORS_ALLOWED_METHODS,
+        allow_headers=settings.CORS_ALLOWED_HEADERS,
+        expose_headers=settings.CORS_EXPOSE_HEADERS,
     )
 
     # 3. Register Standard Exception Handlers

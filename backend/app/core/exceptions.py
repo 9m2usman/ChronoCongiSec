@@ -151,7 +151,7 @@ class SecurityDependencyError(AMSCException):
         )
 
 
-# --- Helper: Build Canonical Error Envelope ---
+# --- Helper: Build Canonical Error Envelope & Headers ---
 
 def build_error_envelope(
     code: str,
@@ -181,24 +181,40 @@ def build_error_envelope(
     }
 
 
-def get_request_id(request: Request) -> str:
-    """Retrieve trace or request ID from request state or headers."""
-    # Check request state populated by middleware
+def get_trace_context(request: Request) -> tuple[str, Optional[str]]:
+    """Extract request_id and optional trace_id from request state or headers."""
     req_id = getattr(request.state, "request_id", None)
-    if req_id:
-        return str(req_id)
-    # Check incoming headers
-    header_id = request.headers.get("x-request-id") or request.headers.get("x-trace-id")
-    if header_id:
-        return str(header_id)
-    return f"req-{uuid.uuid4().hex[:8]}"
+    if not req_id:
+        req_id = request.headers.get("x-request-id") or request.headers.get("x-trace-id") or f"req-{uuid.uuid4().hex[:8]}"
+
+    trace_id = getattr(request.state, "trace_id", None)
+    if not trace_id:
+        trace_id = request.headers.get("x-trace-id")
+
+    return str(req_id), str(trace_id) if trace_id else None
+
+
+def get_request_id(request: Request) -> str:
+    """Retrieve primary request ID from request state or headers."""
+    req_id, _ = get_trace_context(request)
+    return req_id
+
+
+def build_response_headers(request: Request, req_id: str) -> Dict[str, str]:
+    """Construct response headers guaranteeing X-Request-ID and trace context propagation."""
+    headers = {"X-Request-ID": req_id}
+    _, trace_id = get_trace_context(request)
+    if trace_id:
+        headers["X-Trace-ID"] = trace_id
+    return headers
 
 
 # --- Global Exception Handlers ---
 
 async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONResponse:
     """Handler for domain-specific AMSCException instances."""
-    req_id = get_request_id(request)
+    req_id, _ = get_trace_context(request)
+    headers = build_response_headers(request, req_id)
     logger.warning(
         f"Domain exception [{exc.code}] HTTP {exc.status_code} for {request.method} {request.url.path} (request_id={req_id}): {exc.message}"
     )
@@ -208,12 +224,14 @@ async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONRe
         request_id=req_id,
         details=exc.details,
     )
-    return JSONResponse(status_code=exc.status_code, content=envelope)
+    return JSONResponse(status_code=exc.status_code, content=envelope, headers=headers)
 
 
 async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Handler for Starlette/FastAPI HTTPException instances."""
-    req_id = get_request_id(request)
+    req_id, _ = get_trace_context(request)
+    headers = build_response_headers(request, req_id)
+
     # Map common status codes to standardized codes
     code_map = {
         status.HTTP_400_BAD_REQUEST: "BAD_REQUEST",
@@ -237,12 +255,17 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
         request_id=req_id,
         details=None,
     )
-    return JSONResponse(status_code=exc.status_code, content=envelope)
+    return JSONResponse(status_code=exc.status_code, content=envelope, headers=headers)
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    """Handler for Pydantic schema validation failures."""
-    req_id = get_request_id(request)
+    """Handler for Pydantic schema validation failures.
+
+    Returns HTTP 400 Bad Request matching AMSC-DOC-005 Section 7.
+    """
+    req_id, _ = get_trace_context(request)
+    headers = build_response_headers(request, req_id)
+
     # Sanitize and simplify error entries to avoid exposing sensitive internal details
     sanitized_errors = []
     for err in exc.errors():
@@ -262,7 +285,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         request_id=req_id,
         details={"validation_errors": sanitized_errors},
     )
-    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content=envelope)
+    return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=envelope, headers=headers)
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -272,7 +295,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Never expose Python tracebacks, internal file system paths, or infrastructure
     credentials to API clients. Always log full error server-side and return safe generic message.
     """
-    req_id = get_request_id(request)
+    req_id, _ = get_trace_context(request)
+    headers = build_response_headers(request, req_id)
+
     logger.exception(
         f"Unhandled server error on {request.method} {request.url.path} (request_id={req_id}): {exc}"
     )
@@ -283,7 +308,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         request_id=req_id,
         details=None,
     )
-    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=envelope)
+    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=envelope, headers=headers)
 
 
 def register_exception_handlers(app: FastAPI) -> None:

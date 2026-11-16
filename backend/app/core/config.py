@@ -16,6 +16,9 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+ALLOWED_ENVIRONMENTS = {"development", "staging", "production", "test"}
+
+
 class Settings(BaseSettings):
     """AMSC Application Settings.
 
@@ -73,6 +76,33 @@ class Settings(BaseSettings):
         ],
         description="List of allowed CORS origins for browser security enforcement",
     )
+    CORS_ALLOW_CREDENTIALS: bool = Field(
+        default=True,
+        description="Whether cross-origin requests are permitted to include credentials",
+    )
+    CORS_ALLOWED_METHODS: List[str] = Field(
+        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+        description="Explicit allowed HTTP methods for CORS requests",
+    )
+    CORS_ALLOWED_HEADERS: List[str] = Field(
+        default_factory=lambda: [
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "Origin",
+            "X-Requested-With",
+            "X-Tenant-ID",
+            "X-Trace-ID",
+            "X-Request-ID",
+            "Idempotency-Key",
+            "X-Idempotency-Key",
+        ],
+        description="Explicit allowed HTTP request headers for CORS",
+    )
+    CORS_EXPOSE_HEADERS: List[str] = Field(
+        default_factory=lambda: ["X-Request-ID", "X-Trace-ID"],
+        description="Response headers exposed to frontend browser clients",
+    )
 
     # --- 4. Logging ---
     LOG_LEVEL: str = Field(
@@ -113,22 +143,40 @@ class Settings(BaseSettings):
     )
 
     # --- Field Validators ---
+    @field_validator("APP_ENV")
+    @classmethod
+    def validate_app_env(cls, v: str) -> str:
+        """Validate and normalize environment name."""
+        normalized = v.strip().lower()
+        if normalized not in ALLOWED_ENVIRONMENTS:
+            raise ValueError(
+                f"APP_ENV must be one of {sorted(ALLOWED_ENVIRONMENTS)}, got '{v}'"
+            )
+        return normalized
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        """Parse CORS origins from comma-separated string, JSON string, or list."""
+        """Parse and normalize CORS origins (strip whitespace and trailing slashes)."""
+        def _normalize(origin: str) -> str:
+            cleaned = origin.strip()
+            # RFC 6454: Origins must not contain trailing slashes
+            if cleaned != "*" and cleaned.endswith("/"):
+                cleaned = cleaned.rstrip("/")
+            return cleaned
+
         if isinstance(v, str):
             v_stripped = v.strip()
             if v_stripped.startswith("[") and v_stripped.endswith("]"):
                 try:
                     parsed = json.loads(v_stripped)
                     if isinstance(parsed, list):
-                        return [str(item).strip() for item in parsed if str(item).strip()]
+                        return [_normalize(str(item)) for item in parsed if str(item).strip()]
                 except json.JSONDecodeError:
                     pass
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+            return [_normalize(origin) for origin in v.split(",") if origin.strip()]
         elif isinstance(v, list):
-            return [str(item).strip() for item in v if str(item).strip()]
+            return [_normalize(str(item)) for item in v if str(item).strip()]
         return []
 
     @field_validator("LOG_LEVEL")
@@ -142,15 +190,23 @@ class Settings(BaseSettings):
         return upper_v
 
     @model_validator(mode="after")
-    def validate_production_security(self) -> "Settings":
-        """Enforce strict fail-closed security validations in production."""
-        if self.APP_ENV.lower() == "production":
+    def validate_security_invariants(self) -> "Settings":
+        """Enforce strict fail-closed security invariants across environments."""
+        # Universal Invariant: Never combine wildcard origins with credentialed requests
+        if self.CORS_ALLOW_CREDENTIALS and "*" in self.CORS_ORIGINS:
+            raise ValueError(
+                "Security violation: Wildcard ('*') CORS origins cannot be combined with credentialed requests."
+            )
+
+        # Strict Production Guardrails
+        if self.APP_ENV == "production":
             # 1. Debug mode must not be active in production
             if self.DEBUG:
                 raise ValueError("Security violation: DEBUG mode must be False in production.")
 
             # 2. Insecure default secret check
-            if "insecure" in self.JWT_SECRET.lower() or "dev" in self.JWT_SECRET.lower():
+            insecure_markers = {"insecure", "dev", "change", "replace", "default"}
+            if any(marker in self.JWT_SECRET.lower() for marker in insecure_markers):
                 raise ValueError(
                     "Security violation: Default or development JWT_SECRET cannot be used in production."
                 )
