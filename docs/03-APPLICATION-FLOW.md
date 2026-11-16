@@ -281,8 +281,14 @@ sequenceDiagram
     UI->>RecAPI: POST /api/v1/recovery/plans/execute {plan_id}
     RecAPI->>DB: BEGIN TRANSACTION
     RecAPI->>DB: Capture Pre-Recovery State Snapshot into recovery_plans.pre_recovery_snapshot
-    RecAPI->>DB: Revert M-8812 to Checkpoint CP-001 Content & Set trust_state='TRUSTED'
-    RecAPI->>DB: Quarantine Intermediary Poisoned Versions
+    RecAPI->>DB: Restore target version and preserve immutable recovery event
+    RecAPI->>DB: Quarantine or tombstone contaminated intermediary versions
+    RecAPI->>DB: Revalidate restored source, lineage, integrity, freshness and policy
+    alt Revalidation succeeds
+        RecAPI->>DB: Set eligible restored record TRUSTED
+    else Revalidation fails or is uncertain
+        RecAPI->>DB: Keep UNVERIFIED or QUARANTINED; normal retrieval remains blocked
+    end
     RecAPI->>DB: COMMIT TRANSACTION
     RecAPI->>Audit: RecordEvent('RECOVERY_EXECUTED', plan_id, restored_count)
     RecAPI-->>UI: 200 OK {status: 'COMPLETED', restored_records_count: 2}
