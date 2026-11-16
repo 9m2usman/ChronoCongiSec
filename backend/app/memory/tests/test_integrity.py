@@ -1,4 +1,4 @@
-"""Tests for SHA-256 content hashing in the Memory & Provenance engine."""
+"""Tests for SHA-256 content hashing and integrity verification in Memory & Provenance."""
 
 import hashlib
 import sys
@@ -9,11 +9,11 @@ repo_root = Path(__file__).resolve().parents[4]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-try:
-    from backend.app.memory.hashing import sha256_hex
-except ModuleNotFoundError:
-    from ..hashing import sha256_hex
-
+from backend.app.memory.integrity import (
+    MemoryIntegrityError,
+    sha256_hex,
+    verify_checksum,
+)
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -78,3 +78,19 @@ def test_empty_input_handled():
     # None handling
     hash_none = sha256_hex(None)
     assert hash_none == EMPTY_SHA256
+
+
+def test_verify_checksum():
+    """verify_checksum must return True for matching checksums and False for mismatches or invalid inputs."""
+    content = "Legitimate financial authorization record."
+    valid_hash = sha256_hex(content)
+
+    assert verify_checksum(content, valid_hash) is True
+    assert verify_checksum(content, valid_hash.upper()) is True  # Case insensitive
+    assert verify_checksum(content, f"  {valid_hash}  ") is True  # Strip whitespace
+
+    # Tampered / mismatched
+    assert verify_checksum("Tampered content", valid_hash) is False
+    assert verify_checksum(content, EMPTY_SHA256) is False
+    assert verify_checksum(content, None) is False
+    assert verify_checksum(None, valid_hash) is False

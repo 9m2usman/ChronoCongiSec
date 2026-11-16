@@ -10,24 +10,26 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.core.exceptions import ValidationError
-from backend.app.memory.hashing import sha256_hex
+from backend.app.memory.ingestion import (
+    MAX_PROVENANCE_DEPTH,
+    MAX_TRAVERSAL_BUDGET,
+    InvalidProvenanceError,
+    _check_dag_cycle,
+    ingest_memory,
+)
+from backend.app.memory.integrity import MemoryIntegrityError, sha256_hex
 from backend.app.memory.models import TrustState
 from backend.app.memory.repository import (
     InMemoryMemoryRepository,
     MemoryRepository,
     get_default_repository,
 )
-from backend.app.memory.service import (
-    MAX_PROVENANCE_DEPTH,
-    MAX_TRAVERSAL_BUDGET,
-    InvalidProvenanceError,
-    MemoryIntegrityError,
+from backend.app.memory.retrieval import (
     MemoryNotFoundError,
     get_memory_detail,
-    ingest_memory,
     retrieve_memory,
-    update_memory,
 )
+from backend.app.memory.versioning import update_memory
 
 
 @pytest.fixture
@@ -304,7 +306,7 @@ def test_provenance_cyclic_graph_rejected(repo):
     docB, _ = ingest_memory(tenant_id=tenant_id, content="Node B", parent_record_id=docA.id, repository=repo)
 
     # Attempting to link A to derive from B creates A -> B -> A cycle
-    from backend.app.memory.service import _check_dag_cycle
+    from backend.app.memory.ingestion import _check_dag_cycle
     with pytest.raises(InvalidProvenanceError) as exc_info:
         _check_dag_cycle(repo, from_id=docB.id, to_id=docA.id, tenant_id=tenant_id)
 
@@ -361,7 +363,7 @@ def test_provenance_large_graph_exceeding_budget_rejected(repo):
             )
         )
 
-    from backend.app.memory.service import _check_dag_cycle
+    from backend.app.memory.ingestion import _check_dag_cycle
     with pytest.raises(InvalidProvenanceError) as exc_info:
         _check_dag_cycle(repo, from_id="new-parent", to_id=root_id, tenant_id=tenant_id)
 

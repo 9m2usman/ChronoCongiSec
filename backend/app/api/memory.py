@@ -28,12 +28,12 @@ from backend.app.memory.models import (
     MemoryIngestRequest,
     MemoryRecordResponse,
 )
+from backend.app.memory.ingestion import ingest_memory
+from backend.app.memory.integrity import MemoryIntegrityError
 from backend.app.memory.repository import MemoryRepository, get_default_repository
-from backend.app.memory.service import (
-    MemoryIntegrityError,
+from backend.app.memory.retrieval import (
     MemoryNotFoundError,
     get_memory_detail,
-    ingest_memory,
     retrieve_memory,
 )
 from backend.app.tenancy.context import TenantContext

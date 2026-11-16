@@ -17,7 +17,7 @@ from backend.app.api.memory import get_repository
 from backend.app.core.config import get_settings
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
-from backend.app.memory.hashing import sha256_hex
+from backend.app.memory.integrity import sha256_hex
 from backend.app.memory.repository import InMemoryMemoryRepository
 
 
