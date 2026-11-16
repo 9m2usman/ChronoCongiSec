@@ -126,14 +126,14 @@ sequenceDiagram
     MW->>API: Forward with Injected TenantContext
     API->>MemSvc: IngestKnowledge(tenant_id, content, record_type, source_id, parent_id)
     MemSvc->>MemSvc: Compute Canonical SHA-256 Checksum over normalized content
-    MemSvc->>DB: INSERT memory_records (id, tenant_id, trust_state='TRUSTED', current_version=1)
+    MemSvc->>DB: INSERT memory_records (id, tenant_id, trust_state='UNVERIFIED', current_version=1)
     MemSvc->>DB: INSERT memory_versions (record_id, version=1, content, checksum)
     opt Parent Record ID Provided
         MemSvc->>DB: INSERT provenance_edges (from_id=parent_id, to_id=record_id, relation='DERIVED_FROM')
     end
     MemSvc->>Audit: RecordEvent('MEMORY_INGESTED', record_id, checksum)
     Audit->>DB: INSERT audit_events
-    MemSvc-->>Caller: 201 Created {id, version: 1, checksum, trust_state: 'TRUSTED'}
+    MemSvc-->>Caller: 201 Created {id, version: 1, checksum, trust_state: 'UNVERIFIED'}
 ```
 
 ---
@@ -174,7 +174,7 @@ sequenceDiagram
                 GW->>DB: INSERT policy_decisions (decision='BLOCK', execution_status='NOT_EXECUTED')
                 GW->>Audit: RecordEvent('ACTION_BLOCKED_UNTRUSTED_MEMORY')
                 GW-->>Agent: 200 OK {decision: 'BLOCK', reasons: ['Referenced memory is quarantined/suspicious']}
-            else All Referenced Memories are TRUSTED
+            else All Referenced Memories are TRUSTED and eligible for this action
                 Policy-->>GW: Result: ALLOW
                 GW->>DB: INSERT policy_decisions (decision='ALLOW')
                 GW->>Adapter: ExecuteTool(tool_name, operation, parameters)
@@ -213,7 +213,7 @@ sequenceDiagram
     MemAPI-->>UI: 200 OK {trust_state: 'QUARANTINED'}
     UI-->>Analyst: Show Confirmation Badge: "Record Quarantined and Excluded from Agent Retrieval"
     
-    Note over Analyst, DB: Subsequent agent queries to /api/v1/memory?exclude_quarantined=true will omit M-8812
+    Note over Analyst, DB: Normal agent retrieval returns only eligible TRUSTED records; forensic retrieval is separately authorized
 ```
 
 ---
