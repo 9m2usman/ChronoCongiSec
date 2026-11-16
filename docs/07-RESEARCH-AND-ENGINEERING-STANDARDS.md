@@ -113,6 +113,8 @@ Specific non-regression and evidence rules:
 - KnowledgeLine's own README configures Gemini and SMTP integrations. Do not claim zero cloud egress or sovereign-only processing when external LLM, email, webhook or telemetry providers are enabled. Data-flow and egress controls must reflect the actual deployment configuration.
 - A `SHA-256` digest is a content checksum, not a digital signature, source-authentication proof or non-repudiation mechanism. A party able to replace both content and digest can recompute the digest. Protect expected digests with separately controlled signatures/HMACs, KMS-backed keys or tamper-evident checkpoints where the threat model requires authenticity.
 - KnowledgeLine's reported 100% accuracy over 1,000 synthetic claims, 0.908 ms divergence latency, and 10,000-turn drift simulations are project-specific reported results. They do not establish general real-world detection accuracy or a universal drift law. Rebuild representative, held-out, independently labelled evaluation before making AMSC performance claims.
+- Treat the KnowledgeLine divergence equation as a domain-specific heuristic/decision-support feature until its variables, normalization, weights, thresholds and calibration are justified on representative data. Semantic distance is not equivalent to factual contradiction; a weighted score can hide a severe single constraint violation or overreact to irrelevant wording changes. Preserve deterministic hard constraints separately from statistical drift scores.
+- Do not describe ordinary hashing, provenance metadata or tenant isolation as “zero-knowledge cryptography” unless a specific zero-knowledge proof protocol is implemented and verified. The KnowledgeLine research draft uses “zero-knowledge” language, but the described SHA-256 and in-tenant processing do not by themselves constitute a zero-knowledge proof.
 - Its email status `ACCEPTED_BY_PROVIDER` does not prove recipient inbox delivery; retain the same distinction for every external tool result.
 - Do not promote a source or memory to TRUSTED merely because a hash verifies, a divergence score is low, a model judge agrees, or a source is in a tenant's database. Trust requires an explicit policy-governed validation decision and preserved evidence.
 
@@ -776,7 +778,7 @@ The following sources are the initial selected register. The team must update st
 | R-011 | Hijacking Agent Memory, arXiv:2605.29960 | Preprint | Conversational triggerable memory backdoors |
 | R-012 | AkasicMEM, arXiv:2609.25563 | Preprint | Enterprise authorization continuity |
 | R-013 | ToxicRAG, arXiv:2609.11082 | Preprint | Narrative single-document RAG poisoning |
-| R-014 | Deterministic Memory Conflict Resolution, arXiv:2606.01435 | Preprint | Authority/time/version-aware conflict resolution |
+| R-014 | Reliable Post-Retrieval Assembly for Agent Memory, arXiv:2606.01435 | Preprint | Separate evidence extraction from policy execution; current-value conflict handling when serial/version metadata exists |
 | R-015 | When Memory Lies, arXiv:2608.04574 | Preprint | Stale memory vs current observation |
 | R-016 | HaluMem: Evaluating Hallucinations in Memory Systems of Agents, EMNLP 2026 | Peer-reviewed benchmark paper | Memory extraction, updating and QA hallucination evaluation |
 | R-017 | AgentDojo, NeurIPS 2024 | Peer-reviewed benchmark | Tool-output prompt injection |
@@ -786,7 +788,6 @@ The following sources are the initial selected register. The team must update st
 | R-021 | Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall, arXiv:2604.12948 | Preprint | Fact-plus-contextual-trace memory encoding; distinct from AMSC's execution/memory observability Dual Trace |
 | R-022 | TrustMem: Learning Trustworthy Memory Consolidation, Findings of EMNLP 2026 | Peer-reviewed findings paper | Transition-level coverage, preservation and faithfulness checks |
 | R-023 | MemBook: A Hierarchical Reasoning-based Memory Framework, Findings of EMNLP 2026 | Peer-reviewed findings paper | Hierarchical temporal/logical memory retrieval; evaluate as optional retrieval layer |
-| R-025 | Reliable Post-Retrieval Assembly for Agent Memory, arXiv:2606.01435 | Preprint | Separate evidence extraction from policy execution; current-value conflict handling when serial/version metadata exists |
 | R-024 | AgentHallu: Benchmarking Automated Hallucination Attribution, EMNLP 2026 | Peer-reviewed main-conference paper | Candidate attribution of hallucination origins across agent trajectories |
 
 ### Standards and implementation guidance
