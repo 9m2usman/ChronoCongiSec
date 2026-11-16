@@ -13,6 +13,9 @@
 
 ## 1. Database Principles & Storage Boundaries
 
+**Tenant-safe relational references (mandatory):** For every tenant-owned parent table referenced by another tenant-owned table, enforce tenant-consistent relationships at the database layer, not only in application query filters. Add a `UNIQUE (tenant_id, id)` constraint to the parent and use composite foreign keys `(tenant_id, parent_id) REFERENCES parent_table(tenant_id, id)` in the child. Apply this pattern to memory→agent/source, version→memory record, provenance edge→both endpoint records, transformation→input/output records, retrieval event→agent/memory, tool permission→agent/tool, and recovery/checkpoint references. Keep `tenant_id NOT NULL`; ensure delete/update behavior preserves forensic history and does not create cross-tenant links. M6 owns the exact migration design and must test forged cross-tenant foreign-key combinations directly against PostgreSQL.
+
+
 AMSC enforces a strict distinction between durable systems of record and temporary ephemeral stores:
 
 1. **PostgreSQL System of Record:**
@@ -200,7 +203,7 @@ CREATE TABLE sources (
     name VARCHAR(255) NOT NULL,
     source_type VARCHAR(64) NOT NULL DEFAULT 'DOCUMENT_FEED',
     uri VARCHAR(1024),
-    trust_state VARCHAR(32) NOT NULL DEFAULT 'TRUSTED', -- TRUSTED, UNVERIFIED, UNTRUSTED
+    trust_state VARCHAR(32) NOT NULL DEFAULT 'UNVERIFIED', -- UNVERIFIED, TRUSTED, UNTRUSTED
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -222,7 +225,7 @@ CREATE TABLE memory_records (
     agent_id VARCHAR(36) REFERENCES agents(id) ON DELETE SET NULL,
     source_id VARCHAR(36) REFERENCES sources(id) ON DELETE SET NULL,
     record_type VARCHAR(64) NOT NULL DEFAULT 'KNOWLEDGE', -- KNOWLEDGE, CONVERSATION, SCRATCHPAD
-    trust_state VARCHAR(32) NOT NULL DEFAULT 'TRUSTED', -- UNVERIFIED, TRUSTED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED
+    trust_state VARCHAR(32) NOT NULL DEFAULT 'UNVERIFIED', -- UNVERIFIED, TRUSTED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED
     current_version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
