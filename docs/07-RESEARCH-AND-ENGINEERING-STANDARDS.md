@@ -2,7 +2,7 @@
 
 **Document ID:** AMSC-DOC-007  
 **Version:** 1.0.0  
-**Status:** Proposed engineering standard — review required before treating as a release gate  
+**Status:** Approved research-backed engineering standard — v1.0 (documentation baseline; implementation remains subject to existing team ownership and milestone gates)  
 **Prepared:** 16 November 2026  
 **Applies to:** All M1–M7 work, integrations, tests, demonstrations and future milestones  
 **Repository:** https://github.com/9m2usman/ChronoCongiSec
@@ -106,6 +106,16 @@ Retain deterministic impact simulation: show which memories, agents, workflows a
 
 ### 3.6 KnowledgeLine lessons and constraints
 
+The KnowledgeLine phase documents are valuable implementation history, but their `VERIFIED` labels and benchmark numbers are claims made by that project's own documentation; they are not independent security certification or peer-reviewed validation. Its separate `KNOWLEDGELINE_RESEARCH_PAPER_DRAFT.md` is an internal research manuscript, not a peer-reviewed publication. Treat the TMA-NM / Trust-Mediated Architecture, Section 5 governance model, divergence equation, SBU and T-1 recovery as project-originated design patterns unless a separate external source is cited. They are useful hypotheses and engineering patterns, not established mathematical laws.
+
+Specific non-regression and evidence rules:
+- KnowledgeLine Phase 12 documents an in-memory, node-local login rate limiter and explicitly notes it is not distributed. ChronoCongiSec must retain its Redis-backed distributed rate-limiting direction; do not copy the node-local fallback into production.
+- KnowledgeLine's own README configures Gemini and SMTP integrations. Do not claim zero cloud egress or sovereign-only processing when external LLM, email, webhook or telemetry providers are enabled. Data-flow and egress controls must reflect the actual deployment configuration.
+- A `SHA-256` digest is a content checksum, not a digital signature, source-authentication proof or non-repudiation mechanism. A party able to replace both content and digest can recompute the digest. Protect expected digests with separately controlled signatures/HMACs, KMS-backed keys or tamper-evident checkpoints where the threat model requires authenticity.
+- KnowledgeLine's reported 100% accuracy over 1,000 synthetic claims, 0.908 ms divergence latency, and 10,000-turn drift simulations are project-specific reported results. They do not establish general real-world detection accuracy or a universal drift law. Rebuild representative, held-out, independently labelled evaluation before making AMSC performance claims.
+- Its email status `ACCEPTED_BY_PROVIDER` does not prove recipient inbox delivery; retain the same distinction for every external tool result.
+- Do not promote a source or memory to TRUSTED merely because a hash verifies, a divergence score is low, a model judge agrees, or a source is in a tenant's database. Trust requires an explicit policy-governed validation decision and preserved evidence.
+
 Carry forward the strengths above, but avoid these failure patterns:
 
 - **Shared-base or vector-store isolation shortcuts:** tenant isolation must not depend on a caller-supplied filter alone. Enforce tenant boundaries in authenticated context, repository queries, database constraints/RLS where appropriate, and adversarial cross-tenant tests.
@@ -134,15 +144,15 @@ Preserve these useful patterns:
 
 ### 4.1 AgentGuard limitations that must not be inherited
 
-The AgentGuard repository's own evaluation documentation explicitly describes synthetic scenario data, a deterministic stand-in attacker/agent in its reproducible end-to-end demo, weak generalization to unseen injection phrasing, and limited incremental benefit from its default ML blend. It also reports that its model adds little over rules at the default weight and that unseen-family performance is weaker.
+The AgentGuard repository's own `docs/EVALUATION.md` is unusually transparent and must be read before borrowing its scoring approach. It reports 27 synthetic scenario families, a 7,000-scenario training pool and a 2,500-scenario test pool; the default rules-plus-model blend is 93.4% accuracy versus 93.3% for rules alone on that synthetic test pool. On held-out scenario families, the model-only accuracy drops to 76.4% and review-class recall to 5.5%. Its prompt-injection classifier is weak on unseen phrasing and the report explicitly calls out Roman Urdu and reworded styles. Its 0% end-to-end attack success demonstration uses a deterministic `NaiveAgentModel`, and the tested harmful outcomes were already blocked by action-level rules even when injection detection was disabled. The evaluation also reports a single-node setup, no application TLS termination or rate limiting, and development API keys that must be changed. These are project-reported synthetic/demo results, not evidence of real-world generalization.
 
 Therefore:
 
-1. Do not treat synthetic accuracy or a small demonstration attack set as proof of real-world security.
+1. Do not treat synthetic accuracy or a small demonstration attack set as proof of real-world security. Report AgentGuard's sample sizes and limitations whenever citing its evaluation.
 2. Do not allow an XGBoost model, classifier, SHAP explanation or LLM analyst to authorize a tool call.
 3. Do not assume prompt-injection text detection catches semantic, multilingual, encoded, compositional or delayed attacks.
 4. Do not rely on keyword/pattern detection as the only memory-poisoning defense.
-5. Do not confuse detecting an injection with preventing its downstream effect.
+5. Do not confuse detecting an injection with preventing its downstream effect. AgentGuard's own end-to-end result shows why action-boundary policy can be the actual blocking control even when the injection detector is disabled.
 6. Do not claim an action was blocked merely because a model labelled it risky; verify the tool was not invoked and no external side effect occurred.
 7. Keep hard permission, tenant, destination, data-flow and action constraints deterministic.
 8. Evaluate on unseen attack families, realistic tools, real state changes and independent ground-truth oracles.
@@ -230,6 +240,8 @@ AMSC application:
 - Distinguish this paper's multimodal memory architecture from the separate 2026 ChronoMem semantic version-control paper.
 
 ### 6.2 Memory poisoning and trust propagation
+**Important dual-trace distinction:** KnowledgeLine's Phase 03/07 uses `FACT` and `SCENE` as two memory representations; the separate paper *Drawing on Memory* pairs a factual trace with a generated contextual scene trace. These are distinct from AMSC's UI/observability **Dual Trace**, which correlates execution and memory/evidence spans. A generated SCENE is a mnemonic reconstruction, not primary source evidence. Label it as model-generated/derived, retain its source-event references, and never use the narrative itself to establish factual truth, authority or action permission. Evaluate privacy leakage and injection carryover before adopting scene traces.
+
 **Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall in LLM Agents** — arXiv:2604.12948 (2026), preprint.
 
 Source: https://arxiv.org/abs/2604.12948
@@ -420,6 +432,48 @@ AMSC application:
 Important distinction:
 - AMSC is a memory integrity and action-governance control plane. It cannot guarantee that an underlying LLM never hallucinates. It can preserve evidence, detect certain inconsistencies, require verification and block actions whose required evidence is missing.
 
+### 6.5A Memory consolidation, evidence assembly and hallucination attribution
+
+**TrustMem: Learning Trustworthy Memory Consolidation for LLM Agents with Long-Term Memory** — Findings of EMNLP 2026, peer-reviewed conference findings paper.
+
+Source: https://aclanthology.org/2026.findings-emnlp.2419/
+
+Relevance:
+- Evaluates memory transitions using coverage, preservation and faithfulness, addressing omissions, corruption and unsupported additions during updates.
+- A useful complement to AMSC's immutable versions and source lineage: evaluate the transition between old and proposed memory states, not only the final record.
+
+AMSC application:
+- Add transition-level evaluation for memory create/update/consolidate operations: what source facts were preserved, omitted, altered, contradicted or newly invented?
+- Preserve before/after versions and evidence links for every proposed transition.
+- Use a verifier as a diagnostic signal or review trigger; it must not independently promote memory to TRUSTED or authorize actions.
+- Consider preference learning only as an offline model-improvement experiment with held-out evaluation. Do not add a trained verifier as a mandatory runtime dependency without measured benefit and a safe fallback.
+
+**MemBook: A Hierarchical Reasoning-based Memory Framework for Hallucination-Resistant LLM Agents** — Findings of EMNLP 2026, peer-reviewed conference findings paper.
+
+Source: https://aclanthology.org/2026.findings-emnlp.1847/
+
+Relevance:
+- Studies hierarchical memory organization and retrieval across evolving memory records, with evaluation on HaluMem and LongMemEval.
+- Offers a research direction for organizing temporal, logical and evidentiary relationships rather than treating all memory as a flat vector collection.
+
+AMSC application:
+- Evaluate whether a hierarchical retrieval/assembly layer improves temporal and multi-hop evidence selection over the existing PostgreSQL + pgvector design.
+- Preserve the canonical relational record and provenance graph as the authority; hierarchy is a retrieval/organization layer, not a replacement for tenant-scoped storage or policy enforcement.
+- Benchmark memory utility, unsupported synthesis, latency and tenant isolation before adopting.
+
+**AgentHallu: Benchmarking Automated Hallucination Attribution of LLM-based Agents** — EMNLP 2026, peer-reviewed main-conference paper.
+
+Source: https://aclanthology.org/2026.emnlp-main.925/
+
+Relevance:
+- Studies attribution of hallucinations to intermediate planning, retrieval, reasoning, human-interaction and tool-use steps across multi-step agent trajectories.
+- Its reported best step-localization accuracy is limited, demonstrating that automated attribution remains difficult.
+
+AMSC application:
+- Extend Dual Trace forensic analysis to identify candidate divergence points: source ingestion, memory extraction, retrieval, reasoning, policy evaluation, tool result interpretation or final reporting.
+- Treat model-generated attribution as an investigative hypothesis. Correlate it with immutable spans, actual memory versions, policy decisions and independently observed tool effects.
+- Do not use automated attribution as a standalone verdict or authorization input.
+
 ### 6.5 Tool execution and agent security
 
 **AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents** — NeurIPS 2024.
@@ -477,6 +531,8 @@ Caution:
 - Validate the paper's test environment, assumptions and external reproducibility before adopting reported ASR improvements.
 
 ## 7. Dual Trace: required AMSC interpretation
+
+The KnowledgeLine FACT/SCENE memory encoding and AMSC execution/memory observability traces are complementary concepts, not interchangeable implementations. See Section 6.2 for the handling requirements for generated scene traces.
 
 Dual Trace is an AMSC architectural capability, not a claim that one paper has already validated the complete AMSC design.
 
@@ -728,6 +784,9 @@ The following sources are the initial selected register. The team must update st
 | R-019 | Runtime Protection Practice, IEEE 2026 | Conference paper | On-demand behavioral sandbox |
 | R-020 | Runtime Policy Enforcement for MCP-Based LLM Agents, Electronics 2026 | Published research | Tool-boundary PEP and information-flow labels |
 | R-021 | Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall, arXiv:2604.12948 | Preprint | Fact-plus-contextual-trace memory encoding; distinct from AMSC's execution/memory observability Dual Trace |
+| R-022 | TrustMem: Learning Trustworthy Memory Consolidation, Findings of EMNLP 2026 | Peer-reviewed findings paper | Transition-level coverage, preservation and faithfulness checks |
+| R-023 | MemBook: A Hierarchical Reasoning-based Memory Framework, Findings of EMNLP 2026 | Peer-reviewed findings paper | Hierarchical temporal/logical memory retrieval; evaluate as optional retrieval layer |
+| R-024 | AgentHallu: Benchmarking Automated Hallucination Attribution, EMNLP 2026 | Peer-reviewed main-conference paper | Candidate attribution of hallucination origins across agent trajectories |
 
 ### Standards and implementation guidance
 
