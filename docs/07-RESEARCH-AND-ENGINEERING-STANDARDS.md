@@ -394,7 +394,7 @@ AMSC application:
 - Detect contradictions and suspicious authority claims.
 - Test narrative-form poisoning, not only obvious malicious strings.
 
-**Don't Ask the LLM to Track Freshness: A Deterministic Recipe for Memory Conflict Resolution** — arXiv:2606.01435 (2026), preprint.
+**Reliable Post-Retrieval Assembly for Agent Memory: Separating Evidence Extraction from Policy Execution** — arXiv:2606.01435 (2026), preprint. The arXiv identifier's citation metadata has also circulated under the working/alternate title “Don't Ask the LLM to Track Freshness”; use the current paper title when citing the work.
 
 Source: https://arxiv.org/abs/2606.01435
 
@@ -418,12 +418,12 @@ AMSC application:
 - Compare memory claims against current authoritative observations where available.
 - Make uncertainty and stale status visible to the agent and policy engine.
 
-**HaluMem: Evaluating Hallucinations in Memory Systems of Agents** — arXiv:2511.03506 (2025), research benchmark.
+**HaluMem: Evaluating Hallucinations in Memory Systems of Agents** — EMNLP 2026 main-conference paper and benchmark.
 
-Source: https://arxiv.org/abs/2511.03506
+Source: https://aclanthology.org/2026.emnlp-main.220/
 
 Relevance:
-- Evaluate hallucination introduced during memory construction, retrieval and answer generation as separate failure stages.
+- Evaluate hallucination introduced during memory extraction, updating and question answering as separate failure stages. HaluMem provides Medium and Long datasets with roughly 15,000 memory points and 3,500 questions.
 
 AMSC application:
 - Add tests for fabricated memory, incorrect extraction, unsupported summaries, retrieval mismatch and confident answer without evidence.
@@ -432,7 +432,7 @@ AMSC application:
 Important distinction:
 - AMSC is a memory integrity and action-governance control plane. It cannot guarantee that an underlying LLM never hallucinates. It can preserve evidence, detect certain inconsistencies, require verification and block actions whose required evidence is missing.
 
-### 6.5A Memory consolidation, evidence assembly and hallucination attribution
+### 6.6 Memory consolidation, evidence assembly and hallucination attribution
 
 **TrustMem: Learning Trustworthy Memory Consolidation for LLM Agents with Long-Term Memory** — Findings of EMNLP 2026, peer-reviewed conference findings paper.
 
@@ -474,7 +474,7 @@ AMSC application:
 - Treat model-generated attribution as an investigative hypothesis. Correlate it with immutable spans, actual memory versions, policy decisions and independently observed tool effects.
 - Do not use automated attribution as a standalone verdict or authorization input.
 
-### 6.5 Tool execution and agent security
+### 6.7 Tool execution and agent security
 
 **AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents** — NeurIPS 2024.
 
@@ -778,7 +778,7 @@ The following sources are the initial selected register. The team must update st
 | R-013 | ToxicRAG, arXiv:2609.11082 | Preprint | Narrative single-document RAG poisoning |
 | R-014 | Deterministic Memory Conflict Resolution, arXiv:2606.01435 | Preprint | Authority/time/version-aware conflict resolution |
 | R-015 | When Memory Lies, arXiv:2608.04574 | Preprint | Stale memory vs current observation |
-| R-016 | HaluMem, arXiv:2511.03506 | Benchmark/research | Memory hallucination evaluation |
+| R-016 | HaluMem: Evaluating Hallucinations in Memory Systems of Agents, EMNLP 2026 | Peer-reviewed benchmark paper | Memory extraction, updating and QA hallucination evaluation |
 | R-017 | AgentDojo, NeurIPS 2024 | Peer-reviewed benchmark | Tool-output prompt injection |
 | R-018 | Securing Tool-Using AI Agents Against Injection and Authority Misuse, Computation 2026 | Published research; simulation-based | Least privilege, allowlisting, verification, approvals, trade-offs |
 | R-019 | Runtime Protection Practice, IEEE 2026 | Conference paper | On-demand behavioral sandbox |
@@ -786,6 +786,7 @@ The following sources are the initial selected register. The team must update st
 | R-021 | Drawing on Memory: Dual-Trace Encoding Improves Cross-Session Recall, arXiv:2604.12948 | Preprint | Fact-plus-contextual-trace memory encoding; distinct from AMSC's execution/memory observability Dual Trace |
 | R-022 | TrustMem: Learning Trustworthy Memory Consolidation, Findings of EMNLP 2026 | Peer-reviewed findings paper | Transition-level coverage, preservation and faithfulness checks |
 | R-023 | MemBook: A Hierarchical Reasoning-based Memory Framework, Findings of EMNLP 2026 | Peer-reviewed findings paper | Hierarchical temporal/logical memory retrieval; evaluate as optional retrieval layer |
+| R-025 | Reliable Post-Retrieval Assembly for Agent Memory, arXiv:2606.01435 | Preprint | Separate evidence extraction from policy execution; current-value conflict handling when serial/version metadata exists |
 | R-024 | AgentHallu: Benchmarking Automated Hallucination Attribution, EMNLP 2026 | Peer-reviewed main-conference paper | Candidate attribution of hallucination origins across agent trajectories |
 
 ### Standards and implementation guidance
