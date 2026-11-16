@@ -10,6 +10,7 @@ Follows:
 """
 
 import json
+import secrets
 from functools import lru_cache
 from typing import Any, List, Union
 from pydantic import Field, field_validator, model_validator
@@ -94,13 +95,14 @@ class Settings(BaseSettings):
             "X-Tenant-ID",
             "X-Trace-ID",
             "X-Request-ID",
+            "X-Correlation-ID",
             "Idempotency-Key",
             "X-Idempotency-Key",
         ],
         description="Explicit allowed HTTP request headers for CORS",
     )
     CORS_EXPOSE_HEADERS: List[str] = Field(
-        default_factory=lambda: ["X-Request-ID", "X-Trace-ID"],
+        default_factory=lambda: ["X-Request-ID", "X-Trace-ID", "X-Correlation-ID"],
         description="Response headers exposed to frontend browser clients",
     )
 
@@ -112,7 +114,7 @@ class Settings(BaseSettings):
 
     # --- 5. Security & Authentication Foundations (Day 2 Readiness) ---
     JWT_SECRET: str = Field(
-        default="insecure-dev-secret-key-change-in-production-min-32-chars",
+        default="",
         description="Secret key for HMAC-SHA256 JWT signing (never commit real production secrets)",
     )
     JWT_ALGORITHM: str = Field(
@@ -198,6 +200,24 @@ class Settings(BaseSettings):
                 "Security violation: Wildcard ('*') CORS origins cannot be combined with credentialed requests."
             )
 
+        # JWT Secret Handling:
+        # In dev/test/staging, generate a cryptographically secure random 32-byte secret if not provided.
+        # In production, require an explicit, strong secret from the runtime environment.
+        if not self.JWT_SECRET:
+            if self.APP_ENV == "production":
+                raise ValueError(
+                    "Security violation: JWT_SECRET must be explicitly configured in the runtime environment for production."
+                )
+            self.JWT_SECRET = secrets.token_urlsafe(32)
+        elif len(self.JWT_SECRET) < 32:
+            if self.APP_ENV == "production":
+                raise ValueError(
+                    "Security violation: JWT_SECRET must be at least 32 characters in production."
+                )
+            raise ValueError(
+                "Security violation: JWT_SECRET must be at least 32 characters (256 bits)."
+            )
+
         # Strict Production Guardrails
         if self.APP_ENV == "production":
             # 1. Debug mode must not be active in production
@@ -205,7 +225,7 @@ class Settings(BaseSettings):
                 raise ValueError("Security violation: DEBUG mode must be False in production.")
 
             # 2. Insecure default secret check
-            insecure_markers = {"insecure", "dev", "change", "replace", "default"}
+            insecure_markers = {"insecure", "dev", "change", "replace", "default", "example"}
             if any(marker in self.JWT_SECRET.lower() for marker in insecure_markers):
                 raise ValueError(
                     "Security violation: Default or development JWT_SECRET cannot be used in production."

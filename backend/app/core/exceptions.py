@@ -182,14 +182,28 @@ def build_error_envelope(
 
 
 def get_trace_context(request: Request) -> tuple[str, Optional[str]]:
-    """Extract request_id and optional trace_id from request state or headers."""
+    """Extract request_id and optional trace_id from request state or sanitized headers."""
     req_id = getattr(request.state, "request_id", None)
     if not req_id:
-        req_id = request.headers.get("x-request-id") or request.headers.get("x-trace-id") or f"req-{uuid.uuid4().hex[:8]}"
+        raw_req = (
+            request.headers.get("x-request-id")
+            or request.headers.get("x-trace-id")
+            or request.headers.get("x-correlation-id")
+        )
+        if raw_req:
+            import re
+            if re.match(r"^[a-zA-Z0-9_\-\.]{1,128}$", str(raw_req).strip()):
+                req_id = str(raw_req).strip()
+        if not req_id:
+            req_id = f"req-{uuid.uuid4().hex[:8]}"
 
     trace_id = getattr(request.state, "trace_id", None)
     if not trace_id:
-        trace_id = request.headers.get("x-trace-id")
+        raw_trace = request.headers.get("x-trace-id") or request.headers.get("x-correlation-id")
+        if raw_trace:
+            import re
+            if re.match(r"^[a-zA-Z0-9_\-\.]{1,128}$", str(raw_trace).strip()):
+                trace_id = str(raw_trace).strip()
 
     return str(req_id), str(trace_id) if trace_id else None
 

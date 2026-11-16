@@ -16,6 +16,13 @@ from backend.app.core.exceptions import (
     ValidationError,
 )
 from backend.app.core.logging import setup_logging
+from backend.app.core.security import (
+    create_access_token,
+    decode_access_token,
+    hash_password,
+    needs_rehash,
+    verify_password,
+)
 
 __all__ = [
     "Settings",
@@ -29,4 +36,9 @@ __all__ = [
     "PolicyDeniedError",
     "SecurityDependencyError",
     "setup_logging",
+    "create_access_token",
+    "decode_access_token",
+    "hash_password",
+    "verify_password",
+    "needs_rehash",
 ]
