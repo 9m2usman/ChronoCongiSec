@@ -187,9 +187,9 @@ def test_custom_amsc_exception_envelope():
     assert "error" in payload
     err = payload["error"]
     assert err["code"] == "POLICY_EVALUATION_DENIED"
-    assert err["message"] == "The action violates security parameter ceilings."
+    assert err["message"] == "The proposed action was blocked by security policy."
     assert "request_id" in err
-    assert err["details"] == {"reasons": ["Amount $450 exceeds ceiling $300."]}
+    assert err["details"] is None
     assert "X-Request-ID" in response.headers
 
 

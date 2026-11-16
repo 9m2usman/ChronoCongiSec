@@ -92,13 +92,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         f"Starting {settings.APP_NAME} v{settings.APP_VERSION} [{settings.APP_ENV}]"
     )
 
-    # Production startup validation: Enforce real database repository configuration
+    # Production startup validation: Enforce real database repository and Redis rate limiter configuration
     if settings.APP_ENV == "production":
         auth_repo = getattr(app.state, "auth_repo", None)
         if auth_repo is None or getattr(auth_repo, "is_demo", False):
             raise RuntimeError(
                 "Production startup failure: Real database authentication repository is not configured. "
                 "In-memory demo authentication is strictly forbidden in production."
+            )
+
+        rate_limiter = getattr(app.state, "rate_limiter", None)
+        if rate_limiter is None or getattr(rate_limiter, "is_in_memory", False):
+            raise RuntimeError(
+                "Production startup failure: Redis-backed rate limiter is not configured. "
+                "In-memory rate limiting is strictly forbidden in production."
             )
 
     yield
@@ -122,7 +129,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
-    app.state.rate_limiter = InMemoryRateLimiter()
+
+    # In development and test, initialize safe in-memory rate limiter if permitted
+    if settings.APP_ENV != "production" and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
+        app.state.rate_limiter = InMemoryRateLimiter()
+    else:
+        app.state.rate_limiter = None
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)

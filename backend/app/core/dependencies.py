@@ -152,6 +152,8 @@ class InMemoryRateLimiter:
 
     Serves as the documented interface boundary until M7 provisions the Redis rate limiter.
     """
+    is_in_memory: bool = True
+
     def __init__(self) -> None:
         self.requests: Dict[str, List[float]] = defaultdict(list)
         self.is_available: bool = True
@@ -193,8 +195,18 @@ class InMemoryRateLimiter:
 _default_rate_limiter: Optional[RateLimiterProtocol] = None
 
 
-def get_default_rate_limiter() -> RateLimiterProtocol:
+def get_default_rate_limiter(settings: Optional[Settings] = None) -> RateLimiterProtocol:
+    """Factory returning the default rate limiter for dev/test."""
     global _default_rate_limiter
+    cfg = settings or get_settings()
+    if cfg.APP_ENV == "production":
+        raise RuntimeError(
+            "Security violation: In-memory rate limiter cannot be accessed in production."
+        )
+    if not getattr(cfg, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
+        raise RuntimeError(
+            "Security violation: In-memory rate limiter is disabled by configuration."
+        )
     if _default_rate_limiter is None:
         _default_rate_limiter = InMemoryRateLimiter()
     return _default_rate_limiter
@@ -205,12 +217,28 @@ def set_default_rate_limiter(limiter: Optional[RateLimiterProtocol]) -> None:
     _default_rate_limiter = limiter
 
 
-async def get_rate_limiter(request: Request) -> RateLimiterProtocol:
-    """Dependency returning the configured rate limiter (M7 Redis rate limiter when available)."""
+async def get_rate_limiter(
+    request: Request,
+    settings: SettingsDep,
+) -> RateLimiterProtocol:
+    """Dependency returning the configured rate limiter (M7 Redis rate limiter in production).
+
+    Strictly fails closed if Redis rate limiter is missing in production.
+    """
     limiter = getattr(request.app.state, "rate_limiter", None)
     if limiter is not None:
+        if settings.APP_ENV == "production" and getattr(limiter, "is_in_memory", False):
+            raise SecurityDependencyError("In-memory rate limiter is strictly forbidden in production.")
         return limiter
-    return get_default_rate_limiter()
+
+    if (
+        settings.APP_ENV == "production"
+        or not getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False)
+        or getattr(settings, "RATE_LIMITER_BACKEND", "") != "in_memory"
+    ):
+        raise SecurityDependencyError("Redis-backed rate limiting service is not configured.")
+
+    return get_default_rate_limiter(settings)
 
 
 RateLimiterDep = Annotated[RateLimiterProtocol, Depends(get_rate_limiter)]

@@ -174,9 +174,11 @@ class RateLimitExceededError(AMSCException):
 SAFE_PUBLIC_MESSAGES: Dict[str, str] = {
     "AUTHENTICATION_FAILED": "Invalid email, password, or tenant access.",
     "AUTHENTICATION_REQUIRED": "Authentication required. Please provide a valid Bearer token.",
+    "INVALID_TOKEN": "Invalid or expired authentication token.",
     "FORBIDDEN_ACTION": "You do not have permission to perform this action.",
     "FORBIDDEN": "Access denied. Insufficient permissions for this action.",
     "TENANT_ACCESS_FORBIDDEN": "Access to the requested tenant workspace is forbidden.",
+    "TENANT_ACCESS_DENIED": "Access to the requested tenant workspace is forbidden.",
     "RESOURCE_NOT_FOUND": "Not Found: The requested resource was not found.",
     "VALIDATION_ERROR": "Request validation failed. Please check your parameters.",
     "POLICY_EVALUATION_DENIED": "The proposed action was blocked by security policy.",
@@ -186,22 +188,10 @@ SAFE_PUBLIC_MESSAGES: Dict[str, str] = {
     "SERVICE_UNAVAILABLE": "Service temporarily unavailable.",
     "BAD_REQUEST": "Invalid request parameters.",
     "METHOD_NOT_ALLOWED": "Method not allowed for this resource.",
+    "CONFLICT": "The requested operation conflicts with existing resource state.",
 }
 
-SENSITIVE_DIAGNOSTIC_PATTERNS = [
-    "postgresql", "asyncpg", "redis", "traceback", "syntax error",
-    "password", "secret", "token", "hash", "key", "table", "column",
-    "select", "insert", "update", "delete", "connection refused",
-    "localhost", "127.0.0.1", "exception", "line ", "file ", "error on"
-]
-
-
-def is_safe_message(msg: str) -> bool:
-    """Check if an error string contains sensitive diagnostic or infrastructure patterns."""
-    if not msg:
-        return True
-    lower = msg.lower()
-    return not any(pattern in lower for pattern in SENSITIVE_DIAGNOSTIC_PATTERNS)
+DEFAULT_SAFE_PUBLIC_MESSAGE = "An application error occurred. The incident has been recorded."
 
 
 # --- Helper: Build Canonical Error Envelope & Headers ---
@@ -281,7 +271,7 @@ def build_response_headers(request: Request, req_id: str) -> Dict[str, str]:
 async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONResponse:
     """Handler for domain-specific AMSCException instances.
 
-    Guarantees that sensitive internal messages or connection details are never exposed to API clients.
+    Strictly returns allowlisted public error messages. Never exposes arbitrary exc.message or exc.details to clients.
     """
     req_id, _ = get_trace_context(request)
     headers = build_response_headers(request, req_id)
@@ -291,30 +281,17 @@ async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONRe
     if retry_after is not None:
         headers["Retry-After"] = str(retry_after)
 
-    # Internal diagnostic logging
+    # Internal diagnostic logging preserves detailed exception message in redacted logs
     logger.warning(
         f"Domain exception [{exc.code}] HTTP {exc.status_code} for {request.method} {request.url.path} (request_id={req_id}): {exc.message}"
     )
 
-    # Determine safe public error message:
-    # 5xx errors or messages containing internal/sensitive diagnostic strings are strictly scrubbed
-    if exc.status_code >= 500 or not is_safe_message(exc.message):
-        safe_message = SAFE_PUBLIC_MESSAGES.get(exc.code, "An unexpected server error occurred.")
-    elif exc.message:
-        safe_message = exc.message
-    elif exc.code in SAFE_PUBLIC_MESSAGES:
-        safe_message = SAFE_PUBLIC_MESSAGES[exc.code]
-    else:
-        safe_message = "An application error occurred."
+    # Strict allowlist mapping
+    safe_message = SAFE_PUBLIC_MESSAGES.get(exc.code, DEFAULT_SAFE_PUBLIC_MESSAGE)
 
-    # Sanitize details
+    # Strictly disallow arbitrary details to leak
     safe_details = None
-    if exc.code == "POLICY_EVALUATION_DENIED" and isinstance(exc.details, dict):
-        reasons = exc.details.get("reasons", [])
-        if isinstance(reasons, list):
-            safe_reasons = [str(r) for r in reasons if is_safe_message(str(r))]
-            safe_details = {"reasons": safe_reasons} if safe_reasons else None
-    elif exc.code == "VALIDATION_ERROR":
+    if exc.code == "VALIDATION_ERROR" and isinstance(exc.details, dict):
         safe_details = exc.details
 
     envelope = build_error_envelope(
@@ -329,7 +306,7 @@ async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONRe
 async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Handler for Starlette/FastAPI HTTPException instances.
 
-    Sanitizes arbitrary detail strings to prevent internal infrastructure/SQL disclosure.
+    Strictly maps HTTP status codes to allowlisted error codes and safe messages. Never exposes arbitrary exc.detail.
     """
     req_id, _ = get_trace_context(request)
     headers = build_response_headers(request, req_id)
@@ -341,6 +318,8 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
         status.HTTP_403_FORBIDDEN: "FORBIDDEN",
         status.HTTP_404_NOT_FOUND: "RESOURCE_NOT_FOUND",
         status.HTTP_405_METHOD_NOT_ALLOWED: "METHOD_NOT_ALLOWED",
+        status.HTTP_409_CONFLICT: "CONFLICT",
+        status.HTTP_422_UNPROCESSABLE_ENTITY: "VALIDATION_ERROR",
         status.HTTP_429_TOO_MANY_REQUESTS: "RATE_LIMIT_EXCEEDED",
         status.HTTP_500_INTERNAL_SERVER_ERROR: "INTERNAL_SERVER_ERROR",
         status.HTTP_503_SERVICE_UNAVAILABLE: "SERVICE_UNAVAILABLE",
@@ -351,13 +330,7 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
         f"HTTP error [{error_code}] status {exc.status_code} for {request.method} {request.url.path} (request_id={req_id}): {exc.detail}"
     )
 
-    raw_detail = str(exc.detail) if exc.detail else ""
-    if exc.status_code >= 500 or not is_safe_message(raw_detail):
-        safe_msg = SAFE_PUBLIC_MESSAGES.get(error_code, "An internal server error occurred.")
-    elif error_code in SAFE_PUBLIC_MESSAGES:
-        safe_msg = SAFE_PUBLIC_MESSAGES[error_code]
-    else:
-        safe_msg = raw_detail
+    safe_msg = SAFE_PUBLIC_MESSAGES.get(error_code, DEFAULT_SAFE_PUBLIC_MESSAGE)
 
     envelope = build_error_envelope(
         code=error_code,

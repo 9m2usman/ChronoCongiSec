@@ -137,6 +137,14 @@ class Settings(BaseSettings):
         default="fail_closed",
         description="Behavior when Redis is unavailable during login rate limiting: 'fail_closed' or 'fail_open'",
     )
+    ALLOW_IN_MEMORY_RATE_LIMITER: bool = Field(
+        default=True,
+        description="Explicit flag permitting in-memory rate limiting (strictly forbidden in production)",
+    )
+    RATE_LIMITER_BACKEND: str = Field(
+        default="in_memory",
+        description="Rate limiter implementation backend: 'in_memory' or 'redis'",
+    )
     LOGIN_RATE_LIMIT_IP_MAX_REQUESTS: int = Field(
         default=10,
         description="Max login attempts allowed per IP per window in production/dev",
@@ -302,6 +310,20 @@ class Settings(BaseSettings):
             if any(marker in self.REDIS_URL.lower() for marker in insecure_redis_markers):
                 raise ValueError(
                     "Security violation: Production REDIS_URL must use a non-localhost host."
+                )
+
+            # 7. In-memory rate limiting strictly forbidden in production
+            if self.ALLOW_IN_MEMORY_RATE_LIMITER:
+                raise ValueError(
+                    "Security violation: ALLOW_IN_MEMORY_RATE_LIMITER must be False in production."
+                )
+            if self.RATE_LIMITER_BACKEND != "redis":
+                raise ValueError(
+                    f"Security violation: RATE_LIMITER_BACKEND '{self.RATE_LIMITER_BACKEND}' is prohibited in production. Real 'redis' backend required."
+                )
+            if self.RATE_LIMIT_REDIS_FAILURE_POLICY != "fail_closed":
+                raise ValueError(
+                    "Security violation: Production RATE_LIMIT_REDIS_FAILURE_POLICY must be 'fail_closed'."
                 )
 
         return self
