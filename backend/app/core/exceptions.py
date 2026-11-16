@@ -189,6 +189,8 @@ SAFE_PUBLIC_MESSAGES: Dict[str, str] = {
     "BAD_REQUEST": "Invalid request parameters.",
     "METHOD_NOT_ALLOWED": "Method not allowed for this resource.",
     "CONFLICT": "The requested operation conflicts with existing resource state.",
+    "MEMORY_INTEGRITY_VIOLATION": "Cryptographic integrity verification failed for the requested memory record.",
+    "INVALID_PROVENANCE": "Invalid provenance relationship specified.",
 }
 
 DEFAULT_SAFE_PUBLIC_MESSAGE = "An application error occurred. The incident has been recorded."

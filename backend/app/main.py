@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from backend.app.api.auth import router as auth_router
+from backend.app.api.memory import router as memory_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import InMemoryRateLimiter
@@ -179,6 +180,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     api_router.include_router(auth_router)
     api_router.include_router(tenants_router)
+    api_router.include_router(memory_router)
 
     app.include_router(api_router)
 
