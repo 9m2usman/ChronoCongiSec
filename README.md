@@ -145,7 +145,8 @@ ChronoCongiSec/
     ├── 03-APPLICATION-FLOW.md         # Application Flow & System Workflows
     ├── 04-UI-UX-DESIGN.md             # UI/UX Design & Screen Specifications
     ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
-    └── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    ├── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    └── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
 ```
 
 ---
