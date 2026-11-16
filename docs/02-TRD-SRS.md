@@ -408,7 +408,11 @@ graph TD
     Validate --> Preserve[Capture and Commit Pre-Recovery Snapshot of Contaminated State]
     Preserve --> Rollback[Atomically Roll Back Target Records to CP-001 Version]
     Rollback --> MarkTrusted[Mark Restored Records as TRUSTED]
-    MarkTrusted --> Reindex[Revalidate Downstream Relations & Emit Audit Event]
+    MarkTrusted --> Revalidate[Revalidate restored source, lineage, integrity, freshness and policy]
+    Revalidate -->|Pass| Trusted[Set eligible records TRUSTED]
+    Revalidate -->|Fail or uncertain| Unverified[Keep UNVERIFIED or quarantine]
+    Trusted --> Reindex[Reindex eligible descendants & Emit Audit Event]
+    Unverified --> Reindex
 ```
 
 ### Critical Recovery Invariants:
