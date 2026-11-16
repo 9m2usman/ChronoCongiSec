@@ -328,10 +328,10 @@ sequenceDiagram
 
 ## 15. Memory & Provenance Architecture
 
-### 15.1 Cryptographic Content Hashing
+### 15.1 Cryptographic Content Hashing and Authenticity Boundary
 Upon ingestion of any memory chunk, AMSC calculates a SHA-256 hash:
 $$\text{Checksum} = \text{SHA256}(\text{UTF8}(\text{Strip}(\text{Content})))$$
-This checksum is stored in `memory_versions.checksum` and is verified upon retrieval and checkpoint creation to detect unauthorized database manipulation.
+This checksum is stored in `memory_versions.checksum` and is recomputed on retrieval and checkpoint creation to detect content mismatch against the recorded expected digest. **A plain SHA-256 checksum is not an authenticity signature:** an attacker able to modify both content and checksum can recompute it. If the threat model includes database-writer compromise, protect expected digests/checkpoint roots using a separately controlled KMS/HSM-backed signature or keyed MAC, and verify the signature against an independently protected key. Do not claim that SHA-256 alone detects an attacker who can rewrite both fields.
 
 ### 15.2 Version Lineage & Provenance Edges
 - **Memory Records:** Represent the persistent concept (`memory_records`).
@@ -343,12 +343,14 @@ This checksum is stored in `memory_versions.checksum` and is verified upon retri
 
 ### 15.3 Dynamic Trust States
 Memory records exist in one of six explicit states:
-1. `UNVERIFIED`: Newly ingested from external source; awaiting validation.
-2. `TRUSTED`: Cryptographically verified and approved for agent retrieval and action backing.
-3. `SUSPICIOUS`: Flagged by drift detection or analyst triage; excluded from high-risk action authorization.
-4. `QUARANTINED`: Confirmed or high-probability poisoned memory; **strictly excluded from all agent retrieval pipelines**.
-5. `REJECTED`: Permanently invalidated or malicious.
-6. `SUPERSEDED`: Replaced by a newer validated checkpoint or version.
+1. `UNVERIFIED`: Default state for every newly ingested source or memory. It is not eligible for normal agent retrieval or protected-action justification.
+2. `TRUSTED`: Explicitly validated and approved by the authorized trust workflow; eligible for retrieval subject to tenant, purpose, sensitivity and current policy checks. A valid checksum alone never promotes a record.
+3. `SUSPICIOUS`: Flagged by detection or analyst triage; excluded from normal agent retrieval and protected-action justification. It remains available only through separately authorized forensic workflows.
+4. `QUARANTINED`: Confirmed or high-probability poisoned memory; strictly excluded from all normal agent retrieval pipelines and action justification.
+5. `REJECTED`: Permanently invalidated or malicious; excluded from normal retrieval and action justification, retained only as permitted forensic evidence.
+6. `SUPERSEDED`: Replaced by a newer validated record/version; excluded from current-state retrieval and action justification unless an authorized historical/forensic query explicitly requests it.
+
+**State-transition rule:** ingestion creates `UNVERIFIED`; a separate authorized validation process evaluates source identity/authority, integrity, derivation lineage, freshness, sensitivity, contradictions and policy scope before it can promote the record to `TRUSTED`. Detection or analyst decisions may move records to `SUSPICIOUS` or `QUARANTINED`; recovery must not automatically set a record to `TRUSTED` without revalidation. Every transition records actor/process, reason, evidence, policy version and timestamp in durable audit history.
 
 ---
 
@@ -369,9 +371,9 @@ The Policy Engine evaluates action proposals against a multi-stage deterministic
        | NO
 [Check 5: Approval Thresholds] -> Does parameter exceed approval limit? -> YES: Return REQUIRES_APPROVAL
        | NO
-[Check 6: Memory Trust Check] --> Is any referenced memory SUSPICIOUS or QUARANTINED?
-       |                           |--> YES: Return BLOCK ('REFERENCED_UNTRUSTED_MEMORY')
-       | NO
+[Check 6: Memory Trust Check] --> Are all referenced memories currently TRUSTED and eligible for this purpose?
+       |                           |--> NO: Return BLOCK ('REFERENCED_UNTRUSTED_MEMORY')
+       | YES
 [Decision: ALLOW] --------------> Proceed to Server-Side Tool Adapter Execution
 ```
 
@@ -388,8 +390,9 @@ The Policy Engine evaluates action proposals against a multi-stage deterministic
    - Record trust state is immediately updated to `QUARANTINED`.
    - An immutable `audit_events` record is emitted.
 3. **Retrieval Exclusion Enforcement:**
-   - All agent retrieval queries enforce the filter `trust_state != 'QUARANTINED'`.
-   - Quarantined records become invisible to agent RAG pipelines, neutralizing the prompt injection payload without deleting the forensic evidence.
+   - All normal agent retrieval queries return only records in the `TRUSTED` state and eligible for the requesting tenant, agent, purpose and sensitivity policy.
+   - `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED` and `SUPERSEDED` records are excluded from normal agent retrieval; forensic access is a separate permissioned path.
+   - This exclusion does not delete the records or their forensic lineage.
 
 ---
 
@@ -405,7 +408,11 @@ graph TD
     Validate --> Preserve[Capture and Commit Pre-Recovery Snapshot of Contaminated State]
     Preserve --> Rollback[Atomically Roll Back Target Records to CP-001 Version]
     Rollback --> MarkTrusted[Mark Restored Records as TRUSTED]
-    MarkTrusted --> Reindex[Revalidate Downstream Relations & Emit Audit Event]
+    MarkTrusted --> Revalidate[Revalidate restored source, lineage, integrity, freshness and policy]
+    Revalidate -->|Pass| Trusted[Set eligible records TRUSTED]
+    Revalidate -->|Fail or uncertain| Unverified[Keep UNVERIFIED or quarantine]
+    Trusted --> Reindex[Reindex eligible descendants & Emit Audit Event]
+    Unverified --> Reindex
 ```
 
 ### Critical Recovery Invariants:
@@ -447,7 +454,7 @@ In the Dual Trace UI view, selecting an execution span highlights the exact memo
 - **SEC-002:** Referenced memories with `SUSPICIOUS`, `QUARANTINED`, or `REJECTED` status trigger immediate `BLOCK`.
 - **SEC-003:** Parameter ceiling violations trigger immediate `BLOCK`.
 - **SEC-004:** Fail-closed default on any internal policy evaluation error.
-- **SEC-005:** Protected retrieval queries filter out quarantined records (`trust_state != 'QUARANTINED'`).
+- **SEC-005:** Normal agent retrieval returns only eligible `TRUSTED` records; non-trusted and superseded records require a separate authorized forensic path.
 - **SEC-006:** All tool adapter credentials stored strictly server-side; never sent to agent runtimes.
 - **SEC-007:** Pre-recovery state snapshot must be persisted before any recovery rollback executes.
 - **SEC-008:** Tenant resolution is validated against authenticated membership server-side.

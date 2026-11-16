@@ -33,10 +33,10 @@ AMSC answers five foundational operational questions for every agent interaction
 ## 3. Current Project Stage: Clean Documentation Baseline
 
 > [!IMPORTANT]
-> **Current Project Status: Documentation and Architecture Preparation.**  
-> Application implementation has **NOT** started. In accordance with architectural directives, this repository currently establishes the clean, authoritative, and internally consistent project specification that a future seven-person engineering team will execute.
+ > **Current Project Status: Backend foundation and security architecture implementation in progress.**
+> The repository contains backend authentication/tenant-context work and memory/provenance services alongside the approved product and technical specifications. The complete seven-member end-to-end product is not yet verified as finished; implementation status must be judged from merged code, tests and integration evidence rather than documentation labels alone.
 
-No application code, frontend components, database migrations, or live backend services have been deployed. All specifications in this repository represent the binding engineering contract for future implementation.
+The documentation is the architecture and requirements baseline. Backend, frontend, database and infrastructure capabilities are delivered incrementally under the M1–M7 ownership plan.
 
 ---
 
@@ -52,6 +52,7 @@ The complete engineering specification is published in the `docs/` directory. Al
 | **04** | **UI/UX Design & Screen Specifications** | [docs/04-UI-UX-DESIGN.md](docs/04-UI-UX-DESIGN.md) | Defines the **WORKSTATION INTERFACE**. Contains complete specifications for all 11 core screens, layout shell, color tokens, contextual inspector drawer, and accessibility rules. |
 | **05** | **Backend Database Schema & API Contract** | [docs/05-DATABASE-API-SCHEMA.md](docs/05-DATABASE-API-SCHEMA.md) | Canonical **ENGINEERING CONTRACT**. Defines relational DDL for all 32+ entities, ER diagram, multi-tenant isolation rules, complete REST API route inventory (`/api/v1`), and error envelopes. |
 | **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols for future implementation. |
+| **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Research foundations, inherited strengths from KnowledgeLine and AgentGuard, non-regression rules, memory poisoning/hallucination/rewind/tool-security research, evaluation methodology and team-wide engineering requirements. |
 
 For full reference to the master prompt that governed this specification, see [MASTER-PROMPT.md](MASTER-PROMPT.md).
 
@@ -144,7 +145,8 @@ ChronoCongiSec/
     ├── 03-APPLICATION-FLOW.md         # Application Flow & System Workflows
     ├── 04-UI-UX-DESIGN.md             # UI/UX Design & Screen Specifications
     ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
-    └── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    ├── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    └── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
 ```
 
 ---
