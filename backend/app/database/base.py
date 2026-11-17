@@ -12,7 +12,16 @@ so ``alembic check`` / model-vs-migration comparison stays stable.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, MetaData, String, text
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    MetaData,
+    String,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -55,6 +64,49 @@ def tenant_id_column() -> Mapped[str]:
         ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
     )
+
+
+MAX_IDENTIFIER_LENGTH = 63  # PostgreSQL NAMEDATALEN - 1
+
+
+def tenant_parent_key() -> UniqueConstraint:
+    """``UNIQUE (tenant_id, id)``: lets children reference (tenant_id, id) composite keys."""
+    return UniqueConstraint("tenant_id", "id")
+
+
+def tenant_fk(
+    table: str, column: str, parent: str, ondelete: str, *, index: bool = True
+) -> tuple[ForeignKeyConstraint, ...]:
+    """Tenant-consistent composite FK ``(tenant_id, column) -> parent(tenant_id, id)`` plus its index.
+
+    Pass ``index=False`` only when an existing index already leads with
+    ``(tenant_id, column)``.
+
+    AMSC-DOC-005 §1: a child row can only point at a parent row of the SAME tenant.
+    ``ondelete`` is ``"CASCADE"`` or ``"SET NULL"``. SET NULL is emitted as
+    ``SET NULL (column)`` (PostgreSQL 15+) so a parent delete clears only the
+    reference and never the child's NOT NULL ``tenant_id``.
+    """
+    if ondelete == "SET NULL":
+        action = f"SET NULL ({column})"
+    elif ondelete == "CASCADE":
+        action = "CASCADE"
+    else:
+        raise ValueError(f"Unsupported ondelete {ondelete!r} for tenant FK {table}.{column}")
+
+    fk_name = f"fk_{table}_{column}_tenant"
+    ix_name = f"ix_{table}_tenant_id_{column}"
+    for name in (fk_name, ix_name):
+        if len(name) > MAX_IDENTIFIER_LENGTH:
+            raise ValueError(f"Identifier too long for PostgreSQL: {name}")
+
+    fk = ForeignKeyConstraint(
+        ["tenant_id", column],
+        [f"{parent}.tenant_id", f"{parent}.id"],
+        name=fk_name,
+        ondelete=action,
+    )
+    return (fk, Index(ix_name, "tenant_id", column)) if index else (fk,)
 
 
 def created_at_column() -> Mapped[datetime]:

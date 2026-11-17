@@ -7,7 +7,7 @@ trace_spans, audit_events, outbox_events.
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import DateTime, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,7 +18,9 @@ from backend.app.database.base import (
     created_at_column,
     id_column,
     jsonb_object_column,
+    tenant_fk,
     tenant_id_column,
+    tenant_parent_key,
 )
 
 TRACE_ID_LENGTH = 128
@@ -34,20 +36,23 @@ class KnowledgeEntity(Base):
     properties_json: Mapped[dict[str, Any]] = jsonb_object_column()
     created_at: Mapped[datetime] = created_at_column()
 
+    __table_args__ = (tenant_parent_key(),)
+
 
 class KnowledgeRelation(Base):
     __tablename__ = "knowledge_relations"
 
     id: Mapped[str] = id_column()
     tenant_id: Mapped[str] = tenant_id_column()
-    source_entity_id: Mapped[str] = mapped_column(
-        String(ID_LENGTH), ForeignKey("knowledge_entities.id", ondelete="CASCADE"), nullable=False
-    )
-    target_entity_id: Mapped[str] = mapped_column(
-        String(ID_LENGTH), ForeignKey("knowledge_entities.id", ondelete="CASCADE"), nullable=False
-    )
+    source_entity_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
+    target_entity_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     relation_type: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text("'REFERENCES'"))
     created_at: Mapped[datetime] = created_at_column()
+
+    __table_args__ = (
+        *tenant_fk("knowledge_relations", "source_entity_id", "knowledge_entities", "CASCADE"),
+        *tenant_fk("knowledge_relations", "target_entity_id", "knowledge_entities", "CASCADE"),
+    )
 
 
 class DriftObservation(Base):
@@ -55,9 +60,7 @@ class DriftObservation(Base):
 
     id: Mapped[str] = id_column()
     tenant_id: Mapped[str] = tenant_id_column()
-    record_id: Mapped[str] = mapped_column(
-        String(ID_LENGTH), ForeignKey("memory_records.id", ondelete="CASCADE"), nullable=False
-    )
+    record_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     classification: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=text("'POTENTIAL_POISONING'")
     )
@@ -66,17 +69,22 @@ class DriftObservation(Base):
     reviewer_status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
     created_at: Mapped[datetime] = created_at_column()
 
+    __table_args__ = (*tenant_fk("drift_observations", "record_id", "memory_records", "CASCADE"),)
+
 
 class Trace(Base):
     __tablename__ = "traces"
 
     id: Mapped[str] = mapped_column(String(TRACE_ID_LENGTH), primary_key=True)
     tenant_id: Mapped[str] = tenant_id_column()
-    agent_id: Mapped[Optional[str]] = mapped_column(
-        String(ID_LENGTH), ForeignKey("agents.id", ondelete="SET NULL")
-    )
+    agent_id: Mapped[Optional[str]] = mapped_column(String(ID_LENGTH))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=NOW)
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'COMPLETED'"))
+
+    __table_args__ = (
+        tenant_parent_key(),
+        *tenant_fk("traces", "agent_id", "agents", "SET NULL"),
+    )
 
 
 class TraceSpan(Base):
@@ -84,14 +92,16 @@ class TraceSpan(Base):
 
     id: Mapped[str] = mapped_column(String(TRACE_ID_LENGTH), primary_key=True)
     tenant_id: Mapped[str] = tenant_id_column()
-    trace_id: Mapped[str] = mapped_column(
-        String(TRACE_ID_LENGTH), ForeignKey("traces.id", ondelete="CASCADE"), nullable=False
-    )
+    trace_id: Mapped[str] = mapped_column(String(TRACE_ID_LENGTH), nullable=False)
+    # Soft reference (no FK) on purpose: OpenTelemetry exporters routinely deliver a
+    # child span before its parent, so an FK would reject valid telemetry.
     parent_span_id: Mapped[Optional[str]] = mapped_column(String(TRACE_ID_LENGTH))
     operation: Mapped[str] = mapped_column(String(128), nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     metadata_json: Mapped[dict[str, Any]] = jsonb_object_column("metadata")
     created_at: Mapped[datetime] = created_at_column()
+
+    __table_args__ = (*tenant_fk("trace_spans", "trace_id", "traces", "CASCADE"),)
 
 
 class AuditEvent(Base):
