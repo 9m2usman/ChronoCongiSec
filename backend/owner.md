@@ -18,6 +18,7 @@
 | `security/` | M4 | Policy engine, RBAC evaluator, threat detection, quarantine (`security/quarantine.py`) |
 | `recovery/` | M4 | Rollback engine, point-in-time recovery, audit logs |
 | `api/incident_management.py` | M1 | Authenticated incident & evidence API contracts, quarantine integration & forensic access |
+| `api/traces.py` | M1 | Dual Trace forensic observability, trace correlation, execution & memory lanes |
 | `api/security.py` | M4 | Security verification and policy administration routes |
 | `api/incidents.py`| M4 | Incident reporting and triage domain logic |
 | `api/recovery.py` | M4 | Recovery and rollback trigger routes |

@@ -27,6 +27,7 @@ from backend.app.api.incident_management import (
 )
 from backend.app.api.memory import router as memory_router
 from backend.app.api.tenants import router as tenants_router
+from backend.app.api.traces import router as traces_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import InMemoryRateLimiter
 from backend.app.core.exceptions import register_exception_handlers
@@ -156,6 +157,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory incident repository is strictly forbidden in production."
             )
 
+        trace_repo = getattr(app.state, "trace_repo", None)
+        if trace_repo is not None and (
+            getattr(trace_repo, "is_in_memory", True)
+            or not getattr(trace_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database trace repository from M6 is not configured. "
+                "In-memory trace repository is strictly forbidden in production."
+            )
+
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
@@ -224,6 +235,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.incident_repo = None
 
+    # Traces repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.traces import get_default_trace_repository
+        app.state.trace_repo = get_default_trace_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.traces import SqlAlchemyTraceRepository
+            app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
+        else:
+            app.state.trace_repo = None
+
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
     app.state.quarantine_service = get_default_quarantine_service()
@@ -276,6 +299,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(memory_router)
     api_router.include_router(incident_router)
     api_router.include_router(memory_quarantine_router)
+    api_router.include_router(traces_router)
 
     app.include_router(api_router)
 

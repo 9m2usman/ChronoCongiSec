@@ -199,6 +199,22 @@
 | **M6** | Verify append-only constraints on audit events table. | Audit verification DDL | M1 | Direct UPDATE/DELETE statements rejected. |
 | **M7** | Execute automated Three-Company Tenant Isolation test suite (Demo 3). | `tests/test_isolation.py`| M1, M6 | Zero cross-tenant data bleed verified. |
 
+#### M1 Day 6 Security & Observability Acceptance Criteria
+1. **Authenticated Trace Access:** Strict JWT authentication and valid tenant context required (`TenantContextDep`); unauthenticated access rejected with HTTP 401.
+2. **Tenant-Scoped Lookup & Joins:** Trace lookup and all associated joins (`TraceSpan`, `ToolProposal`, `PolicyDecision`, `Approval`, `ToolExecution`, `RetrievalEvent`, `MemoryRecord`, `MemoryVersion`) strictly scoped to authenticated `tenant_id`.
+3. **Branch-Aware Access:** Branch authorization applied where supported; caller-supplied arbitrary branch overrides rejected.
+4. **Zero Cross-Tenant Resource Bleed:** Inaccessible or cross-tenant trace IDs return HTTP 404 without leaking existence; cross-tenant spans, proposals, or memory events are excluded.
+5. **Sensitive Telemetry Redaction:** Recursive scrubbing of passwords, tokens, API keys, credentials, and internal prompts; no raw `metadata_json` returned; raw `query_text` replaced with safe summary.
+6. **No Unrestricted Memory Content:** Only safe correlation metadata (record ID, version, checksum, trust state) exposed; raw memory content not leaked via trace endpoint.
+7. **Accurate Historical Trust Evidence:** Truthfully distinguishes historical retrieval-time trust state from current repository trust state; never asserts current state was retrieval-time state.
+8. **Explicit Partial/Incomplete Reporting:** Distinguishes `COMPLETE`, `PARTIAL`, `EMPTY`, and `TRUNCATED` completeness; issues safe warnings for unrecorded historical states or orphan spans.
+9. **Bounded Queries & Response Protection:** Query bounds enforced (`MAX_SPANS_LIMIT=500`, `MAX_MEMORY_EVENTS_LIMIT=200`, `limit<=100`); oversized results capped with `truncated=True`.
+10. **Safe Span-Parent Handling:** Orphan spans preserved safely; cycles and malformed parent references handled without unbounded recursion or server crashes.
+11. **Strictly Read-Only:** Pure GET endpoint; zero state mutations, memory updates, quarantine transitions, or tool executions.
+12. **M5 Frontend Contract Compatibility:** Returns canonical `execution_lane`/`memory_lane` and backwards-compatible `execution_spans`/`memory_spans` matching M5 workstation types.
+13. **Comprehensive Regression Verification:** Unit and integration tests verify authentication, IDOR isolation, redaction, correlation integrity, resource bounding, and read-only behavior.
+
+
 **Exit Gate G6:** All 11 screens functional; Dual Trace correlates telemetry; all three demonstration flows validated.
 
 ---
