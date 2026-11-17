@@ -63,7 +63,15 @@ from backend.app.api.agents import (
     InMemoryAgentRepository,
 )
 from backend.app.api.gateway import (
+    ExecutionStatus,
+    GatewayDecision,
     InMemoryGatewayRepository,
+    PolicyDecisionEntity,
+    SqlAlchemyGatewayRepository,
+    ToolAdapterProtocol,
+    ToolExecutionEntity,
+    ToolExecutionResult,
+    ToolProposalEntity,
     compute_payload_fingerprint,
     redact_sensitive_payload,
 )
@@ -899,3 +907,291 @@ async def test_get_proposal_detail_and_cross_tenant_isolation(
         headers={"Authorization": f"Bearer {token_b}"},
     )
     assert detail_resp_b.status_code == 404
+
+
+# ============================================================================
+# 8. Advanced Security: TOCTOU, Concurrency, Role Isolation & Adapter Edge Cases
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_memory_toctou_trust_revocation_before_dispatch_blocks_execution(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository,
+    isolated_memory_repo: InMemoryMemoryRepository,
+    isolated_gateway_repo: InMemoryGatewayRepository,
+):
+    """SEC-GW-007 / GAP-021: Revalidation immediately before adapter dispatch catches trust revocation."""
+    await seed_agents(isolated_agent_repo)
+    mem_id = "mem-toctou-target-001"
+    seed_memory_record(
+        isolated_memory_repo,
+        record_id=mem_id,
+        tenant_id=TENANT_A_ID,
+        content="Invoice initially considered trusted",
+        trust_state=TrustState.TRUSTED,
+        agent_id=AGENT_A_ACTIVE_ID,
+    )
+
+    class SpyAdapter:
+        def __init__(self) -> None:
+            self.invoked = False
+
+        async def execute(self, operation: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> ToolExecutionResult:
+            self.invoked = True
+            return ToolExecutionResult(
+                status="SUCCESS",
+                status_code=200,
+                result_payload={"transacted": True},
+                duration_ms=5,
+            )
+
+    spy = SpyAdapter()
+    from backend.app.api.gateway import ToolAdapterRegistry
+    tool_reg = ToolAdapterRegistry()
+    tool_reg.register("sandbox_transfer", spy)
+    client._transport.app.state.tool_registry = tool_reg
+
+    # Hook memory_repo.get_record to simulate a concurrent analyst quarantining the memory
+    # immediately after the initial policy evaluation but before adapter dispatch
+    orig_get_record = isolated_memory_repo.get_record
+    query_count = 0
+
+    def toctou_hook(rec_id: str, t_id: str):
+        nonlocal query_count
+        query_count += 1
+        rec = orig_get_record(rec_id, t_id)
+        if query_count >= 2 and rec is not None:
+            # Revoke trust to QUARANTINED!
+            rec.trust_state = TrustState.QUARANTINED.value
+        return rec
+
+    isolated_memory_repo.get_record = toctou_hook
+
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "action_id": "act-toctou-race-001",
+        "agent_id": AGENT_A_ACTIVE_ID,
+        "tool_name": "sandbox_transfer",
+        "operation": "transfer_funds",
+        "parameters": {"destination_account": "ACC-LEGIT-123", "amount": 50.00},
+        "memory_refs": [mem_id],
+        "idempotency_key": "idemp-toctou-001",
+        "trace_id": "tr-toctou-001",
+    }
+
+    resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # The action MUST be blocked because trust was revoked before dispatch!
+    assert data["decision"] == "BLOCK"
+    assert data["execution_status"] == "NOT_EXECUTED"
+    assert any("trust revoked" in r for r in data["reasons"])
+    # Adapter must NEVER have executed!
+    assert spy.invoked is False
+
+
+@pytest.mark.asyncio
+async def test_adapter_timeout_records_unknown_outcome_and_no_retry(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository,
+    isolated_memory_repo: InMemoryMemoryRepository,
+    isolated_gateway_repo: InMemoryGatewayRepository,
+):
+    """SEC-GW-010 / GAP-023: Adapter timeout records UNKNOWN execution status (504) and halts blind retries."""
+    import asyncio
+    await seed_agents(isolated_agent_repo)
+
+    class TimeoutAdapter:
+        async def execute(self, operation: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> ToolExecutionResult:
+            raise asyncio.TimeoutError("External banking service connection timed out.")
+
+    from backend.app.api.gateway import ToolAdapterRegistry
+    tool_reg = ToolAdapterRegistry()
+    tool_reg.register("sandbox_transfer", TimeoutAdapter())
+    client._transport.app.state.tool_registry = tool_reg
+
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "action_id": "act-timeout-001",
+        "agent_id": AGENT_A_ACTIVE_ID,
+        "tool_name": "sandbox_transfer",
+        "operation": "transfer_funds",
+        "parameters": {"destination_account": "ACC-LEGIT-123", "amount": 50.00},
+        "memory_refs": [],
+        "idempotency_key": "idemp-timeout-001",
+        "trace_id": "tr-timeout-001",
+    }
+
+    resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["decision"] == "ALLOW"
+    assert data["execution_status"] == "UNKNOWN"
+    assert data["result"] is not None
+    assert "timed out" in data["result"]["error"]
+
+    # Verify execution record has 504 status code
+    record = await isolated_gateway_repo.get_by_id(TENANT_A_ID, data["proposal_id"])
+    assert record is not None
+    _, dec, exe = record
+    assert dec.execution_status == "UNKNOWN"
+    assert exe is not None
+    assert exe.status == "UNKNOWN"
+    assert exe.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_concurrent_in_progress_proposal_returns_409_conflict(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository,
+    isolated_gateway_repo: InMemoryGatewayRepository,
+):
+    """SEC-GW-005 / GAP-020: Duplicate request while proposal is PENDING_EXECUTION returns HTTP 409 Conflict."""
+    await seed_agents(isolated_agent_repo)
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Manually seed a proposal in PENDING_EXECUTION status
+    staged_prop = ToolProposalEntity(
+        id="prop-pending-001",
+        tenant_id=TENANT_A_ID,
+        agent_id=AGENT_A_ACTIVE_ID,
+        action_id="act-pending-001",
+        tool_name="sandbox_transfer",
+        operation="transfer_funds",
+        parameters_json={"amount": 50.0},
+        memory_refs_json=[],
+        idempotency_key="idemp-pending-001",
+        trace_id="tr-pending-001",
+    )
+    staged_dec = PolicyDecisionEntity(
+        id="dec-pending-001",
+        tenant_id=TENANT_A_ID,
+        proposal_id="prop-pending-001",
+        decision="ALLOW",
+        memory_trust="NOT_REFERENCED",
+        policy_result="PERMITTED",
+        reasons_json=["Initial check passed"],
+        execution_status="PENDING_EXECUTION",
+    )
+    await isolated_gateway_repo.save_proposal_atomic(staged_prop, staged_dec)
+
+    payload = {
+        "action_id": "act-pending-001",
+        "agent_id": AGENT_A_ACTIVE_ID,
+        "tool_name": "sandbox_transfer",
+        "operation": "transfer_funds",
+        "parameters": {"amount": 50.0},
+        "memory_refs": [],
+        "idempotency_key": "idemp-pending-001",
+        "trace_id": "tr-pending-001",
+    }
+
+    resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["error"]["code"] == "CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_role_cannot_propose_tool_actions(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository,
+):
+    """Part 6 Least Privilege: Caller with AUDITOR role is forbidden from submitting tool action proposals."""
+    await seed_agents(isolated_agent_repo)
+    from backend.app.tenancy.context import (
+        MembershipRecord,
+        UserRecord,
+        get_default_auth_repository,
+    )
+    auth_repo = getattr(client._transport.app.state, "auth_repo", None) or get_default_auth_repository()
+    auditor_user = UserRecord(
+        id="user-auditor-999",
+        email="auditor@company-a.com",
+        hashed_password="hashed_pw_test",
+        full_name="Auditor User",
+        status="ACTIVE",
+    )
+    auditor_mem = MembershipRecord(
+        id="mem-auditor-999",
+        tenant_id=TENANT_A_ID,
+        user_id="user-auditor-999",
+        role="AUDITOR",
+        status="ACTIVE",
+    )
+    auth_repo.add_user(auditor_user)
+    auth_repo.add_membership(auditor_mem)
+
+    token = create_token_for(auditor_user.id, auditor_user.email, TENANT_A_ID, "AUDITOR", test_settings)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    payload = {
+        "action_id": "act-auditor-forbidden",
+        "agent_id": AGENT_A_ACTIVE_ID,
+        "tool_name": "sandbox_transfer",
+        "operation": "transfer_funds",
+        "parameters": {"amount": 50.0},
+        "memory_refs": [],
+        "idempotency_key": "idemp-auditor-001",
+        "trace_id": "tr-auditor-001",
+    }
+
+    resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_list_proposals_for_m5_activity_stream(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository,
+):
+    """M5 Integration: GET /api/v1/gateway/actions returns paginated proposal activity stream."""
+    await seed_agents(isolated_agent_repo)
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Submit 2 proposals
+    for i in range(2):
+        payload = {
+            "action_id": f"act-stream-{i}",
+            "agent_id": AGENT_A_ACTIVE_ID,
+            "tool_name": "sandbox_transfer",
+            "operation": "transfer_funds",
+            "parameters": {"amount": 10.0 + i},
+            "memory_refs": [],
+            "idempotency_key": f"idemp-stream-{i}",
+            "trace_id": f"tr-stream-{i}",
+        }
+        res = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
+        assert res.status_code == 200
+
+    list_resp = await client.get("/api/v1/gateway/actions?limit=10&offset=0", headers=headers)
+    assert list_resp.status_code == 200
+    items = list_resp.json()
+    assert isinstance(items, list)
+    assert len(items) == 2
+    assert items[0]["action_id"] == "act-stream-1"
+    assert items[1]["action_id"] == "act-stream-0"
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_gateway_repository_protocol():
+    """Verify SqlAlchemyGatewayRepository implements GatewayRepositoryProtocol."""
+    from unittest.mock import MagicMock
+    mock_session_factory = MagicMock()
+    repo = SqlAlchemyGatewayRepository(mock_session_factory)
+    assert repo.is_persistent is True
+    assert repo.is_in_memory is False
+

@@ -191,7 +191,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from backend.app.api.gateway import get_default_gateway_repository
         app.state.gateway_repo = get_default_gateway_repository()
     else:
-        app.state.gateway_repo = None
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.gateway import SqlAlchemyGatewayRepository
+            app.state.gateway_repo = SqlAlchemyGatewayRepository(session_factory)
+        else:
+            app.state.gateway_repo = None
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)

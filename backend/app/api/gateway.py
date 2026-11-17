@@ -10,9 +10,10 @@ Canonical References:
 - AMSC-DOC-005 Section 6.1: Canonical Action Proposal & Policy Decision JSON Schemas
 - AMSC-DOC-006 (Team Implementation Plan) Day 4: Protected Tool Gateway (Exit Gate G4)
 - AMSC-DOC-007 (Research & Engineering Standards): Complete Mediation, Fail-Closed, Replay Resistance
-- AMSC-DOC-008: GAPs 001-004, 006, 010, 015 (Security Gap Register)
+- AMSC-DOC-008: GAPs 001-004, 006, 010, 015, 018-028 (Security Gap Register)
 """
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,6 +29,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import (
@@ -94,6 +98,7 @@ class ExecutionStatus(str, Enum):
     EXECUTED = "EXECUTED"
     NOT_EXECUTED = "NOT_EXECUTED"
     PENDING_APPROVAL = "PENDING_APPROVAL"
+    PENDING_EXECUTION = "PENDING_EXECUTION"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
 
@@ -186,7 +191,7 @@ class ActionProposalResponse(BaseModel):
     memory_trust: str  # TRUSTED, SUSPICIOUS, QUARANTINED, NOT_REFERENCED, UNVERIFIED
     policy_result: str  # PERMITTED, DENIED, ELEVATED
     reasons: List[str] = Field(default_factory=list)
-    execution_status: str  # EXECUTED, NOT_EXECUTED, PENDING_APPROVAL, FAILED
+    execution_status: str  # EXECUTED, NOT_EXECUTED, PENDING_APPROVAL, PENDING_EXECUTION, FAILED, UNKNOWN
     result: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(extra="forbid")
@@ -282,8 +287,21 @@ class ToolProposalEntity:
     memory_refs_json: List[str]
     idempotency_key: str
     trace_id: str
-    payload_fingerprint: str
+    payload_fingerprint: Optional[str] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def get_fingerprint(self) -> str:
+        """Derive deterministic fingerprint from canonical proposal fields."""
+        if self.payload_fingerprint:
+            return self.payload_fingerprint
+        return compute_payload_fingerprint(
+            agent_id=self.agent_id,
+            action_id=self.action_id,
+            tool_name=self.tool_name,
+            operation=self.operation,
+            parameters=self.parameters_json,
+            memory_refs=self.memory_refs_json,
+        )
 
 
 @dataclass
@@ -328,7 +346,7 @@ class AuditEventEntity:
 
 
 # ============================================================================
-# 5. Gateway Repository Protocol & In-Memory / Database Implementation
+# 5. Gateway Repository Protocol, In-Memory & SQLAlchemy Implementations
 # ============================================================================
 
 @runtime_checkable
@@ -345,7 +363,19 @@ class GatewayRepositoryProtocol(Protocol):
         execution: Optional[ToolExecutionEntity] = None,
         audit_event: Optional[AuditEventEntity] = None,
     ) -> None:
-        """Atomically persist proposal, decision, execution, and audit evidence."""
+        """Atomically persist proposal, decision, and optional audit event."""
+        ...
+
+    async def record_execution_outcome(
+        self,
+        tenant_id: str,
+        proposal_id: str,
+        decision_id: str,
+        execution: ToolExecutionEntity,
+        execution_status: str,
+        audit_event: Optional[AuditEventEntity] = None,
+    ) -> None:
+        """Update decision execution_status and record ToolExecution outcome atomically."""
         ...
 
     async def get_by_idempotency_key(
@@ -384,15 +414,10 @@ class InMemoryGatewayRepository:
     is_in_memory: bool = True
 
     def __init__(self) -> None:
-        # key: proposal_id -> ToolProposalEntity
         self._proposals: Dict[str, ToolProposalEntity] = {}
-        # key: proposal_id -> PolicyDecisionEntity
         self._decisions: Dict[str, PolicyDecisionEntity] = {}
-        # key: proposal_id -> ToolExecutionEntity
         self._executions: Dict[str, ToolExecutionEntity] = {}
-        # key: (tenant_id, idempotency_key) -> proposal_id
         self._idempotency_index: Dict[Tuple[str, str], str] = {}
-        # list of audit events
         self._audit_events: List[AuditEventEntity] = []
 
         # Test hooks
@@ -436,6 +461,21 @@ class InMemoryGatewayRepository:
         if staged_audit:
             self._audit_events.append(staged_audit)
 
+    async def record_execution_outcome(
+        self,
+        tenant_id: str,
+        proposal_id: str,
+        decision_id: str,
+        execution: ToolExecutionEntity,
+        execution_status: str,
+        audit_event: Optional[AuditEventEntity] = None,
+    ) -> None:
+        if proposal_id in self._decisions:
+            self._decisions[proposal_id].execution_status = execution_status
+        self._executions[proposal_id] = deepcopy(execution)
+        if audit_event:
+            self._audit_events.append(deepcopy(audit_event))
+
     async def get_by_idempotency_key(
         self,
         tenant_id: str,
@@ -476,13 +516,366 @@ class InMemoryGatewayRepository:
                 dec = self._decisions.get(prop.id)
                 exe = self._executions.get(prop.id)
                 results.append((deepcopy(prop), deepcopy(dec), deepcopy(exe) if exe else None))
-        # Sort newest first
         results.sort(key=lambda item: item[0].created_at, reverse=True)
         return results[offset : offset + limit]
 
     def get_audit_events(self, tenant_id: str) -> List[AuditEventEntity]:
         """Test helper to inspect recorded audit events for tenant."""
         return [deepcopy(e) for e in self._audit_events if e.tenant_id == tenant_id]
+
+
+class SqlAlchemyGatewayRepository:
+    """Production persistent gateway repository backed by PostgreSQL & SQLAlchemy (M6).
+
+    Guarantees durable idempotency under database unique constraint (tenant_id, idempotency_key).
+    """
+
+    is_persistent: bool = True
+    is_in_memory: bool = False
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    async def save_proposal_atomic(
+        self,
+        proposal: ToolProposalEntity,
+        decision: PolicyDecisionEntity,
+        execution: Optional[ToolExecutionEntity] = None,
+        audit_event: Optional[AuditEventEntity] = None,
+    ) -> None:
+        from backend.app.database.models.gateway import PolicyDecision as DbPolicyDecision
+        from backend.app.database.models.gateway import ToolExecution as DbToolExecution
+        from backend.app.database.models.gateway import ToolProposal as DbToolProposal
+        from backend.app.database.models.observability import AuditEvent as DbAuditEvent
+
+        async with self.session_factory() as session:
+            async with session.begin():
+                stmt = select(DbToolProposal).where(
+                    DbToolProposal.tenant_id == proposal.tenant_id,
+                    DbToolProposal.idempotency_key == proposal.idempotency_key,
+                )
+                existing = (await session.execute(stmt)).scalar_one_or_none()
+                if existing:
+                    raise AMSCException(
+                        message="Duplicate idempotency key detected under unique constraint.",
+                        code="IDEMPOTENCY_KEY_CONFLICT",
+                        status_code=409,
+                    )
+
+                db_prop = DbToolProposal(
+                    id=proposal.id,
+                    tenant_id=proposal.tenant_id,
+                    agent_id=proposal.agent_id,
+                    action_id=proposal.action_id,
+                    tool_name=proposal.tool_name,
+                    operation=proposal.operation,
+                    parameters_json=proposal.parameters_json,
+                    memory_refs_json=proposal.memory_refs_json,
+                    idempotency_key=proposal.idempotency_key,
+                    trace_id=proposal.trace_id,
+                )
+                session.add(db_prop)
+
+                db_dec = DbPolicyDecision(
+                    id=decision.id,
+                    tenant_id=decision.tenant_id,
+                    proposal_id=decision.proposal_id,
+                    decision=decision.decision,
+                    memory_trust=decision.memory_trust,
+                    policy_result=decision.policy_result,
+                    reasons_json=decision.reasons_json,
+                    incident_id=decision.incident_id,
+                    execution_status=decision.execution_status,
+                )
+                session.add(db_dec)
+
+                if execution:
+                    db_exec = DbToolExecution(
+                        id=execution.id,
+                        tenant_id=execution.tenant_id,
+                        proposal_id=execution.proposal_id,
+                        decision_id=execution.decision_id,
+                        status=execution.status,
+                        status_code=execution.status_code,
+                        result_payload_json=execution.result_payload_json,
+                        duration_ms=execution.duration_ms,
+                    )
+                    session.add(db_exec)
+
+                if audit_event:
+                    db_audit = DbAuditEvent(
+                        id=audit_event.id,
+                        tenant_id=audit_event.tenant_id,
+                        actor_id=audit_event.actor_id,
+                        event_type=audit_event.event_type,
+                        resource_id=audit_event.resource_id,
+                        action=audit_event.action,
+                        outcome=audit_event.outcome,
+                        trace_id=audit_event.trace_id,
+                        details_json=audit_event.details_json,
+                    )
+                    session.add(db_audit)
+
+                try:
+                    await session.commit()
+                except IntegrityError as exc:
+                    await session.rollback()
+                    raise AMSCException(
+                        message="Duplicate idempotency key detected under unique constraint.",
+                        code="IDEMPOTENCY_KEY_CONFLICT",
+                        status_code=409,
+                    ) from exc
+
+    async def record_execution_outcome(
+        self,
+        tenant_id: str,
+        proposal_id: str,
+        decision_id: str,
+        execution: ToolExecutionEntity,
+        execution_status: str,
+        audit_event: Optional[AuditEventEntity] = None,
+    ) -> None:
+        from backend.app.database.models.gateway import PolicyDecision as DbPolicyDecision
+        from backend.app.database.models.gateway import ToolExecution as DbToolExecution
+        from backend.app.database.models.observability import AuditEvent as DbAuditEvent
+
+        async with self.session_factory() as session:
+            async with session.begin():
+                stmt_dec = (
+                    update(DbPolicyDecision)
+                    .where(
+                        DbPolicyDecision.id == decision_id,
+                        DbPolicyDecision.tenant_id == tenant_id,
+                    )
+                    .values(execution_status=execution_status)
+                )
+                await session.execute(stmt_dec)
+
+                db_exec = DbToolExecution(
+                    id=execution.id,
+                    tenant_id=execution.tenant_id,
+                    proposal_id=execution.proposal_id,
+                    decision_id=execution.decision_id,
+                    status=execution.status,
+                    status_code=execution.status_code,
+                    result_payload_json=execution.result_payload_json,
+                    duration_ms=execution.duration_ms,
+                )
+                session.add(db_exec)
+
+                if audit_event:
+                    db_audit = DbAuditEvent(
+                        id=audit_event.id,
+                        tenant_id=audit_event.tenant_id,
+                        actor_id=audit_event.actor_id,
+                        event_type=audit_event.event_type,
+                        resource_id=audit_event.resource_id,
+                        action=audit_event.action,
+                        outcome=audit_event.outcome,
+                        trace_id=audit_event.trace_id,
+                        details_json=audit_event.details_json,
+                    )
+                    session.add(db_audit)
+
+                await session.commit()
+
+    async def get_by_idempotency_key(
+        self,
+        tenant_id: str,
+        idempotency_key: str,
+    ) -> Optional[Tuple[ToolProposalEntity, PolicyDecisionEntity, Optional[ToolExecutionEntity]]]:
+        from backend.app.database.models.gateway import PolicyDecision as DbPolicyDecision
+        from backend.app.database.models.gateway import ToolExecution as DbToolExecution
+        from backend.app.database.models.gateway import ToolProposal as DbToolProposal
+
+        async with self.session_factory() as session:
+            stmt = (
+                select(DbToolProposal, DbPolicyDecision, DbToolExecution)
+                .join(DbPolicyDecision, DbPolicyDecision.proposal_id == DbToolProposal.id)
+                .outerjoin(DbToolExecution, DbToolExecution.proposal_id == DbToolProposal.id)
+                .where(
+                    DbToolProposal.tenant_id == tenant_id,
+                    DbToolProposal.idempotency_key == idempotency_key,
+                )
+            )
+            res = (await session.execute(stmt)).first()
+            if not res:
+                return None
+            prop, dec, exe = res
+
+            proposal_entity = ToolProposalEntity(
+                id=prop.id,
+                tenant_id=prop.tenant_id,
+                agent_id=prop.agent_id,
+                action_id=prop.action_id,
+                tool_name=prop.tool_name,
+                operation=prop.operation,
+                parameters_json=dict(prop.parameters_json),
+                memory_refs_json=list(prop.memory_refs_json),
+                idempotency_key=prop.idempotency_key,
+                trace_id=prop.trace_id,
+                created_at=prop.created_at,
+            )
+            decision_entity = PolicyDecisionEntity(
+                id=dec.id,
+                tenant_id=dec.tenant_id,
+                proposal_id=dec.proposal_id,
+                decision=dec.decision,
+                memory_trust=dec.memory_trust,
+                policy_result=dec.policy_result,
+                reasons_json=list(dec.reasons_json),
+                incident_id=dec.incident_id,
+                execution_status=dec.execution_status,
+                created_at=dec.created_at,
+            )
+            execution_entity = (
+                ToolExecutionEntity(
+                    id=exe.id,
+                    tenant_id=exe.tenant_id,
+                    proposal_id=exe.proposal_id,
+                    decision_id=exe.decision_id,
+                    status=exe.status,
+                    status_code=exe.status_code,
+                    result_payload_json=dict(exe.result_payload_json),
+                    duration_ms=exe.duration_ms,
+                    executed_at=exe.executed_at,
+                )
+                if exe
+                else None
+            )
+            return (proposal_entity, decision_entity, execution_entity)
+
+    async def get_by_id(
+        self,
+        tenant_id: str,
+        proposal_id: str,
+    ) -> Optional[Tuple[ToolProposalEntity, PolicyDecisionEntity, Optional[ToolExecutionEntity]]]:
+        from backend.app.database.models.gateway import PolicyDecision as DbPolicyDecision
+        from backend.app.database.models.gateway import ToolExecution as DbToolExecution
+        from backend.app.database.models.gateway import ToolProposal as DbToolProposal
+
+        async with self.session_factory() as session:
+            stmt = (
+                select(DbToolProposal, DbPolicyDecision, DbToolExecution)
+                .join(DbPolicyDecision, DbPolicyDecision.proposal_id == DbToolProposal.id)
+                .outerjoin(DbToolExecution, DbToolExecution.proposal_id == DbToolProposal.id)
+                .where(
+                    DbToolProposal.tenant_id == tenant_id,
+                    DbToolProposal.id == proposal_id,
+                )
+            )
+            res = (await session.execute(stmt)).first()
+            if not res:
+                return None
+            prop, dec, exe = res
+
+            proposal_entity = ToolProposalEntity(
+                id=prop.id,
+                tenant_id=prop.tenant_id,
+                agent_id=prop.agent_id,
+                action_id=prop.action_id,
+                tool_name=prop.tool_name,
+                operation=prop.operation,
+                parameters_json=dict(prop.parameters_json),
+                memory_refs_json=list(prop.memory_refs_json),
+                idempotency_key=prop.idempotency_key,
+                trace_id=prop.trace_id,
+                created_at=prop.created_at,
+            )
+            decision_entity = PolicyDecisionEntity(
+                id=dec.id,
+                tenant_id=dec.tenant_id,
+                proposal_id=dec.proposal_id,
+                decision=dec.decision,
+                memory_trust=dec.memory_trust,
+                policy_result=dec.policy_result,
+                reasons_json=list(dec.reasons_json),
+                incident_id=dec.incident_id,
+                execution_status=dec.execution_status,
+                created_at=dec.created_at,
+            )
+            execution_entity = (
+                ToolExecutionEntity(
+                    id=exe.id,
+                    tenant_id=exe.tenant_id,
+                    proposal_id=exe.proposal_id,
+                    decision_id=exe.decision_id,
+                    status=exe.status,
+                    status_code=exe.status_code,
+                    result_payload_json=dict(exe.result_payload_json),
+                    duration_ms=exe.duration_ms,
+                    executed_at=exe.executed_at,
+                )
+                if exe
+                else None
+            )
+            return (proposal_entity, decision_entity, execution_entity)
+
+    async def list_proposals(
+        self,
+        tenant_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Tuple[ToolProposalEntity, PolicyDecisionEntity, Optional[ToolExecutionEntity]]]:
+        from backend.app.database.models.gateway import PolicyDecision as DbPolicyDecision
+        from backend.app.database.models.gateway import ToolExecution as DbToolExecution
+        from backend.app.database.models.gateway import ToolProposal as DbToolProposal
+
+        async with self.session_factory() as session:
+            stmt = (
+                select(DbToolProposal, DbPolicyDecision, DbToolExecution)
+                .join(DbPolicyDecision, DbPolicyDecision.proposal_id == DbToolProposal.id)
+                .outerjoin(DbToolExecution, DbToolExecution.proposal_id == DbToolProposal.id)
+                .where(DbToolProposal.tenant_id == tenant_id)
+                .order_by(DbToolProposal.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            rows = (await session.execute(stmt)).all()
+            results = []
+            for prop, dec, exe in rows:
+                p_ent = ToolProposalEntity(
+                    id=prop.id,
+                    tenant_id=prop.tenant_id,
+                    agent_id=prop.agent_id,
+                    action_id=prop.action_id,
+                    tool_name=prop.tool_name,
+                    operation=prop.operation,
+                    parameters_json=dict(prop.parameters_json),
+                    memory_refs_json=list(prop.memory_refs_json),
+                    idempotency_key=prop.idempotency_key,
+                    trace_id=prop.trace_id,
+                    created_at=prop.created_at,
+                )
+                d_ent = PolicyDecisionEntity(
+                    id=dec.id,
+                    tenant_id=dec.tenant_id,
+                    proposal_id=dec.proposal_id,
+                    decision=dec.decision,
+                    memory_trust=dec.memory_trust,
+                    policy_result=dec.policy_result,
+                    reasons_json=list(dec.reasons_json),
+                    incident_id=dec.incident_id,
+                    execution_status=dec.execution_status,
+                    created_at=dec.created_at,
+                )
+                e_ent = (
+                    ToolExecutionEntity(
+                        id=exe.id,
+                        tenant_id=exe.tenant_id,
+                        proposal_id=exe.proposal_id,
+                        decision_id=exe.decision_id,
+                        status=exe.status,
+                        status_code=exe.status_code,
+                        result_payload_json=dict(exe.result_payload_json),
+                        duration_ms=exe.duration_ms,
+                        executed_at=exe.executed_at,
+                    )
+                    if exe
+                    else None
+                )
+                results.append((p_ent, d_ent, e_ent))
+            return results
 
 
 _default_gateway_repository: Optional[GatewayRepositoryProtocol] = None
@@ -737,6 +1130,9 @@ def get_default_policy_evaluator() -> DeterministicPolicyEvaluator:
 
 router = APIRouter(prefix="/gateway", tags=["Gateway"])
 
+# Roles strictly forbidden from submitting mutating tool action proposals
+UNAUTHORIZED_PROPOSAL_ROLES = frozenset({"AUDITOR", "READ_ONLY", "GUEST"})
+
 
 @router.post(
     "/actions/propose",
@@ -752,9 +1148,9 @@ router = APIRouter(prefix="/gateway", tags=["Gateway"])
         200: {"description": "Action proposal evaluated successfully (decision may be ALLOW, BLOCK, or REVIEW)"},
         400: {"description": "Malformed request or parameter ceiling violation"},
         401: {"description": "Missing or invalid bearer token"},
-        403: {"description": "Agent not active, cross-tenant agent access, or insufficient permissions"},
+        403: {"description": "Agent not active, cross-tenant agent access, or unauthorized caller role"},
         404: {"description": "Agent not found in authenticated tenant"},
-        409: {"description": "Idempotency key reused with mismatched request payload"},
+        409: {"description": "Idempotency key reused with mismatched request payload or proposal currently executing"},
         422: {"description": "Validation error or invalid parameter types"},
         500: {"description": "Internal error or memory integrity violation"},
         503: {"description": "Mandatory security dependency unavailable"},
@@ -768,8 +1164,17 @@ async def propose_tool_action(
 ) -> ActionProposalResponse:
     tenant_id = context.tenant_id
 
-    # 1. Rate Limiting Check (M7 Redis / In-Memory Boundary)
-    # Rate limit keyed by tenant and principal/agent
+    # 1. Caller Role & Authorization Verification (Least Privilege / Part 6)
+    if context.role in UNAUTHORIZED_PROPOSAL_ROLES:
+        logger.warning(
+            "Proposal rejected: caller '%s' with role '%s' cannot propose actions for agent '%s'.",
+            context.user_id,
+            context.role,
+            body.agent_id,
+        )
+        raise ForbiddenError(f"Role '{context.role}' lacks permission to submit tool action proposals.")
+
+    # 2. Rate Limiting Check (M7 Redis / In-Memory Boundary)
     rate_key = f"gw:propose:{tenant_id}:{body.agent_id}"
     rl_result = await rate_limiter.check_rate_limit(rate_key, max_requests=100, window_seconds=60)
     if not rl_result.allowed:
@@ -779,7 +1184,7 @@ async def propose_tool_action(
             headers={"Retry-After": str(rl_result.retry_after or 60)},
         )
 
-    # 2. Agent Identity & Confused-Deputy Verification (M1 Day 3 Agent Registry)
+    # 3. Agent Identity & Confused-Deputy Verification (M1 Day 3 Agent Registry)
     agent_repo = getattr(request.app.state, "agent_repo", None)
     if agent_repo is None:
         raise SecurityDependencyError("Agent repository service unavailable.")
@@ -803,10 +1208,9 @@ async def propose_tool_action(
             f"Agent '{body.agent_id}' is in status '{agent.status}' and cannot propose tool actions."
         )
 
-    # 3. Durable Idempotency Resolution (M6 Database Boundary)
+    # 4. Durable Idempotency Resolution (M6 Database Boundary)
     gateway_repo = await get_gateway_repository(request)
 
-    # Compute deterministic cryptographic SHA-256 fingerprint of canonical payload
     payload_fingerprint = compute_payload_fingerprint(
         agent_id=body.agent_id,
         action_id=body.action_id,
@@ -819,8 +1223,7 @@ async def propose_tool_action(
     existing_record = await gateway_repo.get_by_idempotency_key(tenant_id, body.idempotency_key)
     if existing_record is not None:
         existing_prop, existing_dec, existing_exec = existing_record
-        # Replay Verification: Check if payload matches
-        if existing_prop.payload_fingerprint != payload_fingerprint:
+        if existing_prop.get_fingerprint() != payload_fingerprint:
             logger.warning(
                 "Idempotency conflict for key '%s' in tenant '%s': payload mismatch.",
                 body.idempotency_key,
@@ -831,7 +1234,18 @@ async def propose_tool_action(
                 detail="Idempotency key has already been used with a different request payload.",
             )
 
-        # Exact match: Return cached proposal, decision and execution without re-invoking adapter
+        # In-progress concurrent execution check
+        if existing_dec.execution_status == ExecutionStatus.PENDING_EXECUTION.value:
+            logger.info(
+                "Idempotency in-progress duplicate for key '%s': execution still pending.",
+                body.idempotency_key,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Action proposal with this idempotency key is currently executing. Please retry shortly.",
+            )
+
+        # Exact match replay: return previously persisted decision & execution without re-invoking adapter
         logger.info(
             "Idempotent replay: returning previously persisted decision for key '%s'.",
             body.idempotency_key,
@@ -847,13 +1261,14 @@ async def propose_tool_action(
             result=existing_exec.result_payload_json if existing_exec else None,
         )
 
-    # 4. Memory Trust & Cryptographic Integrity Verification (M3 Memory Systems)
+    # 5. Memory Trust & Cryptographic Integrity Verification (M3 Memory Systems)
     memory_repo = getattr(request.app.state, "memory_repo", None)
     if memory_repo is None and body.memory_refs:
         raise SecurityDependencyError("Memory trust verification service unavailable.")
 
     memory_trust_state = "NOT_REFERENCED"
     memory_reasons: List[str] = []
+    verified_memory_evidence: List[Dict[str, Any]] = []
 
     if body.memory_refs:
         all_trusted = True
@@ -869,7 +1284,6 @@ async def propose_tool_action(
                 )
                 break
 
-            # Validate memory belongs to the agent if agent-scoped
             if record.agent_id is not None and record.agent_id != body.agent_id:
                 all_trusted = False
                 tainted_state = "QUARANTINED"
@@ -878,7 +1292,6 @@ async def propose_tool_action(
                 )
                 break
 
-            # Verify cryptographic checksum of latest version
             latest_version = memory_repo.get_latest_version(ref_id, tenant_id)
             if latest_version is None:
                 all_trusted = False
@@ -900,7 +1313,14 @@ async def propose_tool_action(
                     status_code=500,
                 )
 
-            # Check Trust State Machine
+            # Record verified version & integrity evidence (SEC-GW-006)
+            verified_memory_evidence.append({
+                "record_id": ref_id,
+                "version": latest_version.version,
+                "checksum": computed_checksum,
+                "trust_state": record.trust_state,
+            })
+
             if record.trust_state != TrustState.TRUSTED.value:
                 all_trusted = False
                 tainted_state = record.trust_state
@@ -913,7 +1333,7 @@ async def propose_tool_action(
         else:
             memory_trust_state = tainted_state or "SUSPICIOUS"
 
-    # 5. Deterministic Policy Evaluation (M4 Security Policy Engine)
+    # 6. Deterministic Policy Evaluation (M4 Security Policy Engine)
     policy_evaluator = getattr(request.app.state, "policy_evaluator", None) or get_default_policy_evaluator()
     eval_input = PolicyEvaluationInput(
         tenant_id=tenant_id,
@@ -933,64 +1353,30 @@ async def propose_tool_action(
         logger.exception("Policy evaluation failed closed with unexpected error: %s", exc)
         raise SecurityDependencyError("Policy evaluation failed closed.") from exc
 
-    # 6. Adapter Execution Boundary (M2 Agent Runtime & Tool Adapters)
+    # 7. Check Tool Registration & Determine Initial Execution Status
     proposal_id = str(uuid.uuid4())
     decision_id = str(uuid.uuid4())
     tool_registry = getattr(request.app.state, "tool_registry", None) or get_default_tool_registry()
 
-    execution_entity: Optional[ToolExecutionEntity] = None
     execution_status = ExecutionStatus.NOT_EXECUTED.value
-    execution_result_payload: Optional[Dict[str, Any]] = None
+    adapter = None
 
     if policy_output.decision == GatewayDecision.ALLOW:
         adapter = tool_registry.get_adapter(body.tool_name)
         if adapter is None:
-            # Tool not found or not registered
             policy_output.decision = GatewayDecision.BLOCK
             policy_output.policy_result = PolicyResult.DENIED
             policy_output.reasons.append(f"Tool '{body.tool_name}' is not registered in Gateway adapter registry.")
+            execution_status = ExecutionStatus.NOT_EXECUTED.value
         else:
-            # Safe Tool Execution
-            try:
-                exec_res = await adapter.execute(
-                    operation=body.operation,
-                    parameters=body.parameters,
-                    context={"tenant_id": tenant_id, "agent_id": body.agent_id, "trace_id": body.trace_id},
-                )
-                execution_status = ExecutionStatus.EXECUTED.value
-                execution_result_payload = exec_res.result_payload
-                execution_entity = ToolExecutionEntity(
-                    id=str(uuid.uuid4()),
-                    tenant_id=tenant_id,
-                    proposal_id=proposal_id,
-                    decision_id=decision_id,
-                    status=exec_res.status,
-                    status_code=exec_res.status_code,
-                    result_payload_json=exec_res.result_payload,
-                    duration_ms=exec_res.duration_ms,
-                    executed_at=datetime.now(timezone.utc),
-                )
-            except Exception as exc:
-                logger.exception("Tool execution failed for tool '%s': %s", body.tool_name, exc)
-                execution_status = ExecutionStatus.FAILED.value
-                execution_result_payload = {"error": "Tool execution exception occurred."}
-                execution_entity = ToolExecutionEntity(
-                    id=str(uuid.uuid4()),
-                    tenant_id=tenant_id,
-                    proposal_id=proposal_id,
-                    decision_id=decision_id,
-                    status="FAILED",
-                    status_code=500,
-                    result_payload_json=execution_result_payload,
-                    duration_ms=0,
-                    executed_at=datetime.now(timezone.utc),
-                )
+            # Policy allows and adapter exists: set execution_status to PENDING_EXECUTION
+            execution_status = ExecutionStatus.PENDING_EXECUTION.value
     elif policy_output.decision == GatewayDecision.REVIEW:
         execution_status = ExecutionStatus.PENDING_APPROVAL.value
     else:  # BLOCK
         execution_status = ExecutionStatus.NOT_EXECUTED.value
 
-    # 7. Durable Persistence (M6 Relational Transaction)
+    # 8. Durable Persistence of Proposal & Decision BEFORE Dispatch (Part 9 & Part 13)
     proposal_entity = ToolProposalEntity(
         id=proposal_id,
         tenant_id=tenant_id,
@@ -1019,7 +1405,6 @@ async def propose_tool_action(
         created_at=datetime.now(timezone.utc),
     )
 
-    # 8. Append-Only Audit Logging with Secret Redaction
     redacted_parameters = redact_sensitive_payload(body.parameters)
     audit_entity = AuditEventEntity(
         id=str(uuid.uuid4()),
@@ -1041,6 +1426,7 @@ async def propose_tool_action(
             "reasons": policy_output.reasons,
             "parameters": redacted_parameters,
             "memory_refs": body.memory_refs,
+            "verified_memory_versions": verified_memory_evidence,
             "payload_fingerprint": payload_fingerprint,
         },
         occurred_at=datetime.now(timezone.utc),
@@ -1050,20 +1436,132 @@ async def propose_tool_action(
         await gateway_repo.save_proposal_atomic(
             proposal=proposal_entity,
             decision=decision_entity,
-            execution=execution_entity,
+            execution=None,  # Not executed yet!
             audit_event=audit_entity,
         )
     except HTTPException:
         raise
+    except AMSCException:
+        raise
     except Exception as exc:
-        logger.exception("Failed to persist gateway proposal and decision atomically: %s", exc)
+        logger.exception("Failed to persist gateway proposal and decision atomically before dispatch: %s", exc)
         raise AMSCException(
             message="Failed to persist action proposal and security decision.",
             code="PERSISTENCE_FAILURE",
             status_code=500,
         ) from exc
 
-    # 9. Return Canonical Action Proposal Response
+    # 9. Adapter Dispatch (Only for ALLOW with PENDING_EXECUTION)
+    execution_result_payload: Optional[Dict[str, Any]] = None
+
+    if policy_output.decision == GatewayDecision.ALLOW and adapter is not None:
+        # 9a. Memory TOCTOU Revalidation (SEC-GW-007)
+        toctou_violation = False
+        toctou_reason = ""
+        if body.memory_refs and memory_repo is not None:
+            for ref_id in body.memory_refs:
+                cur_rec = memory_repo.get_record(ref_id, tenant_id)
+                if cur_rec is None or cur_rec.trust_state != TrustState.TRUSTED.value:
+                    toctou_violation = True
+                    cur_st = cur_rec.trust_state if cur_rec else "DELETED"
+                    toctou_reason = f"Memory trust revoked for '{ref_id}' (state: {cur_st}) before adapter dispatch."
+                    break
+                cur_ver = memory_repo.get_latest_version(ref_id, tenant_id)
+                if cur_ver is None or sha256_hex(cur_ver.content) != cur_ver.checksum:
+                    toctou_violation = True
+                    toctou_reason = f"Memory integrity invalidated for '{ref_id}' before adapter dispatch."
+                    break
+
+        if toctou_violation:
+            logger.warning("TOCTOU protection triggered: %s", toctou_reason)
+            execution_status = ExecutionStatus.NOT_EXECUTED.value
+            policy_output.decision = GatewayDecision.BLOCK
+            policy_output.policy_result = PolicyResult.DENIED
+            policy_output.reasons.append(toctou_reason)
+
+            abort_exec = ToolExecutionEntity(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                status="BLOCKED_BY_TOCTOU",
+                status_code=403,
+                result_payload_json={"error": toctou_reason},
+                duration_ms=0,
+                executed_at=datetime.now(timezone.utc),
+            )
+            await gateway_repo.record_execution_outcome(
+                tenant_id=tenant_id,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                execution=abort_exec,
+                execution_status=execution_status,
+            )
+        else:
+            # 9b. Execute protected adapter
+            execution_entity: Optional[ToolExecutionEntity] = None
+            try:
+                exec_res = await adapter.execute(
+                    operation=body.operation,
+                    parameters=body.parameters,
+                    context={"tenant_id": tenant_id, "agent_id": body.agent_id, "trace_id": body.trace_id},
+                )
+                execution_status = ExecutionStatus.EXECUTED.value
+                execution_result_payload = exec_res.result_payload
+                execution_entity = ToolExecutionEntity(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    proposal_id=proposal_id,
+                    decision_id=decision_id,
+                    status=exec_res.status,
+                    status_code=exec_res.status_code,
+                    result_payload_json=exec_res.result_payload,
+                    duration_ms=exec_res.duration_ms,
+                    executed_at=datetime.now(timezone.utc),
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.error("Adapter timed out for tool '%s'. Side effect outcome is UNKNOWN.", body.tool_name)
+                execution_status = ExecutionStatus.UNKNOWN.value
+                execution_result_payload = {
+                    "error": "Tool execution timed out. Outcome is ambiguous and requires reconciliation."
+                }
+                execution_entity = ToolExecutionEntity(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    proposal_id=proposal_id,
+                    decision_id=decision_id,
+                    status="UNKNOWN",
+                    status_code=504,
+                    result_payload_json=execution_result_payload,
+                    duration_ms=0,
+                    executed_at=datetime.now(timezone.utc),
+                )
+            except Exception as exc:
+                logger.exception("Tool execution failed for tool '%s': %s", body.tool_name, exc)
+                execution_status = ExecutionStatus.FAILED.value
+                execution_result_payload = {"error": "Tool execution exception occurred."}
+                execution_entity = ToolExecutionEntity(
+                    id=str(uuid.uuid4()),
+                    tenant_id=tenant_id,
+                    proposal_id=proposal_id,
+                    decision_id=decision_id,
+                    status="FAILED",
+                    status_code=500,
+                    result_payload_json=execution_result_payload,
+                    duration_ms=0,
+                    executed_at=datetime.now(timezone.utc),
+                )
+
+            # Record final execution outcome
+            await gateway_repo.record_execution_outcome(
+                tenant_id=tenant_id,
+                proposal_id=proposal_id,
+                decision_id=decision_id,
+                execution=execution_entity,
+                execution_status=execution_status,
+            )
+
+    # 10. Return Canonical Action Proposal Response
     return ActionProposalResponse(
         action_id=body.action_id,
         proposal_id=proposal_id,
@@ -1074,6 +1572,48 @@ async def propose_tool_action(
         execution_status=execution_status,
         result=execution_result_payload,
     )
+
+
+@router.get(
+    "/actions",
+    response_model=List[ProposalDetailResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Tool Action Proposals",
+    description="List forensic proposals, policy decisions, and execution outcomes for authorized tenant members.",
+)
+async def list_tool_actions(
+    request: Request,
+    context: TenantContextDep,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> List[ProposalDetailResponse]:
+    gateway_repo = await get_gateway_repository(request)
+    records = await gateway_repo.list_proposals(context.tenant_id, limit=limit, offset=offset)
+    results = []
+    for prop, dec, exe in records:
+        redacted_parameters = redact_sensitive_payload(prop.parameters_json)
+        results.append(
+            ProposalDetailResponse(
+                proposal_id=prop.id,
+                tenant_id=prop.tenant_id,
+                agent_id=prop.agent_id,
+                action_id=prop.action_id,
+                tool_name=prop.tool_name,
+                operation=prop.operation,
+                parameters=redacted_parameters,
+                memory_refs=prop.memory_refs_json,
+                idempotency_key=prop.idempotency_key,
+                trace_id=prop.trace_id,
+                decision=dec.decision,
+                memory_trust=dec.memory_trust,
+                policy_result=dec.policy_result,
+                reasons=list(dec.reasons_json),
+                execution_status=dec.execution_status,
+                execution_result=exe.result_payload_json if exe else None,
+                created_at=prop.created_at.isoformat(),
+            )
+        )
+    return results
 
 
 @router.get(
@@ -1088,6 +1628,9 @@ async def get_tool_action_detail(
     request: Request,
     context: TenantContextDep,
 ) -> ProposalDetailResponse:
+    if not SAFE_ID_REGEX.match(proposal_id):
+        raise ValidationError("Invalid proposal identifier format.")
+
     gateway_repo = await get_gateway_repository(request)
     record = await gateway_repo.get_by_id(context.tenant_id, proposal_id)
     if record is None:
