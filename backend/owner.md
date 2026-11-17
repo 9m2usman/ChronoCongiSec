@@ -15,10 +15,11 @@
 | `knowledge/` | M3 | KnowledgeLine document ingestion, chunking, provenance tree |
 | `api/memory.py` | M3 | Memory retrieval and mutation routes |
 | `api/chronimem.py`| M3 | Temporal knowledge graph routes |
-| `security/` | M4 | Policy engine, RBAC evaluator, threat detection, quarantine |
+| `security/` | M4 | Policy engine, RBAC evaluator, threat detection, quarantine (`security/quarantine.py`) |
 | `recovery/` | M4 | Rollback engine, point-in-time recovery, audit logs |
+| `api/incident_management.py` | M1 | Authenticated incident & evidence API contracts, quarantine integration & forensic access |
 | `api/security.py` | M4 | Security verification and policy administration routes |
-| `api/incidents.py`| M4 | Incident reporting and triage endpoints |
+| `api/incidents.py`| M4 | Incident reporting and triage domain logic |
 | `api/recovery.py` | M4 | Recovery and rollback trigger routes |
 | `database/` | M6 | PostgreSQL async SQLAlchemy engine, base models, Alembic migrations |
 | `alembic/` | M6 | Migration scripts exclusively owned by M6 |

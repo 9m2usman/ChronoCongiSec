@@ -21,6 +21,10 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from backend.app.api.agents import router as agents_router
 from backend.app.api.auth import router as auth_router
 from backend.app.api.gateway import router as gateway_router
+from backend.app.api.incident_management import (
+    memory_quarantine_router,
+    router as incident_router,
+)
 from backend.app.api.memory import router as memory_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.core.config import Settings, get_settings
@@ -142,6 +146,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory gateway repository is strictly forbidden in production."
             )
 
+        incident_repo = getattr(app.state, "incident_repo", None)
+        if incident_repo is not None and (
+            getattr(incident_repo, "is_in_memory", True)
+            or not getattr(incident_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database incident repository from M6 is not configured. "
+                "In-memory incident repository is strictly forbidden in production."
+            )
+
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
@@ -198,6 +212,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.gateway_repo = None
 
+    # Incident repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.incident_management import get_default_incident_repository
+        app.state.incident_repo = get_default_incident_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.incident_management import SqlAlchemyIncidentRepository
+            app.state.incident_repo = SqlAlchemyIncidentRepository(session_factory)
+        else:
+            app.state.incident_repo = None
+
+    # Quarantine service initialization
+    from backend.app.security.quarantine import get_default_quarantine_service
+    app.state.quarantine_service = get_default_quarantine_service()
+
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
 
@@ -244,6 +274,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(agents_router)
     api_router.include_router(gateway_router)
     api_router.include_router(memory_router)
+    api_router.include_router(incident_router)
+    api_router.include_router(memory_quarantine_router)
 
     app.include_router(api_router)
 

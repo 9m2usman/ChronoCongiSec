@@ -173,6 +173,18 @@
 
 **Exit Gate G5:** Analyst investigates incident, quarantines poisoned record, inspects ChroniMem diff, and executes validated recovery.
 
+#### Day 5 Security Acceptance Criteria (M1 Platform Integration)
+1. **Authenticated Analyst-Only Access:** Incident creation (`POST /api/v1/security/incidents`), evidence attachment (`POST /api/v1/security/incidents/{id}/evidence`), and memory quarantine (`POST /api/v1/memory/{id}/quarantine`) strictly require authenticated `SECURITY_ANALYST` or `TENANT_ADMIN` role credentials. Non-analyst roles receive HTTP 403 Forbidden.
+2. **Tenant and Branch-Safe References:** All referenced resources (`affected_record_id`, `agent_id`, and `evidence[].resource_id`) are verified to exist and belong to the authenticated caller's tenant. Cross-tenant references are strictly rejected with HTTP 400 Bad Request.
+3. **Strict Evidence Type Validation:** Evidence attachment accepts only allowlisted categories (`MEMORY_RECORD`, `TOOL_PROPOSAL`, `TRACE_SPAN`, `AUDIT_EVENT`). Arbitrary categories or unknown fields are rejected with HTTP 400 Bad Request.
+4. **Zero Caller-Controlled Identity:** Caller-supplied `tenant_id`, `actor_id`, or `created_by` attributes in request bodies are forbidden or ignored; tenant and actor identities are derived exclusively from verified JWT server-side context.
+5. **Atomic Quarantine State Transition:** Quarantine operations coordinate through M4's authoritative `M4QuarantineService` and persist quarantine records, incident state updates, and audit events in a single transactional unit; persistence failure rolls back memory trust state (fail-closed).
+6. **Immediate Retrieval Exclusion:** Once quarantined, records are immediately excluded from standard agent retrieval (`GET /api/v1/memory`), return HTTP 404 on standard detail endpoints (`GET /api/v1/memory/{id}`), and immediately block any gateway tool proposals referencing them (`decision="BLOCK"`, `memory_trust="QUARANTINED"`).
+7. **Separate Audited Forensic Access:** Quarantined memory cannot be accessed through public retrieval or boolean flags; access is restricted to dedicated forensic endpoint (`GET /api/v1/security/memory/{id}`) requiring explicit investigation reason and producing an immutable audit log.
+8. **Sanitized Error Responses & Recursive Redaction:** Public responses suppress raw database errors, stack traces, and internal paths; evidence metadata recursively scrubs credentials, private keys, passwords, and tokens (`[REDACTED]`).
+9. **Durable Incident & Evidence Audit Trail:** All security lifecycle operations (incident creation, evidence attachment, quarantine isolation, forensic inspection) emit durable audit events (`AuditEventEntity`) recording actor, tenant, action, resource, timestamp, and trace correlation ID.
+10. **PostgreSQL-Backed Integration Verification:** Schema integrity and foreign key constraints enforce relational consistency across `incidents`, `incident_evidence`, `quarantines`, and `audit_events`.
+
 ---
 
 ### Day 6: Observability, Dual Trace & Three Core Demonstrations
