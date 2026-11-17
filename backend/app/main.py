@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from backend.app.api.agents import router as agents_router
 from backend.app.api.auth import router as auth_router
 from backend.app.api.memory import router as memory_router
 from backend.app.api.tenants import router as tenants_router
@@ -120,6 +121,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory memory repository is strictly forbidden in production."
             )
 
+        agent_repo = getattr(app.state, "agent_repo", None)
+        if agent_repo is not None and (
+            getattr(agent_repo, "is_in_memory", True)
+            or not getattr(agent_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database agent repository from M6 is not configured. "
+                "In-memory agent repository is strictly forbidden in production."
+            )
+
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
@@ -156,6 +167,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.memory_repo = get_default_repository()
     else:
         app.state.memory_repo = None
+
+    # Agent repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.agents import get_default_agent_repository
+        app.state.agent_repo = get_default_agent_repository()
+    else:
+        app.state.agent_repo = None
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
@@ -200,6 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     api_router.include_router(auth_router)
     api_router.include_router(tenants_router)
+    api_router.include_router(agents_router)
     api_router.include_router(memory_router)
 
     app.include_router(api_router)

@@ -266,10 +266,25 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
         full_name="Iris InactiveMembership",
         status="ACTIVE",
     )
+    u_dev_a = UserRecord(
+        id="user-a-dev-009",
+        email="developer@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Dave Developer",
+        status="ACTIVE",
+    )
+    u_dev_b = UserRecord(
+        id="user-b-dev-010",
+        email="developer@company-b.com",
+        hashed_password=seed_hash,
+        full_name="Diana Developer",
+        status="ACTIVE",
+    )
 
     for u in [
         u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive,
         u_revoked_mem, u_suspended_mem, u_inactive_mem,
+        u_dev_a, u_dev_b,
     ]:
         repo.add_user(u)
 
@@ -344,6 +359,24 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             user_id=u_inactive_mem.id,
             role="SECURITY_ANALYST",
             status="INACTIVE",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-009",
+            tenant_id=t_a.id,
+            user_id=u_dev_a.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-010",
+            tenant_id=t_b.id,
+            user_id=u_dev_b.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
         )
     )
     return repo
