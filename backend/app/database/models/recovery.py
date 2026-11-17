@@ -10,7 +10,7 @@ tenant-consistent foreign keys.
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Integer, String, Text, text
+from sqlalchemy import DateTime, ForeignKeyConstraint, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.database.base import (
@@ -108,6 +108,13 @@ class CheckpointItem(Base):
         *tenant_fk("checkpoint_items", "checkpoint_id", "checkpoints", "CASCADE"),
         *tenant_fk("checkpoint_items", "record_id", "memory_records", "CASCADE"),
         *tenant_fk("checkpoint_items", "version_id", "memory_versions", "CASCADE"),
+        ForeignKeyConstraint(
+            ["tenant_id", "record_id", "version_id"],
+            ["memory_versions.tenant_id", "memory_versions.record_id", "memory_versions.id"],
+            name="fk_checkpoint_items_version_matches_record",
+            ondelete="CASCADE",
+        ),
+        Index("ix_checkpoint_items_tenant_record_version", "tenant_id", "record_id", "version_id"),
     )
 
 
