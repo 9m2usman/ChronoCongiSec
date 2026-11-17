@@ -229,3 +229,24 @@ Questions:
 - **M7:** can docker-compose, `.env.example` and CI create the `amsc_app` role? (M6 can supply the SQL.)
 - **M1:** how should login resolve `tenants` and `memberships` before a tenant context exists: a SECURITY DEFINER function or a separate role?
 - **M6 lead:** should RLS be done together with Day 6, since it is the same role work? Recommended.
+
+
+---
+
+## Security hardening — Phase C: append-only audit events (2026-11-17)
+
+**Built**
+- `backend/alembic/versions/0004_audit_events_append_only.py` (revision `0004`, parent `0003`):
+  - PostgreSQL row-level trigger rejects direct `UPDATE` and `DELETE` against `audit_events`.
+  - PostgreSQL statement-level `TRUNCATE` trigger rejects table truncation (row triggers do not fire for TRUNCATE).
+  - Trigger failures raise SQLSTATE `55000`; ordinary inserts remain permitted.
+  - Downgrade removes both triggers and the trigger function.
+- `backend/tests/database/test_audit_append_only.py`: raw-SQL tests verify UPDATE, DELETE and TRUNCATE are rejected and the original evidence remains present.
+
+**Scope**
+- This protects audit-event rows against ordinary SQL mutation paths, including repository bypasses. It does not claim protection against a database superuser or table owner deliberately disabling/dropping triggers; least-privilege database roles remain a separate M7 integration prerequisite.
+- No changes were made to the product's agent, memory, policy, gateway or API behavior.
+
+**Verification status**
+- Files committed to `feat/m6-schema-governance`.
+- Tests have not yet been executed in this environment. PostgreSQL-backed CI/test execution is required before merge.
