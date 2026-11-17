@@ -140,9 +140,9 @@ async def test_relationships_match_expected_list_exactly(ro_conn: asyncpg.Connec
     """Every expected relationship exists as a composite FK with the right delete rule, and no others."""
     actual = set()
     for fk in await _foreign_keys(ro_conn):
-        cols = list(fk["child_cols"])
-        if len(cols) == 2 and cols[0] == "tenant_id" and list(fk["parent_cols"]) == ["tenant_id", "id"]:
-            actual.add((fk["child"], cols[1], fk["parent"], _DELETE_ACTIONS[fk["confdeltype"]]))
+        cols, parent_cols = list(fk["child_cols"]), list(fk["parent_cols"])
+        if len(cols) == 2 and cols[0] == "tenant_id" and parent_cols[0] == "tenant_id":
+            actual.add((fk["child"], cols[1], fk["parent"], _DELETE_ACTIONS[fk["confdeltype"]], parent_cols[1]))
     expected = {tuple(rel) for rel in TENANT_RELATIONSHIPS}
 
     assert expected - actual == set(), f"Missing or wrong composite FKs: {sorted(expected - actual)}"
@@ -166,18 +166,19 @@ async def test_set_null_references_never_clear_tenant_id(ro_conn: asyncpg.Connec
 
 
 async def test_referenced_parents_have_tenant_parent_key(ro_conn: asyncpg.Connection) -> None:
+    """Each referenced parent has a UNIQUE/PK on exactly (tenant_id, <referenced column>)."""
     rows = await ro_conn.fetch(
         """
-        SELECT cl.relname AS table_name
+        SELECT cl.relname AS table_name,
+               (SELECT array_agg(a.attname::text) FROM pg_attribute a
+                 WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)) AS cols
         FROM pg_constraint c JOIN pg_class cl ON cl.oid = c.conrelid
         WHERE c.contype IN ('u', 'p') AND cl.relnamespace = 'public'::regnamespace
-          AND (SELECT array_agg(a.attname ORDER BY a.attname) FROM pg_attribute a
-               WHERE a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)) = ARRAY['id', 'tenant_id']::name[]
         """
     )
-    with_key = {r["table_name"] for r in rows}
-    parents = {rel.parent for rel in TENANT_RELATIONSHIPS}
-    assert parents - with_key == set()
+    keys = {(r["table_name"], frozenset(r["cols"])) for r in rows}
+    required = {(rel.parent, frozenset({"tenant_id", rel.parent_column})) for rel in TENANT_RELATIONSHIPS}
+    assert required - keys == set()
 
 
 async def test_every_composite_fk_is_backed_by_an_index(ro_conn: asyncpg.Connection) -> None:
@@ -210,3 +211,42 @@ async def test_tenant_id_immutability_trigger_on_every_tenant_table(ro_conn: asy
         """
     )
     assert tenant_tables - {r["relname"] for r in rows} == set()
+
+
+# ---------------------------------------------------------------------------
+# Migration 0003: forensic delete protection and membership status
+# ---------------------------------------------------------------------------
+
+from backend.tests.database.relationships import FORENSIC_TENANT_TABLES  # noqa: E402
+
+
+async def test_tenant_delete_rule_protects_forensic_tables(ro_conn: asyncpg.Connection) -> None:
+    """tenant_id -> tenants is RESTRICT on evidence tables and CASCADE everywhere else."""
+    rules = {}
+    for fk in await _foreign_keys(ro_conn):
+        if fk["parent"] == "tenants" and list(fk["child_cols"]) == ["tenant_id"]:
+            rules[fk["child"]] = _DELETE_ACTIONS[fk["confdeltype"]]
+    tenant_tables = set(await _tenant_id_columns(ro_conn))
+
+    assert set(rules) == tenant_tables, "every tenant_id must have exactly one FK to tenants"
+    restricted = {table for table, rule in rules.items() if rule == "RESTRICT"}
+    assert restricted == set(FORENSIC_TENANT_TABLES)
+    others = {rules[t] for t in tenant_tables - FORENSIC_TENANT_TABLES}
+    assert others == {"CASCADE"}, f"Unexpected tenant delete rules: {others}"
+
+
+async def test_membership_status_is_constrained(ro_conn: asyncpg.Connection) -> None:
+    row = await ro_conn.fetchrow(
+        """
+        SELECT is_nullable, column_default FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'memberships' AND column_name = 'status'
+        """
+    )
+    assert row is not None and row["is_nullable"] == "NO"
+    assert row["column_default"].startswith("'ACTIVE'")
+    check = await ro_conn.fetchval(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_memberships_status'"
+    )
+    assert check is not None
+    for status in ("ACTIVE", "INACTIVE", "SUSPENDED", "REVOKED"):
+        assert f"'{status}'" in check

@@ -6,7 +6,7 @@ Tables: tenants, branches, users, memberships, roles, permissions, role_permissi
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.database.base import (
@@ -63,7 +63,20 @@ class User(Base):
     __table_args__ = (Index("idx_users_email", "email"),)
 
 
+# Membership lifecycle (M6 migration 0003). Only ACTIVE grants tenant access;
+# M1 enforces that at login, the database only guarantees a known value.
+MEMBERSHIP_STATUSES = ("ACTIVE", "INACTIVE", "SUSPENDED", "REVOKED")
+
+
 class Membership(Base):
+    """A user's access grant to one tenant.
+
+    ``status`` defaults to ACTIVE for new rows. Rows that existed before
+    migration 0003 were backfilled to INACTIVE (their status was unknown).
+    Revoke access by setting ``status``, not by deleting the row: approvals
+    reference the membership with ON DELETE RESTRICT.
+    """
+
     __tablename__ = "memberships"
 
     id: Mapped[str] = id_column()
@@ -74,11 +87,16 @@ class Membership(Base):
     role: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=text("'SECURITY_ANALYST'")
     )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
     created_at: Mapped[datetime] = created_at_column()
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", name="uq_tenant_user"),
         Index("idx_memberships_tenant_user", "tenant_id", "user_id"),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in MEMBERSHIP_STATUSES) + ")",
+            name="status",
+        ),
     )
 
 

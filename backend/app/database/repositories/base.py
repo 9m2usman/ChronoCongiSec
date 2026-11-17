@@ -23,7 +23,9 @@ from backend.app.database.base import Base
 
 ModelT = TypeVar("ModelT", bound=Base)
 
-MAX_PAGE_SIZE = 500
+# AMSC-DOC-002 (TRD) "Paginated List APIs": default page size 50, maximum 100.
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 100
 IMMUTABLE_FIELDS = frozenset({"id", "tenant_id"})
 
 
@@ -60,8 +62,8 @@ class TenantScopedRepository(Generic[ModelT]):
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
-    async def list(self, *, limit: int = 50, offset: int = 0, **filters: Any) -> Sequence[ModelT]:
-        if not 1 <= limit <= MAX_PAGE_SIZE:
+    async def list(self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0, **filters: Any) -> Sequence[ModelT]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PAGE_SIZE:
             raise ValueError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
         if offset < 0:
             raise ValueError("offset must be >= 0")

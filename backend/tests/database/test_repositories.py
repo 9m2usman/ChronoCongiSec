@@ -9,7 +9,12 @@ import pytest
 from sqlalchemy.exc import DBAPIError
 
 from backend.app.database.models import Agent, MemoryRecord, Role, Tenant
-from backend.app.database.repositories import TenantScopedRepository, TenantScopeError
+from backend.app.database.repositories import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    TenantScopedRepository,
+    TenantScopeError,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -137,3 +142,46 @@ async def test_repository_requires_tenant_and_tenant_owned_model(session) -> Non
         TenantScopedRepository(session, _id(), model=Role)  # nullable tenant_id (global roles)
     with pytest.raises(TypeError):
         TenantScopedRepository(session, _id(), model=Tenant)  # global table
+
+
+# -- pagination contract (AMSC-DOC-002: default 50, maximum 100) ---------------------
+
+
+async def test_pagination_contract_values() -> None:
+    assert (DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE) == (50, 100)
+
+
+async def _tenant_with_agents(session, count: int) -> TenantScopedRepository:
+    repo = TenantScopedRepository(session, await _tenant(session), model=Agent)
+    session.add_all([Agent(id=_id(), tenant_id=repo.tenant_id, name=f"bot-{i}") for i in range(count)])
+    await session.flush()
+    return repo
+
+
+async def test_list_default_page_size_is_50(session) -> None:
+    repo = await _tenant_with_agents(session, 101)
+
+    assert len(await repo.list()) == 50
+
+
+async def test_list_accepts_minimum_and_maximum_limits(session) -> None:
+    repo = await _tenant_with_agents(session, 101)
+
+    assert len(await repo.list(limit=1)) == 1
+    assert len(await repo.list(limit=100)) == 100
+    assert len(await repo.list(limit=100, offset=100)) == 1
+
+
+@pytest.mark.parametrize("bad", [0, -1, 101, 500, 10_000, True, 50.0, "50", None])
+async def test_list_rejects_invalid_or_excessive_limits(session, bad) -> None:
+    repo = TenantScopedRepository(session, _id(), model=Agent)
+
+    with pytest.raises(ValueError, match="limit must be between 1 and 100"):
+        await repo.list(limit=bad)
+
+
+async def test_list_rejects_negative_offset(session) -> None:
+    repo = TenantScopedRepository(session, _id(), model=Agent)
+
+    with pytest.raises(ValueError):
+        await repo.list(offset=-1)

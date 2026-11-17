@@ -110,7 +110,7 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")  # forensic evidence
     actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_id: Mapped[str] = mapped_column(String(128), nullable=False)

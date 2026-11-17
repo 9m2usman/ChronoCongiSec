@@ -7,7 +7,8 @@ For EVERY tenant relationship:
 - missing parent: a reference to a non-existent id is rejected;
 - forged update: re-pointing an existing child at tenant B's parent is rejected;
 - delete behaviour: CASCADE removes the child, SET NULL clears only the
-  reference and keeps the child's tenant_id.
+  reference and keeps the child's tenant_id, RESTRICT refuses to delete a
+  parent that still has children (forensic history, migration 0003).
 Plus: tenant_id can never be changed on any tenant-owned row.
 
 Raw SQL on purpose: the database must hold the line even if the ORM, the
@@ -26,28 +27,38 @@ pytestmark = pytest.mark.asyncio
 
 CASCADE_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "CASCADE"]
 SET_NULL_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "SET NULL"]
+RESTRICT_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "RESTRICT"]
 
 
 def _ids(rels):
     return [r.id for r in rels]
 
 
+async def _parent(factory: RowFactory, rel: Rel, tenant_id: str) -> tuple[str, str]:
+    """Create a parent row; return (its id, the key value a child stores in rel.column)."""
+    parent_id = await factory.create(rel.parent, tenant_id)
+    if rel.parent_column == "id":
+        return parent_id, parent_id
+    key = await factory.conn.fetchval(f"SELECT {rel.parent_column} FROM {rel.parent} WHERE id = $1", parent_id)
+    return parent_id, key
+
+
 @pytest.mark.parametrize("rel", TENANT_RELATIONSHIPS, ids=_ids(TENANT_RELATIONSHIPS))
 async def test_same_tenant_reference_is_accepted(factory: RowFactory, tx_conn, rel: Rel) -> None:
     tenant_a = await factory.tenant()
-    parent_id = await factory.create(rel.parent, tenant_a)
+    _, parent_key = await _parent(factory, rel, tenant_a)
 
-    child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_id})
+    child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_key})
 
     stored = await tx_conn.fetchval(f"SELECT {rel.column} FROM {rel.child} WHERE id = $1", child_id)
-    assert stored == parent_id
+    assert stored == parent_key
 
 
 @pytest.mark.parametrize("rel", TENANT_RELATIONSHIPS, ids=_ids(TENANT_RELATIONSHIPS))
 async def test_forged_cross_tenant_insert_is_rejected(factory: RowFactory, rel: Rel) -> None:
     tenant_a = await factory.tenant()
     tenant_b = await factory.tenant()
-    foreign_parent = await factory.create(rel.parent, tenant_b)
+    _, foreign_parent = await _parent(factory, rel, tenant_b)
 
     with pytest.raises(asyncpg.ForeignKeyViolationError):
         await factory.create(rel.child, tenant_a, **{rel.column: foreign_parent})
@@ -65,9 +76,9 @@ async def test_missing_parent_is_rejected(factory: RowFactory, rel: Rel) -> None
 async def test_forged_cross_tenant_update_is_rejected(factory: RowFactory, tx_conn, rel: Rel) -> None:
     tenant_a = await factory.tenant()
     tenant_b = await factory.tenant()
-    own_parent = await factory.create(rel.parent, tenant_a)
+    _, own_parent = await _parent(factory, rel, tenant_a)
     child_id = await factory.create(rel.child, tenant_a, **{rel.column: own_parent})
-    foreign_parent = await factory.create(rel.parent, tenant_b)
+    _, foreign_parent = await _parent(factory, rel, tenant_b)
 
     with pytest.raises(asyncpg.ForeignKeyViolationError):
         async with tx_conn.transaction():
@@ -103,6 +114,22 @@ async def test_set_null_delete_keeps_child_and_tenant(factory: RowFactory, tx_co
     assert row is not None, "SET NULL relationship must keep the child row (forensic history)"
     assert row["ref"] is None
     assert row["tenant_id"] == tenant_a
+
+
+@pytest.mark.parametrize("rel", RESTRICT_RELS, ids=_ids(RESTRICT_RELS))
+async def test_restrict_delete_keeps_parent_and_child(factory: RowFactory, tx_conn, rel: Rel) -> None:
+    tenant_a = await factory.tenant()
+    parent_id, parent_key = await _parent(factory, rel, tenant_a)
+    child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_key})
+
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        async with tx_conn.transaction():
+            await tx_conn.execute(f"DELETE FROM {rel.parent} WHERE id = $1", parent_id)
+
+    assert await tx_conn.fetchval(f"SELECT count(*) FROM {rel.parent} WHERE id = $1", parent_id) == 1
+    assert await tx_conn.fetchval(
+        f"SELECT {rel.column} FROM {rel.child} WHERE id = $1", child_id
+    ) == parent_key
 
 
 async def test_delete_of_other_tenant_parent_does_not_touch_my_rows(factory: RowFactory, tx_conn) -> None:

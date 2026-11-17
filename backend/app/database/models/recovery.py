@@ -29,7 +29,7 @@ class Incident(Base):
     __tablename__ = "incidents"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")  # forensic evidence
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     classification: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'HIGH'"))
@@ -50,7 +50,7 @@ class IncidentEvidence(Base):
     __tablename__ = "incident_evidence"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")  # forensic evidence
     incident_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     evidence_type: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_id: Mapped[str] = mapped_column(String(128), nullable=False)

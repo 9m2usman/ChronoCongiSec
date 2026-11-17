@@ -53,15 +53,24 @@ def id_column() -> Mapped[str]:
     return mapped_column(String(ID_LENGTH), primary_key=True)
 
 
-def tenant_id_column() -> Mapped[str]:
+TENANT_DELETE_RULES = frozenset({"CASCADE", "RESTRICT"})
+
+
+def tenant_id_column(ondelete: str = "CASCADE") -> Mapped[str]:
     """Mandatory tenant owner column: NOT NULL FK to tenants.id.
 
     HARD RULE (AMSC-DOC-006, M6 constraint): every tenant-owned table carries a
     non-nullable ``tenant_id`` referencing ``tenants.id``.
+
+    ``ondelete="RESTRICT"`` is used for forensic evidence tables (audit, incidents,
+    gateway history): a tenant that still owns such rows cannot be physically
+    deleted; it must be deactivated (``tenants.status``) instead.
     """
+    if ondelete not in TENANT_DELETE_RULES:
+        raise ValueError(f"Unsupported ondelete {ondelete!r} for tenant_id")
     return mapped_column(
         String(ID_LENGTH),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
+        ForeignKey("tenants.id", ondelete=ondelete),
         nullable=False,
     )
 
@@ -83,14 +92,15 @@ def tenant_fk(
     ``(tenant_id, column)``.
 
     AMSC-DOC-005 §1: a child row can only point at a parent row of the SAME tenant.
-    ``ondelete`` is ``"CASCADE"`` or ``"SET NULL"``. SET NULL is emitted as
-    ``SET NULL (column)`` (PostgreSQL 15+) so a parent delete clears only the
-    reference and never the child's NOT NULL ``tenant_id``.
+    ``ondelete`` is ``"CASCADE"``, ``"RESTRICT"`` or ``"SET NULL"``. SET NULL is
+    emitted as ``SET NULL (column)`` (PostgreSQL 15+) so a parent delete clears
+    only the reference and never the child's NOT NULL ``tenant_id``. RESTRICT
+    protects forensic history: the parent cannot be deleted while children exist.
     """
     if ondelete == "SET NULL":
         action = f"SET NULL ({column})"
-    elif ondelete == "CASCADE":
-        action = "CASCADE"
+    elif ondelete in ("CASCADE", "RESTRICT"):
+        action = ondelete
     else:
         raise ValueError(f"Unsupported ondelete {ondelete!r} for tenant FK {table}.{column}")
 

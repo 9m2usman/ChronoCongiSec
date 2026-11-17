@@ -4,12 +4,17 @@ Tables: tool_proposals, policy_decisions, approvals, tool_executions.
 
 Decision/status values are stored as plain strings exactly as in DOC-005; this
 layer does not interpret them (decision semantics belong to M4).
+
+Forensic history (migration 0003): every table here uses ``tenant_id ... ON DELETE
+RESTRICT``, and ``tool_proposals.agent_id`` is RESTRICT, so deleting a tenant or an
+agent can never silently erase proposals, decisions, approvals or executions.
+Agents are isolated (status), not deleted.
 """
 
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import DateTime, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.database.base import (
@@ -30,7 +35,7 @@ class ToolProposal(Base):
     __tablename__ = "tool_proposals"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
     agent_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     action_id: Mapped[str] = mapped_column(String(128), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -45,7 +50,7 @@ class ToolProposal(Base):
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_tenant_idemp_key"),
         Index("idx_tool_proposals_trace", "tenant_id", "trace_id"),
         tenant_parent_key(),
-        *tenant_fk("tool_proposals", "agent_id", "agents", "CASCADE"),
+        *tenant_fk("tool_proposals", "agent_id", "agents", "RESTRICT"),
     )
 
 
@@ -53,7 +58,7 @@ class PolicyDecision(Base):
     __tablename__ = "policy_decisions"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
     proposal_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False, unique=True)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     memory_trust: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -79,24 +84,33 @@ class Approval(Base):
     __tablename__ = "approvals"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
     decision_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
-    # users is a global table, so this stays a plain FK (see open questions in the M6 log).
-    approver_user_id: Mapped[Optional[str]] = mapped_column(
-        String(ID_LENGTH), ForeignKey("users.id", ondelete="SET NULL")
-    )
+    # NULL = not yet assigned. When set, the approver must hold a membership in the
+    # SAME tenant: (tenant_id, approver_user_id) -> memberships (tenant_id, user_id).
+    # RESTRICT keeps "who approved" as evidence: revoke the membership via status.
+    approver_user_id: Mapped[Optional[str]] = mapped_column(String(ID_LENGTH))
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
     comments: Mapped[Optional[str]] = mapped_column(Text)
     responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (*tenant_fk("approvals", "decision_id", "policy_decisions", "CASCADE"),)
+    __table_args__ = (
+        *tenant_fk("approvals", "decision_id", "policy_decisions", "CASCADE"),
+        ForeignKeyConstraint(
+            ["tenant_id", "approver_user_id"],
+            ["memberships.tenant_id", "memberships.user_id"],
+            name="fk_approvals_approver_user_id_tenant",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_approvals_tenant_id_approver_user_id", "tenant_id", "approver_user_id"),
+    )
 
 
 class ToolExecution(Base):
     __tablename__ = "tool_executions"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
     proposal_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False, unique=True)
     decision_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'SUCCESS'"))

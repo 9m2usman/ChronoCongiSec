@@ -13,7 +13,8 @@ class Rel(NamedTuple):
     child: str
     column: str
     parent: str
-    on_delete: str  # "CASCADE" or "SET NULL"
+    on_delete: str  # "CASCADE", "SET NULL" or "RESTRICT"
+    parent_column: str = "id"  # referenced key is (tenant_id, parent_column)
 
     @property
     def id(self) -> str:
@@ -34,10 +35,12 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("provenance_edges", "to_record_id", "memory_records", "CASCADE"),
     Rel("retrieval_events", "agent_id", "agents", "CASCADE"),
     Rel("retrieval_events", "record_id", "memory_records", "CASCADE"),
-    Rel("tool_proposals", "agent_id", "agents", "CASCADE"),
+    Rel("tool_proposals", "agent_id", "agents", "RESTRICT"),  # 0003: gateway history is evidence
     Rel("policy_decisions", "proposal_id", "tool_proposals", "CASCADE"),
     Rel("policy_decisions", "incident_id", "incidents", "SET NULL"),
     Rel("approvals", "decision_id", "policy_decisions", "CASCADE"),
+    # 0003: the approver must be a member of the approval's tenant; RESTRICT keeps "who approved".
+    Rel("approvals", "approver_user_id", "memberships", "RESTRICT", "user_id"),
     Rel("tool_executions", "proposal_id", "tool_proposals", "CASCADE"),
     Rel("tool_executions", "decision_id", "policy_decisions", "CASCADE"),
     Rel("incidents", "affected_record_id", "memory_records", "SET NULL"),
@@ -59,6 +62,18 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("traces", "agent_id", "agents", "SET NULL"),
     Rel("trace_spans", "trace_id", "traces", "CASCADE"),
 )
+
+# ON DELETE rule of every tenant_id -> tenants.id FK (0003). Forensic evidence tables
+# are RESTRICT: a tenant that still owns them must be deactivated, not deleted.
+FORENSIC_TENANT_TABLES = frozenset({
+    "audit_events",
+    "incidents",
+    "incident_evidence",
+    "tool_proposals",
+    "policy_decisions",
+    "approvals",
+    "tool_executions",
+})
 
 # Columns that look like references but intentionally have no FK.
 # resource_id / actor_id columns are polymorphic identifiers, not references.

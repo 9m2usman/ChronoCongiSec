@@ -95,3 +95,137 @@ docker compose up -d postgres
 - **M3 (Day 3):** `checkpoint_items.version_id` must belong to `checkpoint_items.record_id`. Planned for Day 3.
 - **M3:** the current `MemoryRepository` is synchronous; M6 repositories are async. A migration path is needed before switching persistence.
 - **M1/M2:** confirm that `trace_spans.parent_span_id` should stay a soft reference.
+
+---
+
+## Security hardening of Days 1–2 — Phase B (2026-11-17)
+
+Source: security review of PR #5. Phase A checked every finding against the code. P1–P8 were all confirmed; version concurrency was already covered by `uq_record_version`. The M6 lead approved implementing P1, P3, P4, P5 and P6 now, on `feat/m6-schema-governance` (no new branch). P2, P7 and P8 are design only (see below).
+
+**Built**
+- `backend/alembic/versions/0003_membership_status_and_forensic_retention.py` (revision `0003`, parent `0002`, single head):
+  - **P1 Membership status.** `memberships.status VARCHAR(32) NOT NULL` with `CHECK (status IN ('ACTIVE','INACTIVE','SUSPENDED','REVOKED'))` (`ck_memberships_status`). Rows that already existed are backfilled to **INACTIVE**: their real status is unknown, and they must never be silently activated. New rows default to **ACTIVE**, which matches M1's seed data.
+  - **P3 Approver tenant consistency.** The plain FK `approvals.approver_user_id -> users.id (SET NULL)` is replaced by `(tenant_id, approver_user_id) -> memberships (tenant_id, user_id) ON DELETE RESTRICT`, plus the index `ix_approvals_tenant_id_approver_user_id`. `memberships` already had `UNIQUE (tenant_id, user_id)` (`uq_tenant_user`), so no new key was needed. NULL still means "not assigned yet".
+  - **P4 Forensic delete protection.** `tenant_id -> tenants.id` changes from CASCADE to **RESTRICT** on `audit_events`, `incidents`, `incident_evidence`, `tool_proposals`, `policy_decisions`, `approvals` and `tool_executions`. `tool_proposals.agent_id` also changes to **RESTRICT**. Every other FK is unchanged.
+  - Pre-check: if an existing approval names an approver who is not a member of the approval's tenant, the upgrade stops, lists the offending ids and changes nothing (one transaction per migration).
+  - Downgrade restores the exact 0002 schema. The `status` column and its values are dropped.
+- Models: `Membership.status` with its CHECK and `MEMBERSHIP_STATUSES`; the Approval composite FK; the helpers `tenant_id_column(ondelete=...)` and `tenant_fk(..., "RESTRICT")` in `base.py`.
+- `backend/app/database/repositories/memberships.py`: `MembershipRepository.get_for_user(user_id)` returns the stored row including `status`, or `None`. It never creates a membership and never interprets `status`.
+- **P6 Pagination.** `DEFAULT_PAGE_SIZE = 50` and `MAX_PAGE_SIZE = 100` (TRD "Paginated List APIs"). `limit` must be an `int` from 1 to 100, otherwise `ValueError`. This is the same behaviour as before with a new bound; `True`, `50.0` and `"50"` are rejected too.
+- **P5 Test harness safety** (`backend/tests/database/helpers.py`):
+  - `TEST_DATABASE_URL` is **required**. There is no fallback to `DATABASE_URL` or to built-in defaults.
+  - The host must be `localhost`, `127.0.0.1` or `::1`, or be listed in `TEST_DATABASE_ALLOWED_HOSTS` (comma separated).
+  - The URL's database must be `postgres` or start with `amsc_test`.
+  - Host, database and user must not contain `prod`, `production`, `prd` or `live` as a word, even when the host is allowlisted.
+  - The target must not be the same host, port and database as `DATABASE_URL`.
+  - Create and drop accept only names matching `^amsc_test_[0-9a-f]{16}$` (before, only the prefix was checked).
+- Tests:
+  - New files: `test_memberships.py`, `test_forensic_retention.py`, `test_harness_safety.py`.
+  - New cases in `test_migrations.py`: 0003 on a database that already has data, the stop-on-orphan path, and downgrade with data.
+  - New cases in `test_schema_rules.py` (tenant delete rules, status constraint), `test_cross_tenant_fks.py` (RESTRICT delete behaviour, parent keys other than `id`) and `test_repositories.py` (pagination).
+  - `relationships.py` now lists 38 relationships (new: approver -> memberships; `tool_proposals.agent_id` is RESTRICT) and `FORENSIC_TENANT_TABLES`.
+
+**Why**
+- P1: M1's login (`backend/app/api/auth.py`, step 5) reads `membership.status` and rejects anything except `ACTIVE`. Without the column, every login against the real database would fail.
+- P3: a plain FK only proves that the user exists, not that they belong to the approval's company.
+- P4: PRD and DOC-005 require durable forensic evidence. Before this change, deleting a tenant, or even a single agent, erased that history (agent -> proposals -> decisions -> approvals/executions).
+- P5: destructive test setup must never be able to reach an application database.
+- P6: TRD "Paginated List APIs" says standard 50, maximum 100.
+
+**Test result**
+- `pytest backend/tests/database -q`: **332 passed** (~2 min). Full suite `pytest -q`: **506 passed** (174 existing + 332 database). The 4 warnings are starlette/httpx deprecations and are not related to M6.
+- Without `TEST_DATABASE_URL`, the database tests fail with `UnsafeTestDatabaseError: TEST_DATABASE_URL is required ...`. They do not skip, and they do not touch any database.
+- Proof (break it and see), each one restored afterwards:
+  1. Backfilled old memberships as ACTIVE: `test_0003_preserves_existing_data_and_never_activates_old_memberships` FAILED.
+  2. Approver FK set to `SET NULL` instead of RESTRICT: 4 FAILED (the RESTRICT delete test for `approvals.approver_user_id`, both approver-evidence tests, and the exact relationship list).
+  3. Left the `audit_events` tenant FK as CASCADE: 3 FAILED (the tenant-with-evidence test for audit_events, the delete-rule rule, and the model/migration drift test).
+  4. `MAX_PAGE_SIZE = 500`: 10 FAILED (the contract value test and every invalid or excessive limit case).
+  5. Made the harness fall back to `DATABASE_URL`: `test_database_url_alone_is_never_used` FAILED.
+  - After restoring, all files were byte-identical to the backups. No `amsc_test_*` databases were left behind (only `amsc` exists).
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -v -k "membership or approver or evidence or harness or pagination or 0003"
+```
+Correct: every selected test passes. Wrong: any FAILED line, or `UnsafeTestDatabaseError` (the variable is not set).
+
+**Problems and fixes**
+- The naming convention renamed `op.create_check_constraint("ck_memberships_status", ...)` to `ck_memberships_ck_memberships_status`; `test_membership_status_is_constrained` caught it. Fix: wrapped the name in `op.f()` (marks it as already final) in both upgrade and downgrade.
+- Shell heredocs containing Python f-strings broke the bash quoting. Fix: wrote the edit scripts to the scratchpad and ran them from there.
+
+**Remaining risks (not hidden)**
+- A **direct** delete of a `tool_proposals`, `policy_decisions` or `incidents` row still cascades to decisions, approvals, executions and evidence. Only tenant deletes and agent deletes are blocked. Day 6 (append-only triggers + restricted app role) closes this gap.
+- `audit_events` is protected against cascades, but not yet against a direct `UPDATE`, `DELETE` or `TRUNCATE` (Day 6).
+- `outbox_events` has no retry metadata (`attempts`, `last_error`, `next_attempt_at`). It is not needed until M7's worker exists; ask M7 first.
+- `docs/05-DATABASE-API-SCHEMA.md` is outside M6's write area. Its DDL for `memberships` and `approvals`, and its tenant delete rules, now differ from the database. The doc owner should update it from this entry.
+
+### Notes for other members (action needed)
+
+- **M1, `MembershipRecord.status` default.** `backend/app/tenancy/context.py` declares `status: str = "ACTIVE"`. If an adapter builds a `MembershipRecord` from a database row and forgets to copy `status`, the record silently becomes ACTIVE, and an INACTIVE, SUSPENDED or REVOKED user could log in. Request: remove the default (make `status` required) or default it to `"INACTIVE"`, and map `Membership.status` explicitly. `auth.py` itself already fails closed, and the database now always stores one of the four values.
+- **M1, revocation.** Revoke access with `UPDATE memberships SET status = 'REVOKED'`, not `DELETE`. By design, a membership that has approved something cannot be deleted (RESTRICT).
+- **M4, approvals.** The database now enforces that an approver is a member of the approval's tenant. M4 still decides *whether* that member may approve (role/permission).
+- **M2/M4, agents.** An agent that has tool proposals cannot be deleted. Use `status = 'ISOLATED'` instead.
+- **M7, CI.** The database tests now need `TEST_DATABASE_URL`. For a GitHub Actions `postgres:16` service named `postgres`, set:
+  - either `TEST_DATABASE_URL=postgresql+asyncpg://amsc:amsc_dev_password@postgres:5432/postgres` together with `TEST_DATABASE_ALLOWED_HOSTS=postgres`,
+  - or, with a mapped port, `...@localhost:5432/postgres` (no allowlist needed).
+  - The role needs `CREATEDB`. Never point the variable at the application database; the harness refuses that.
+  - The database tests now take about 2 minutes.
+
+### Design only (not implemented; waiting for the M6 lead and the owners)
+
+#### P2 — Branch-level relationships
+
+Current state: `branches (id, tenant_id, name, code, status)` exists with `UNIQUE (tenant_id, code)`, but nothing references it. `agents`, `sources` and `memory_records` have no `branch_id`. M3's `AgentRecord` and `SourceRecord` already carry `branch_id: Optional[str]`; M3's `MemoryRecord` does not.
+
+Proposed migration (0004 or later):
+1. `branches`: add `UNIQUE (tenant_id, id)` as the parent key for composite FKs.
+2. New table `membership_branches`:
+   - Columns `(tenant_id, membership_id, branch_id, created_at)`. The PK `(membership_id, branch_id)` makes duplicate assignments impossible.
+   - `(tenant_id, membership_id) -> memberships (tenant_id, id) ON DELETE CASCADE`. This needs `UNIQUE (tenant_id, id)` on memberships.
+   - `(tenant_id, branch_id) -> branches (tenant_id, id) ON DELETE RESTRICT`. A branch cannot be deleted while people are assigned to it; deactivate it via `branches.status` instead.
+   - An index on `(tenant_id, branch_id)` and the tenant_id immutability trigger.
+   - Result: a Company A membership can never be assigned to a Company B branch.
+3. `agents.branch_id`, `sources.branch_id`, `memory_records.branch_id`: nullable, each with a composite FK `(tenant_id, branch_id) -> branches (tenant_id, id) ON DELETE RESTRICT` and an index. **NULL means company-wide** (PRD Demo 3: "global company knowledge"). No new visibility column and no hierarchy.
+4. Tests: one and multiple branch assignments; duplicate assignment rejected; cross-company assignment rejected; cross-company resource branch rejected; NULL (company-wide) accepted; branch-specific resource accepted.
+
+Questions:
+- **M3:** should `memory_records` get its own `branch_id`, or should a record inherit its branch from its source or agent? If inherited, what happens when the two disagree? Is "NULL = company-wide" the right meaning for M3?
+- **M4:** should "Head Office sees all branches" be a rule in M4's policy (recommended), or should the database model it (for example, a flag on `branches`)? Is a user with no `membership_branches` row limited to company-wide data only?
+- **M1:** should the JWT carry the authorized branch ids, or should M4 look them up on each request? (Recommended: look them up, so a revocation takes effect immediately.)
+- **M6 lead:** when a branch is removed, RESTRICT or SET NULL? (Recommended: RESTRICT plus deactivation.)
+
+#### P7 — Role and permission source of truth
+
+Current state: `memberships.role` is a free-text string (default `SECURITY_ANALYST`; DOC-005 lists TENANT_ADMIN, SECURITY_ANALYST, AI_DEVELOPER and AUDITOR). Login copies it into the JWT, and `backend/app/core/dependencies.py` compares it with `allowed_roles`. The `roles`, `permissions` and `role_permissions` tables exist, but nothing references or reads them.
+
+Proposed (simple, no new service):
+1. **Role names are authoritative** for the MVP. Keep `memberships.role` as the role name and add `CHECK (role IN ('TENANT_ADMIN','SECURITY_ANALYST','AI_DEVELOPER','AUDITOR'))`.
+2. `roles` holds the same four names as platform-global rows (`tenant_id IS NULL`), with `UNIQUE (name) WHERE tenant_id IS NULL`. `role_permissions` maps them to `permissions.key` values. A data migration seeds them.
+3. Custom tenant roles stay out of the MVP. Later, `memberships.role_id` with a composite FK can replace the CHECK.
+4. A role change takes effect at the next login, because the role is stored in the JWT. If it must take effect immediately, M4 re-reads `memberships.role` on each request (this ties into GAP-007, token revocation).
+5. The client never supplies a role; it always comes from the membership row.
+
+Questions:
+- **M1:** do you accept a CHECK on `memberships.role` with these four names? Should the JWT role be re-validated on each request?
+- **M4:** will authorization use `role_permissions` (permission keys), or keep role-name lists in code? If permission keys, please send the list of keys to seed.
+- **M4:** how should a disabled role be handled? (Recommended: no "disabled role" in the MVP; change the membership's role instead.)
+
+#### P8 — PostgreSQL Row-Level Security
+
+Blocked today. Partial RLS would give false confidence, so it is not added.
+- In docker-compose, `POSTGRES_USER: amsc` is a **superuser** and owns every table. Superusers always bypass RLS, and table owners bypass it unless `FORCE` is set, so policies would protect nothing for the app connection.
+- `session.py` does not set any per-transaction tenant context.
+
+Prerequisites:
+1. **M7:** two roles. `amsc_owner` runs migrations and owns the tables. `amsc_app` is `LOGIN NOSUPERUSER NOBYPASSRLS` with DML grants only. The app's `DATABASE_URL` uses `amsc_app`; Alembic uses the owner. This is the same restricted role Day 6 needs.
+2. **M6:** every unit of work starts with `SELECT set_config('app.tenant_id', :tenant, true)`. The setting is transaction-local, so it never survives into the next use of a pooled connection.
+3. **M6:** on every tenant table, `ENABLE` and `FORCE ROW LEVEL SECURITY`, with a policy `USING (tenant_id = current_setting('app.tenant_id', true))` and the same `WITH CHECK`. A missing setting returns NULL, so no rows match and access fails closed.
+   - `tenants`, `users` and the login lookups need a narrow path: a `SECURITY DEFINER` function or a separate auth role, to be agreed with M1.
+4. **M1/M2/M3:** the tenant passed to the session must come from the verified JWT context, never from a header. Background workers set their own context for each job.
+5. Tests: own-tenant read works; cross-tenant read, insert, update and delete are blocked; no context means no rows; no leak after connection reuse; raw SQL is still restricted.
+
+Questions:
+- **M7:** can docker-compose, `.env.example` and CI create the `amsc_app` role? (M6 can supply the SQL.)
+- **M1:** how should login resolve `tenants` and `memberships` before a tenant context exists: a SECURITY DEFINER function or a separate role?
+- **M6 lead:** should RLS be done together with Day 6, since it is the same role work? Recommended.

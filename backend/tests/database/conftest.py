@@ -3,9 +3,10 @@
 Module: backend.tests.database.conftest
 Owner: M6
 
-These tests require a reachable PostgreSQL 15+ server (``docker compose up -d postgres``).
-They fail, rather than skip, when the server is unavailable so that a missing
-database can never be mistaken for a passing schema.
+These tests require a reachable PostgreSQL 15+ server (``docker compose up -d postgres``)
+and an explicit ``TEST_DATABASE_URL`` (see ``helpers.py``; ``DATABASE_URL`` is never used).
+They fail, rather than skip, when either is missing so that a missing database
+can never be mistaken for a passing schema.
 
 Fixture guide:
 - ``empty_db`` / ``migrated_db``: a private database per test (migration tests).
