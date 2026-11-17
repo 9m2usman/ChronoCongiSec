@@ -186,7 +186,6 @@ async def api_get_memory_detail(
         tenant_id=tenant_id,
         record_id=id,
         for_forensic=False,
-        allow_quarantined=False,
         repository=repo,
     )
 

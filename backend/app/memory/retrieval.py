@@ -38,6 +38,11 @@ def retrieve_memory(
 ) -> List[MemoryRecord]:
     """Retrieve memory records for a tenant and optional agent.
 
+    SECURITY INVARIANT:
+    Never expose the `for_forensic` parameter via public API query parameters or client request bodies.
+    Callers requesting `for_forensic=True` must be strictly authenticated and authorized by M1/M4
+    security workflows (e.g. specialized incident triage or audit roles).
+
     Enforces GAP-001:
     1. Tenant scoping: only records belonging to `tenant_id` are returned.
     2. Trust state restriction: Normal agent retrieval returns ONLY eligible TRUSTED records.
@@ -88,18 +93,22 @@ def retrieve_memory(
 def get_memory_detail(
     tenant_id: str,
     record_id: str,
-    allow_quarantined: bool = False,
     for_forensic: bool = False,
     repository: Optional[MemoryRepository] = None,
 ) -> Tuple[MemoryRecord, List[MemoryVersion], List[ProvenanceEdge]]:
     """Fetch complete memory detail including full version history and provenance edges.
+
+    SECURITY INVARIANT:
+    Never expose the `for_forensic` parameter via public API query parameters or client request bodies.
+    Normal agent-facing API routes must strictly call `get_memory_detail(..., for_forensic=False)`.
+    Callers requesting `for_forensic=True` must be gated by explicit M1/M4 authorization checks.
 
     Enforces GAP-004:
     1. Tenant scoping: only records belonging to tenant_id are accessed.
     2. Trust safety: Normal detail access applies the exact same trust invariant as list retrieval.
        Only eligible TRUSTED current memory may be exposed to normal agent-facing detail operations.
        Non-TRUSTED records (UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED) return 404.
-    3. Forensic override: allow_quarantined=True or for_forensic=True permits authorized inspection.
+    3. Forensic override: for_forensic=True permits authorized security analyst inspection.
     4. Cryptographic integrity: re-verifies checksums across all versions for tampering detection.
     """
     repo = repository or get_default_repository()
@@ -110,7 +119,7 @@ def get_memory_detail(
         )
 
     # Enforce GAP-004: Normal detail access requires TRUSTED state
-    if not for_forensic and not allow_quarantined and record.trust_state != TrustState.TRUSTED.value:
+    if not for_forensic and record.trust_state != TrustState.TRUSTED.value:
         raise MemoryNotFoundError(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )
