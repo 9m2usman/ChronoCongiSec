@@ -46,6 +46,7 @@ def ingest_memory(
     and a MemoryVersion with version 1 and cryptographic checksum from sha256_hex.
     Optionally records a DERIVED_FROM provenance edge if parent_record_id is supplied.
     Strictly verifies parent record existence, tenant boundary, and DAG depth/acyclicity.
+    Enforces GAP-003: independently verifies agent_id, source_id, and parent ownership.
     """
     if content is None or not content.strip():
         raise ValidationError("Memory content must not be empty or whitespace only.")
@@ -55,19 +56,48 @@ def ingest_memory(
     record_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
 
-    # 1. Validate parent record if provided
+    # 1. Validate agent if provided (GAP-003)
+    if agent_id:
+        agent = repo.get_agent(agent_id, tenant_id)
+        if not agent or agent.tenant_id != tenant_id:
+            raise ValidationError(
+                f"Agent '{agent_id}' does not exist or does not belong to company '{tenant_id}'."
+            )
+        if agent.status != "ACTIVE":
+            raise ValidationError(
+                f"Agent '{agent_id}' is not ACTIVE (status: '{agent.status}'). Ingestion rejected."
+            )
+
+    # 2. Validate source if provided (GAP-003)
+    if source_id:
+        source = repo.get_source(source_id, tenant_id)
+        if not source or source.tenant_id != tenant_id:
+            raise ValidationError(
+                f"Source '{source_id}' does not exist or does not belong to company '{tenant_id}'."
+            )
+        if source.status != "ACTIVE":
+            raise ValidationError(
+                f"Source '{source_id}' is not ACTIVE (status: '{source.status}'). Ingestion rejected."
+            )
+
+    # 3. Validate parent record if provided (GAP-003)
     if parent_record_id:
         parent = repo.get_record(parent_record_id, tenant_id)
-        if not parent:
+        if not parent or parent.tenant_id != tenant_id:
             raise MemoryNotFoundError(
                 f"Parent memory record '{parent_record_id}' not found for tenant '{tenant_id}'. "
                 f"Cross-tenant and nonexistent parent references are strictly prohibited."
             )
+        if parent.trust_state in ("QUARANTINED", "REJECTED"):
+            raise ValidationError(
+                f"Cannot derive memory from parent record '{parent_record_id}' in '{parent.trust_state}' state."
+            )
         _check_dag_cycle(repo, parent_record_id, record_id, tenant_id)
+        _get_lineage_depth(repo, parent_record_id, tenant_id)
 
     checksum = sha256_hex(content)
 
-    # 2. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
+    # 4. Create MemoryRecord (Table 11: default trust_state is UNVERIFIED on ingestion)
     record = MemoryRecord(
         id=record_id,
         tenant_id=tenant_id,
@@ -81,7 +111,7 @@ def ingest_memory(
     )
     repo.create_record(record)
 
-    # 3. Create MemoryVersion (Table 12: version 1, immutable)
+    # 5. Create MemoryVersion (Table 12: version 1, immutable)
     version = MemoryVersion(
         id=version_id,
         tenant_id=tenant_id,
@@ -93,7 +123,7 @@ def ingest_memory(
     )
     repo.create_version(version)
 
-    # 4. Create ProvenanceEdge if derived from parent using provenance.create_provenance_edge (Table 14)
+    # 6. Create ProvenanceEdge if derived from parent (Table 14)
     if parent_record_id:
         create_provenance_edge(
             tenant_id=tenant_id,

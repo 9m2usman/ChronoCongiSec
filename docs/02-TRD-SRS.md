@@ -169,7 +169,7 @@ The frontend is structured as a high-density, multi-panel technical security wor
 
 ### 6.1 Layout Shell & Workspace Isolation
 - **Collapsible Global Sidebar:** Grouped navigation with real-time incident counters and route indicators.
-- **Top Navigation Bar:** Tenant switcher dropdown (Company A, B, C), W3C Trace context indicator, global search palette, theme toggle.
+- **Top Navigation Bar:** Active Company Indicator & Branch Selector (Head Office, Lahore, Karachi, Islamabad), W3C Trace context indicator, global search palette, theme toggle.
 - **Main Viewport:** High-density data tables, synchronized split timelines, and topological graph canvases.
 - **Contextual Inspector Drawer:** Slides out from the right margin upon selecting any table row, trace span, or graph node, exposing complete raw JSON payloads, cryptographic SHA-256 hashes, parent provenance trees, and authorized action triggers.
 
@@ -254,7 +254,17 @@ Where asynchronous background processing is required (e.g., deep graph re-indexi
 
 ---
 
-## 12. Multi-Tenant Architecture & Data Isolation
+## 12. Enterprise Company & Branch Architecture (Multi-Tenant Extensible)
+
+### 12.1 Single-Company Enterprise & Subordinate Branch Governance
+For the current MVP, AMSC is configured and deployed for **One Company / Organization** with regional branches:
+- **Head Office:** Central security governance, global policies, and cross-branch audit oversight.
+- **Regional Branches:** Branch Lahore, Branch Karachi, Branch Islamabad, and other operational units.
+- **Key Architecture Rules:**
+  1. A branch is **NOT a separate tenant**. Branches are subordinate organizational units within the same company.
+  2. The internal `tenant_id` represents the Company / Organization root boundary, preserving the capability to support multi-company SaaS in future phases without redesigning the schema.
+  3. Branch authorization is explicit: being in the same company does not grant implicit access to restricted branch-specific memory or records.
+  4. Only ONE company is seeded in the MVP environment.
 
 Multi-tenancy in AMSC is enforced through defense-in-depth across multiple application layers:
 
@@ -285,7 +295,7 @@ AMSC integrates cleanly with diverse external agent frameworks (LangChain, CrewA
 
 ### Protocol Steps:
 1. **Agent Bootstrapping:** Agent is registered in the AMSC Agent Registry, receiving an `agent_id` and an agent bearer token.
-2. **Context Retrieval:** Agent queries the AMSC Memory Service (`GET /api/v1/memory?agent_id=...&exclude_quarantined=true`). Quarantined records are automatically excluded.
+2. **Context Retrieval:** Agent queries the AMSC Memory Service (`GET /api/v1/memory?agent_id=...`). The server returns only eligible `TRUSTED` records for that authenticated tenant, agent and purpose; all other trust states are excluded from normal agent context.
 3. **Action Proposal:** When the agent decides to invoke an external tool (e.g., send wire, restart VM), it does **not** call the tool directly. It posts an `ActionProposal` payload to the AMSC Security Gateway (`POST /api/v1/gateway/actions/propose`).
 4. **Gateway Mediation:** The Gateway evaluates identity, permissions, and memory trust, returning a signed decision response.
 5. **Execution or Denial:** If allowed, the Gateway invokes the tool adapter and returns the result to the agent. If blocked, the Gateway returns `decision: BLOCK` along with human-readable security reasons.
@@ -328,10 +338,10 @@ sequenceDiagram
 
 ## 15. Memory & Provenance Architecture
 
-### 15.1 Cryptographic Content Hashing
+### 15.1 Cryptographic Content Hashing and Authenticity Boundary
 Upon ingestion of any memory chunk, AMSC calculates a SHA-256 hash:
 $$\text{Checksum} = \text{SHA256}(\text{UTF8}(\text{Strip}(\text{Content})))$$
-This checksum is stored in `memory_versions.checksum` and is verified upon retrieval and checkpoint creation to detect unauthorized database manipulation.
+This checksum is stored in `memory_versions.checksum` and is recomputed on retrieval and checkpoint creation to detect content mismatch against the recorded expected digest. **A plain SHA-256 checksum is not an authenticity signature:** an attacker able to modify both content and checksum can recompute it. If the threat model includes database-writer compromise, protect expected digests/checkpoint roots using a separately controlled KMS/HSM-backed signature or keyed MAC, and verify the signature against an independently protected key. Do not claim that SHA-256 alone detects an attacker who can rewrite both fields.
 
 ### 15.2 Version Lineage & Provenance Edges
 - **Memory Records:** Represent the persistent concept (`memory_records`).
@@ -343,12 +353,14 @@ This checksum is stored in `memory_versions.checksum` and is verified upon retri
 
 ### 15.3 Dynamic Trust States
 Memory records exist in one of six explicit states:
-1. `UNVERIFIED`: Newly ingested from external source; awaiting validation.
-2. `TRUSTED`: Cryptographically verified and approved for agent retrieval and action backing.
-3. `SUSPICIOUS`: Flagged by drift detection or analyst triage; excluded from high-risk action authorization.
-4. `QUARANTINED`: Confirmed or high-probability poisoned memory; **strictly excluded from all agent retrieval pipelines**.
-5. `REJECTED`: Permanently invalidated or malicious.
-6. `SUPERSEDED`: Replaced by a newer validated checkpoint or version.
+1. `UNVERIFIED`: Default state for every newly ingested source or memory. It is not eligible for normal agent retrieval or protected-action justification.
+2. `TRUSTED`: Explicitly validated and approved by the authorized trust workflow; eligible for retrieval subject to tenant, purpose, sensitivity and current policy checks. A valid checksum alone never promotes a record.
+3. `SUSPICIOUS`: Flagged by detection or analyst triage; excluded from normal agent retrieval and protected-action justification. It remains available only through separately authorized forensic workflows.
+4. `QUARANTINED`: Confirmed or high-probability poisoned memory; strictly excluded from all normal agent retrieval pipelines and action justification.
+5. `REJECTED`: Permanently invalidated or malicious; excluded from normal retrieval and action justification, retained only as permitted forensic evidence.
+6. `SUPERSEDED`: Replaced by a newer validated record/version; excluded from current-state retrieval and action justification unless an authorized historical/forensic query explicitly requests it.
+
+**State-transition rule:** ingestion creates `UNVERIFIED`; a separate authorized validation process evaluates source identity/authority, integrity, derivation lineage, freshness, sensitivity, contradictions and policy scope before it can promote the record to `TRUSTED`. Detection or analyst decisions may move records to `SUSPICIOUS` or `QUARANTINED`; recovery must not automatically set a record to `TRUSTED` without revalidation. Every transition records actor/process, reason, evidence, policy version and timestamp in durable audit history.
 
 ---
 
@@ -369,9 +381,9 @@ The Policy Engine evaluates action proposals against a multi-stage deterministic
        | NO
 [Check 5: Approval Thresholds] -> Does parameter exceed approval limit? -> YES: Return REQUIRES_APPROVAL
        | NO
-[Check 6: Memory Trust Check] --> Is any referenced memory SUSPICIOUS or QUARANTINED?
-       |                           |--> YES: Return BLOCK ('REFERENCED_UNTRUSTED_MEMORY')
-       | NO
+[Check 6: Memory Trust Check] --> Are all referenced memories currently TRUSTED and eligible for this purpose?
+       |                           |--> NO: Return BLOCK ('REFERENCED_UNTRUSTED_MEMORY')
+       | YES
 [Decision: ALLOW] --------------> Proceed to Server-Side Tool Adapter Execution
 ```
 
@@ -388,8 +400,9 @@ The Policy Engine evaluates action proposals against a multi-stage deterministic
    - Record trust state is immediately updated to `QUARANTINED`.
    - An immutable `audit_events` record is emitted.
 3. **Retrieval Exclusion Enforcement:**
-   - All agent retrieval queries enforce the filter `trust_state != 'QUARANTINED'`.
-   - Quarantined records become invisible to agent RAG pipelines, neutralizing the prompt injection payload without deleting the forensic evidence.
+   - All normal agent retrieval queries return only records in the `TRUSTED` state and eligible for the requesting tenant, agent, purpose and sensitivity policy.
+   - `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED` and `SUPERSEDED` records are excluded from normal agent retrieval; forensic access is a separate permissioned path.
+   - This exclusion does not delete the records or their forensic lineage.
 
 ---
 
@@ -404,8 +417,11 @@ graph TD
     Preview --> Validate[Validate Checkpoint Integrity Checksum]
     Validate --> Preserve[Capture and Commit Pre-Recovery Snapshot of Contaminated State]
     Preserve --> Rollback[Atomically Roll Back Target Records to CP-001 Version]
-    Rollback --> MarkTrusted[Mark Restored Records as TRUSTED]
-    MarkTrusted --> Reindex[Revalidate Downstream Relations & Emit Audit Event]
+    Rollback --> Revalidate[Revalidate restored source, lineage, integrity, freshness and policy]
+    Revalidate -->|Pass| Trusted[Set eligible records TRUSTED]
+    Revalidate -->|Fail or uncertain| Unverified[Keep UNVERIFIED or quarantine]
+    Trusted --> Reindex[Reindex eligible descendants & Emit Audit Event]
+    Unverified --> Reindex
 ```
 
 ### Critical Recovery Invariants:
@@ -447,7 +463,7 @@ In the Dual Trace UI view, selecting an execution span highlights the exact memo
 - **SEC-002:** Referenced memories with `SUSPICIOUS`, `QUARANTINED`, or `REJECTED` status trigger immediate `BLOCK`.
 - **SEC-003:** Parameter ceiling violations trigger immediate `BLOCK`.
 - **SEC-004:** Fail-closed default on any internal policy evaluation error.
-- **SEC-005:** Protected retrieval queries filter out quarantined records (`trust_state != 'QUARANTINED'`).
+- **SEC-005:** Normal agent retrieval returns only eligible `TRUSTED` records; non-trusted and superseded records require a separate authorized forensic path.
 - **SEC-006:** All tool adapter credentials stored strictly server-side; never sent to agent runtimes.
 - **SEC-007:** Pre-recovery state snapshot must be persisted before any recovery rollback executes.
 - **SEC-008:** Tenant resolution is validated against authenticated membership server-side.

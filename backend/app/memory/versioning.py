@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 
 from backend.app.core.exceptions import ValidationError
 from .integrity import sha256_hex
-from .models import MemoryRecord, MemoryVersion
+from .models import MemoryRecord, MemoryVersion, TrustState
 from .repository import MemoryRepository, get_default_repository
 from .retrieval import MemoryNotFoundError
 
@@ -27,7 +27,8 @@ def update_memory(
 
     Appends a new immutable version (current_version + 1) with an independent SHA-256
     checksum. Never edits or mutates historical versions.
-    Does NOT alter trust_state (M4 owns trust state lifecycle).
+    Enforces GAP-002: Invalidation of prior trust assessment. New unvalidated content
+    resets record.trust_state to UNVERIFIED until evaluated by M4.
     """
     if content is None or not content.strip():
         raise ValidationError("Updated memory content must not be empty.")
@@ -55,8 +56,10 @@ def update_memory(
     )
     repo.create_version(new_version)
 
-    # 2. Update record metadata (current_version and updated_at only; trust_state preserved)
+    # 2. Update record metadata and invalidate trust state (GAP-002)
+    # The new content has not been vetted by M4; it must become UNVERIFIED immediately
     record.current_version = new_version_num
+    record.trust_state = TrustState.UNVERIFIED.value
     record.updated_at = now
     repo.update_record(record)
 

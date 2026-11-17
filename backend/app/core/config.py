@@ -157,6 +157,14 @@ class Settings(BaseSettings):
         default=60,
         description="Sliding window duration for login rate limiting in seconds",
     )
+    TRUSTED_PROXIES: List[str] = Field(
+        default_factory=list,
+        description="Explicitly trusted reverse proxy IP addresses; only these proxies may supply forwarded client IPs",
+    )
+    AUTH_MAX_CONCURRENT_VERIFICATIONS: int = Field(
+        default=8,
+        description="Maximum concurrent Argon2 password verification operations to bound CPU and memory usage",
+    )
 
     # --- 6. Persistence & Cache Connection Placeholders (M6/M7 Alignment) ---
     DATABASE_URL: str = Field(
@@ -211,6 +219,24 @@ class Settings(BaseSettings):
             return [_normalize(origin) for origin in v.split(",") if origin.strip()]
         elif isinstance(v, list):
             return [_normalize(str(item)) for item in v if str(item).strip()]
+        return []
+
+    @field_validator("TRUSTED_PROXIES", mode="before")
+    @classmethod
+    def assemble_trusted_proxies(cls, v: Union[str, List[str]]) -> List[str]:
+        """Parse and normalize trusted proxy addresses."""
+        if isinstance(v, str):
+            v_stripped = v.strip()
+            if v_stripped.startswith("[") and v_stripped.endswith("]"):
+                try:
+                    parsed = json.loads(v_stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            return [p.strip() for p in v.split(",") if p.strip()]
+        elif isinstance(v, list):
+            return [str(item).strip() for item in v if str(item).strip()]
         return []
 
     @field_validator("LOG_LEVEL")

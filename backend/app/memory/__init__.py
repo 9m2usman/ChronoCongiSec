@@ -8,6 +8,7 @@ from .ingestion import ingest_memory
 from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
 from .lineage import LineageResult, get_ancestors, get_descendants
 from .models import (
+    AgentRecord,
     MemoryDetailResponse,
     MemoryIngestRequest,
     MemoryRecord,
@@ -16,6 +17,7 @@ from .models import (
     ProvenanceEdge,
     ProvenanceRelationType,
     RecordType,
+    SourceRecord,
     TrustState,
 )
 from .provenance import (
@@ -35,6 +37,7 @@ from .retrieval import (
     MemoryNotFoundError,
     get_memory_detail,
     retrieve_memory,
+    transition_memory_trust_state,
 )
 from .versioning import update_memory
 
@@ -42,6 +45,8 @@ __all__ = [
     "MemoryRecord",
     "MemoryVersion",
     "ProvenanceEdge",
+    "AgentRecord",
+    "SourceRecord",
     "RecordType",
     "TrustState",
     "ProvenanceRelationType",
@@ -56,6 +61,7 @@ __all__ = [
     "update_memory",
     "retrieve_memory",
     "get_memory_detail",
+    "transition_memory_trust_state",
     "create_provenance_edge",
     "get_ancestors",
     "get_descendants",

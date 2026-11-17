@@ -3,6 +3,7 @@
 import hashlib
 import sys
 from pathlib import Path
+import pytest
 
 # Ensure repo root is in sys.path
 repo_root = Path(__file__).resolve().parents[4]
@@ -94,3 +95,46 @@ def test_verify_checksum():
     assert verify_checksum(content, EMPTY_SHA256) is False
     assert verify_checksum(content, None) is False
     assert verify_checksum(None, valid_hash) is False
+
+
+def test_hashing_multiline_mixed_line_endings():
+    """Verify multiline strings with mixed CRLF, CR, and LF produce identical SHA-256 digests."""
+    mixed_1 = "Line A\r\nLine B\nLine C\rLine D"
+    mixed_2 = "Line A\nLine B\r\nLine C\nLine D"
+    canonical = "Line A\nLine B\nLine C\nLine D"
+
+    h1 = sha256_hex(mixed_1)
+    h2 = sha256_hex(mixed_2)
+    h_can = sha256_hex(canonical)
+
+    assert h1 == h2 == h_can
+    assert len(h1) == 64
+
+
+def test_hashing_tabs_and_whitespace_variants():
+    """Verify leading and trailing tabs, spaces, and blank lines are stripped per §15.1."""
+    content_raw = "\t\n  Security policy content for review.  \r\n\t"
+    content_clean = "Security policy content for review."
+
+    assert sha256_hex(content_raw) == sha256_hex(content_clean)
+
+
+def test_sha256_hex_none_and_default_arg():
+    """Verify sha256_hex with None or no argument yields canonical empty digest."""
+    assert sha256_hex(None) == EMPTY_SHA256
+    assert sha256_hex() == EMPTY_SHA256
+
+
+def test_sha256_hex_non_string_type_raises_type_error():
+    """Verify sha256_hex raises TypeError when passed non-string and non-None types."""
+    with pytest.raises(TypeError) as exc:
+        sha256_hex(12345)  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc.value)
+
+    with pytest.raises(TypeError) as exc2:
+        sha256_hex(b"bytes-not-str")  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc2.value)
+
+    with pytest.raises(TypeError) as exc3:
+        sha256_hex({"key": "val"})  # type: ignore[arg-type]
+    assert "content must be a string or None" in str(exc3.value)
