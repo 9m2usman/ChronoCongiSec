@@ -250,3 +250,30 @@ Questions:
 **Verification status**
 - Files committed to `feat/m6-schema-governance`.
 - Tests have not yet been executed in this environment. PostgreSQL-backed CI/test execution is required before merge.
+
+
+---
+
+## Day 3 — checkpoint snapshot integrity (2026-11-17)
+
+**Plan alignment:** DOC-006 Day 3 assigns M6 the checkpoint snapshot schema and persistence tables. The checkpoint and checkpoint-item tables already existed in the Day 1 schema; this Day 3 increment closes a relational-integrity gap in that existing design without changing the product's checkpoint payload format or introducing a new service.
+
+**Implemented on `feat/m6-schema-governance`:**
+- Migration `0005_checkpoint_version_record_integrity.py` (parent `0004`):
+  - Adds parent key `UNIQUE (tenant_id, record_id, id)` to `memory_versions`.
+  - Adds `checkpoint_items(tenant_id, record_id, version_id)` → `memory_versions(tenant_id, record_id, id)`.
+  - Adds an index over the child FK columns.
+  - Downgrade removes the index, FK and parent key in dependency-safe order.
+- SQLAlchemy metadata updated to include the matching parent unique constraint, composite FK and index.
+- Raw PostgreSQL tests in `test_checkpoint_integrity.py` verify:
+  - A checkpoint item accepts a version belonging to its referenced memory record.
+  - A version belonging to a different record is rejected on INSERT.
+  - Re-pointing an existing checkpoint item to another record's version is rejected on UPDATE.
+- Schema introspection test verifies the exact three-column FK and PostgreSQL delete action; the general two-column tenant-FK audit explicitly excludes this additional three-column integrity relationship.
+
+**Why this matters:** the existing two-column tenant FKs guaranteed that a checkpoint item and its memory version belonged to the same tenant, but did not guarantee that the version belonged to the *same memory record* stored in that checkpoint item. The new constraint closes that same-tenant, wrong-record reference gap at the database boundary.
+
+**Verification status:** Changes are committed to the M6 feature branch. PostgreSQL tests, full migration roll-forward/rollback, and the full regression suite have **not** been executed by this assistant. Do not treat the change as merge-verified until those checks pass.
+
+**Scope boundary:** No changes to M3 ingestion/lineage services, M1 APIs/authentication, M4 policy behavior, M5 UI, or M7 Docker/CI ownership. M6 supplies the database constraint and tests only. The existing checkpoint schema/payload remains intact.
+
