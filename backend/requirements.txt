@@ -14,4 +14,5 @@ python-dotenv==1.2.4
 argon2-cffi==25.1.0
 pyjwt==2.15.1
 alembic==1.20.1
+greenlet==3.5.6
 
