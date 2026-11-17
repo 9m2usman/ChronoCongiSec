@@ -20,6 +20,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from backend.app.api.agents import router as agents_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.gateway import router as gateway_router
 from backend.app.api.memory import router as memory_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.core.config import Settings, get_settings
@@ -131,6 +132,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory agent repository is strictly forbidden in production."
             )
 
+        gateway_repo = getattr(app.state, "gateway_repo", None)
+        if gateway_repo is not None and (
+            getattr(gateway_repo, "is_in_memory", True)
+            or not getattr(gateway_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database gateway repository from M6 is not configured. "
+                "In-memory gateway repository is strictly forbidden in production."
+            )
+
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
@@ -174,6 +185,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.agent_repo = get_default_agent_repository()
     else:
         app.state.agent_repo = None
+
+    # Gateway repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.gateway import get_default_gateway_repository
+        app.state.gateway_repo = get_default_gateway_repository()
+    else:
+        app.state.gateway_repo = None
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
@@ -219,6 +237,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(auth_router)
     api_router.include_router(tenants_router)
     api_router.include_router(agents_router)
+    api_router.include_router(gateway_router)
     api_router.include_router(memory_router)
 
     app.include_router(api_router)
