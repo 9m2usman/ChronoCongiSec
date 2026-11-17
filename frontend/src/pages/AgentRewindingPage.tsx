@@ -1,15 +1,24 @@
 import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
+import { useAtomicRewindMutation } from '@/hooks';
 import { HybridGraphViewer } from '@/components/graph/HybridGraphViewer';
-import { RotateCcw, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { RotateCcw, ShieldCheck, CheckCircle2, Loader2 } from 'lucide-react';
 
 export const AgentRewindingPage: React.FC = () => {
   const { activeTenant } = useWorkstationStore();
   const [rollbackSuccess, setRollbackSuccess] = useState<boolean>(false);
+  const rewindMutation = useAtomicRewindMutation();
 
   const handleRollback = () => {
-    setRollbackSuccess(true);
-    setTimeout(() => setRollbackSuccess(false), 5000);
+    rewindMutation.mutate(
+      { planId: 'plan-rec-8812', targetRecordId: 'rec-8812-441a' },
+      {
+        onSuccess: () => {
+          setRollbackSuccess(true);
+          setTimeout(() => setRollbackSuccess(false), 6000);
+        },
+      }
+    );
   };
 
   return (
@@ -60,16 +69,22 @@ export const AgentRewindingPage: React.FC = () => {
           </span>
           <button
             onClick={handleRollback}
-            className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs rounded transition-colors"
+            disabled={rewindMutation.isPending}
+            className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-xs rounded transition-colors disabled:opacity-50"
           >
-            <RotateCcw className="w-4 h-4" /> Execute Atomic Rollback
+            {rewindMutation.isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RotateCcw className="w-4 h-4" />
+            )}
+            Execute Atomic Rollback
           </button>
         </div>
 
         {rollbackSuccess && (
           <div className="p-3 bg-emerald-950/60 border border-emerald-500 rounded text-xs text-emerald-200 flex items-center gap-2 animate-fade-in">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            <span>Rollback successfully committed! Memory state restored to validated checkpoint CHK-2026-T15M.</span>
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>Rollback successfully committed! Memory state restored to validated checkpoint CHK-2026-T15M and logged to Audit Center.</span>
           </div>
         )}
       </div>

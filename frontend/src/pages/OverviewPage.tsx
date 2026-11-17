@@ -1,22 +1,43 @@
 import React from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { Bot, Shield, Database, Activity, AlertTriangle, ArrowUpRight, CheckCircle2 } from 'lucide-react';
+import { useGatewayDecisions, useSecurityAlerts, useAgents } from '@/hooks';
+import { Bot, Shield, Database, Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Loader2 } from 'lucide-react';
 
 export const OverviewPage: React.FC = () => {
   const { activeTenant, openInspector } = useWorkstationStore();
+  const { data: decisions, isLoading: decisionsLoading } = useGatewayDecisions();
+  const { data: alerts } = useSecurityAlerts();
+  const { data: agents } = useAgents();
 
   const METRICS = [
-    { label: 'Active Monitored Agents', value: '14', sub: '3 Standby / 11 Active', icon: Bot, color: 'text-blue-400' },
-    { label: 'Evaluated Actions (24h)', value: '1,420', sub: '100% Gatekeeper Med.', icon: Activity, color: 'text-emerald-400' },
-    { label: 'Blocked Proposals', value: '14', sub: 'Tainted Memory / Risk Violations', icon: Shield, color: 'text-red-400' },
-    { label: 'Quarantined Chunks', value: '3', sub: 'Cryptographically Isolated', icon: Database, color: 'text-amber-400' },
-  ];
-
-  const RECENT_GATEWAY_DECISIONS = [
-    { id: 'dec-901', agent: 'FinOps-01', tool: 'execute_wire_transfer', trust: 'QUARANTINED', decision: 'BLOCKED', time: '2m ago' },
-    { id: 'dec-900', agent: 'SupportAgent-03', tool: 'lookup_crm_customer', trust: 'TRUSTED', decision: 'ALLOWED', time: '5m ago' },
-    { id: 'dec-899', agent: 'ComplianceBot-02', tool: 'read_system_log', trust: 'TRUSTED', decision: 'ALLOWED', time: '12m ago' },
-    { id: 'dec-898', agent: 'AnalystBot-04', tool: 'export_bi_dataset', trust: 'SUSPICIOUS', decision: 'REQUIRES_APPROVAL', time: '18m ago' },
+    {
+      label: 'Active Monitored Agents',
+      value: agents ? String(agents.length) : '14',
+      sub: '3 Standby / 11 Active',
+      icon: Bot,
+      color: 'text-blue-400',
+    },
+    {
+      label: 'Evaluated Actions (24h)',
+      value: '1,420',
+      sub: '100% Gatekeeper Med.',
+      icon: Activity,
+      color: 'text-emerald-400',
+    },
+    {
+      label: 'Blocked Proposals',
+      value: alerts ? String(alerts.blocked_actions_24h) : '14',
+      sub: 'Tainted Memory / Risk Violations',
+      icon: Shield,
+      color: 'text-red-400',
+    },
+    {
+      label: 'Quarantined Chunks',
+      value: alerts ? String(alerts.quarantined_records_count) : '3',
+      sub: 'Cryptographically Isolated',
+      icon: Database,
+      color: 'text-amber-400',
+    },
   ];
 
   return (
@@ -29,7 +50,8 @@ export const OverviewPage: React.FC = () => {
             Overview Dashboard
           </h1>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time memory security posture and gateway decision telemetry for <span className="text-blue-400 font-bold">{activeTenant.name}</span>
+            Real-time memory security posture and gateway decision telemetry for{' '}
+            <span className="text-blue-400 font-bold">{activeTenant.name}</span>
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -47,7 +69,10 @@ export const OverviewPage: React.FC = () => {
         {METRICS.map((m) => {
           const Icon = m.icon;
           return (
-            <div key={m.label} className="p-4 bg-slate-900 border border-slate-800 rounded-lg hover:border-slate-700 transition-colors">
+            <div
+              key={m.label}
+              className="p-4 bg-slate-900 border border-slate-800 rounded-lg hover:border-slate-700 transition-colors"
+            >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider">{m.label}</span>
                 <Icon className={`w-4 h-4 ${m.color}`} />
@@ -72,66 +97,79 @@ export const OverviewPage: React.FC = () => {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
-                <tr>
-                  <th className="py-2 px-3">Decision ID</th>
-                  <th className="py-2 px-3">Agent</th>
-                  <th className="py-2 px-3">Tool Proposal</th>
-                  <th className="py-2 px-3">Memory Trust</th>
-                  <th className="py-2 px-3">Gate Outcome</th>
-                  <th className="py-2 px-3">Time</th>
-                  <th className="py-2 px-3 text-right">Inspect</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800/60">
-                {RECENT_GATEWAY_DECISIONS.map((row) => (
-                  <tr key={row.id} className="hover:bg-slate-800/40 transition-colors">
-                    <td className="py-2.5 px-3 font-semibold text-slate-300">{row.id}</td>
-                    <td className="py-2.5 px-3 text-slate-300">{row.agent}</td>
-                    <td className="py-2.5 px-3 text-slate-400">{row.tool}</td>
-                    <td className="py-2.5 px-3">
-                      <span className={`px-2 py-0.5 rounded text-[10px] border font-bold ${
-                        row.trust === 'TRUSTED'
-                          ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
-                          : row.trust === 'QUARANTINED'
-                          ? 'bg-red-950/40 border-red-500/50 text-red-300'
-                          : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
-                      }`}>
-                        {row.trust}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        row.decision === 'ALLOWED'
-                          ? 'text-emerald-400'
-                          : row.decision === 'BLOCKED'
-                          ? 'text-red-400 font-extrabold'
-                          : 'text-amber-400'
-                      }`}>
-                        {row.decision}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3 text-slate-500">{row.time}</td>
-                    <td className="py-2.5 px-3 text-right">
-                      <button
-                        onClick={() => openInspector({
-                          title: `Gateway Decision: ${row.id}`,
-                          type: 'DECISION',
-                          id: row.id,
-                          trustState: row.trust as any,
-                          details: row,
-                        })}
-                        className="p-1 hover:text-blue-400 text-slate-400"
-                        title="Open in Inspector Drawer"
-                      >
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                      </button>
-                    </td>
+            {decisionsLoading ? (
+              <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                Polling live gateway events...
+              </div>
+            ) : (
+              <table className="w-full text-left text-xs">
+                <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
+                  <tr>
+                    <th className="py-2 px-3">Proposal ID</th>
+                    <th className="py-2 px-3">Agent</th>
+                    <th className="py-2 px-3">Tool Proposal</th>
+                    <th className="py-2 px-3">Memory Trust</th>
+                    <th className="py-2 px-3">Gate Outcome</th>
+                    <th className="py-2 px-3">Created</th>
+                    <th className="py-2 px-3 text-right">Inspect</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {decisions?.map((row) => (
+                    <tr key={row.action_id} className="hover:bg-slate-800/40 transition-colors">
+                      <td className="py-2.5 px-3 font-semibold text-slate-300">{row.proposal_id}</td>
+                      <td className="py-2.5 px-3 text-slate-300">{row.agent_name || 'Agent'}</td>
+                      <td className="py-2.5 px-3 text-slate-400">{row.tool_name || 'execute_action'}</td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] border font-bold ${
+                            row.memory_trust === 'TRUSTED'
+                              ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                              : row.memory_trust === 'QUARANTINED'
+                              ? 'bg-red-950/40 border-red-500/50 text-red-300'
+                              : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
+                          }`}
+                        >
+                          {row.memory_trust}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            row.decision === 'ALLOW'
+                              ? 'text-emerald-400'
+                              : row.decision === 'BLOCK'
+                              ? 'text-red-400 font-extrabold'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {row.decision}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-500">Just now</td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          onClick={() =>
+                            openInspector({
+                              title: `Gateway Decision: ${row.action_id}`,
+                              type: 'DECISION',
+                              id: row.action_id,
+                              trustState: row.memory_trust as any,
+                              details: row,
+                            })
+                          }
+                          className="p-1 hover:text-blue-400 text-slate-400"
+                          title="Open in Inspector Drawer"
+                        >
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
 
@@ -154,22 +192,25 @@ export const OverviewPage: React.FC = () => {
                 <span className="text-[10px] text-red-400">High Blast Radius</span>
               </div>
               <p className="text-[11px] text-slate-300 mb-2">
-                Memory Poisoning attempt detected on vendor invoice processing. 1 agent intercepted from executing unauthorized wire.
+                Memory Poisoning attempt detected on vendor invoice processing. 1 agent intercepted from executing
+                unauthorized wire.
               </p>
               <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
                 <span>Target: FinOps-01</span>
                 <button
-                  onClick={() => openInspector({
-                    title: 'Incident INC-2026-0812',
-                    type: 'INCIDENT',
-                    id: 'INC-2026-0812',
-                    trustState: 'QUARANTINED',
-                    details: {
-                      threat: 'Prompt Injection / Memory Tampering',
-                      affectedChunk: 'rec-8812-441a',
-                      interception: 'Wire transfer blocked at Gateway',
-                    },
-                  })}
+                  onClick={() =>
+                    openInspector({
+                      title: 'Incident INC-2026-0812',
+                      type: 'INCIDENT',
+                      id: 'INC-2026-0812',
+                      trustState: 'QUARANTINED',
+                      details: {
+                        threat: 'Prompt Injection / Memory Tampering',
+                        affectedChunk: 'rec-8812-441a',
+                        interception: 'Wire transfer blocked at Gateway',
+                      },
+                    })
+                  }
                   className="text-blue-400 hover:underline"
                 >
                   Inspect Evidence →

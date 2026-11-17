@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { X, Copy, ExternalLink, Check, Ban } from 'lucide-react';
+import { useQuarantineMutation } from '@/hooks';
+import { X, Copy, ExternalLink, Check, Ban, Loader2 } from 'lucide-react';
 
 export const InspectorDrawer: React.FC = () => {
-  const { inspectorOpen, inspectorPayload, closeInspector } = useWorkstationStore();
-  const [copied, setCopied] = React.useState(false);
+  const { inspectorOpen, inspectorPayload, closeInspector, openInspector } = useWorkstationStore();
+  const [copied, setCopied] = useState(false);
+  const quarantineMutation = useQuarantineMutation();
 
   if (!inspectorOpen || !inspectorPayload) return null;
 
@@ -12,6 +14,31 @@ export const InspectorDrawer: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleQuarantine = () => {
+    quarantineMutation.mutate(
+      {
+        recordId: inspectorPayload.id,
+        payload: {
+          reason: 'Emergency operator quarantine triggered via Workstation Inspector Drawer',
+          analyst_notes: 'Threat confirmed during analyst investigation',
+        },
+      },
+      {
+        onSuccess: (data) => {
+          openInspector({
+            ...inspectorPayload,
+            trustState: 'QUARANTINED',
+            details: {
+              ...inspectorPayload.details,
+              trust_state: 'QUARANTINED',
+              quarantine_note: data.message,
+            },
+          });
+        },
+      }
+    );
   };
 
   return (
@@ -87,12 +114,21 @@ export const InspectorDrawer: React.FC = () => {
 
         {/* Forensic Action Triggers */}
         <div className="space-y-2 pt-2 border-t border-slate-800">
-          <button
-            onClick={() => alert(`Triggering Emergency Quarantine for ${inspectorPayload.id}`)}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-950/80 hover:bg-red-900/80 text-red-300 border border-red-800/80 rounded font-semibold text-xs transition-colors"
-          >
-            <Ban className="w-3.5 h-3.5" /> Quarantine Entity
-          </button>
+          {inspectorPayload.trustState !== 'QUARANTINED' && (
+            <button
+              onClick={handleQuarantine}
+              disabled={quarantineMutation.isPending}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-950/80 hover:bg-red-900/80 text-red-300 border border-red-800/80 rounded font-semibold text-xs transition-colors disabled:opacity-50"
+            >
+              {quarantineMutation.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Ban className="w-3.5 h-3.5" />
+              )}
+              Quarantine Entity (SEC-004)
+            </button>
+          )}
+
           <button
             onClick={() => alert(`Investigating Lineage for ${inspectorPayload.id}`)}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded font-semibold text-xs transition-colors"

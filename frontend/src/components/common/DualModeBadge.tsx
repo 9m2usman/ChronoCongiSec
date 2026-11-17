@@ -1,4 +1,3 @@
-import React from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { CheckCircle2, ShieldAlert } from 'lucide-react';
 
@@ -29,7 +28,7 @@ export const DualModeBadge: React.FC = () => {
         />
       </span>
       <span className="font-semibold tracking-wider">
-        {isLive ? 'LIVE API: CONNECTED' : 'DUAL-MODE: SCHEMA FALLBACK'}
+        {isLive ? 'LIVE API: CONNECTED' : 'CONTRACT FALLBACK'}
       </span>
       {isLive ? (
         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />

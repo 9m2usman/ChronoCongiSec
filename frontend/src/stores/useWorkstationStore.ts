@@ -21,7 +21,7 @@ export interface InspectorPayload {
   id: string;
   sha256?: string;
   trustState?: 'TRUSTED' | 'SUSPICIOUS' | 'QUARANTINED' | 'UNVERIFIED';
-  details: Record<string, unknown>;
+  details: Record<string, any>;
 }
 
 interface WorkstationState {

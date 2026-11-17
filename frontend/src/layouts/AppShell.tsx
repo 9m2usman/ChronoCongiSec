@@ -1,6 +1,6 @@
-import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useWorkstationStore, AVAILABLE_TENANTS } from '@/stores/useWorkstationStore';
+import { useHealthCheck } from '@/hooks';
 import { DualModeBadge } from '@/components/common/DualModeBadge';
 import { CommandPalette } from '@/components/common/CommandPalette';
 import { AttackReplayModal } from '@/components/common/AttackReplayModal';
@@ -26,6 +26,8 @@ import {
 } from 'lucide-react';
 
 export const AppShell: React.FC = () => {
+  useHealthCheck();
+
   const {
     activeTenant,
     setActiveTenant,
