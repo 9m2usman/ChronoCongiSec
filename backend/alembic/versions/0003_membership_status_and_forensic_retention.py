@@ -31,7 +31,7 @@ The data below is frozen on purpose; do not import application models here.
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 revision: str = "0003"
 down_revision: Union[str, Sequence[str], None] = "0002"
@@ -76,6 +76,8 @@ def _set_proposal_agent_rule(rule: str) -> None:
 
 
 def _check_approvers_are_members() -> None:
+    if context.is_offline_mode():
+        return
     orphans = op.get_bind().execute(sa.text(
         """
         SELECT a.id FROM approvals a
