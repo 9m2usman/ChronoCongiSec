@@ -94,6 +94,7 @@ class MemoryVersion(Base):
 
     __table_args__ = (
         UniqueConstraint("record_id", "version", name="uq_record_version"),
+        UniqueConstraint("tenant_id", "record_id", "id", name="uq_memory_versions_tenant_record_id"),
         Index("idx_memory_versions_checksum", "checksum"),
         tenant_parent_key(),
         *tenant_fk("memory_versions", "record_id", "memory_records", "CASCADE"),
