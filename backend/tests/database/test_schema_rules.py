@@ -128,6 +128,13 @@ async def test_every_reference_between_tenant_tables_is_composite(ro_conn: async
     for fk in await _foreign_keys(ro_conn):
         if fk["child"] not in tenant_tables or fk["parent"] not in tenant_tables:
             continue  # references to tenants / global tables
+        if (
+            fk["child"] == "checkpoint_items"
+            and list(fk["child_cols"]) == ["tenant_id", "record_id", "version_id"]
+            and fk["parent"] == "memory_versions"
+            and list(fk["parent_cols"]) == ["tenant_id", "record_id", "id"]
+        ):
+            continue  # Day 3: the version must belong to this exact record.
         checked += 1
         pairs = dict(zip(fk["child_cols"], fk["parent_cols"]))
         if pairs.get("tenant_id") != "tenant_id" or len(pairs) != 2:
@@ -250,3 +257,28 @@ async def test_membership_status_is_constrained(ro_conn: asyncpg.Connection) -> 
     assert check is not None
     for status in ("ACTIVE", "INACTIVE", "SUSPENDED", "REVOKED"):
         assert f"'{status}'" in check
+
+
+async def test_checkpoint_version_fk_is_tenant_and_record_consistent(ro_conn: asyncpg.Connection) -> None:
+    row = await ro_conn.fetchrow(
+        """
+        SELECT src.relname AS child, ref.relname AS parent,
+               array_agg(sa.attname ORDER BY k.ord) AS child_cols,
+               array_agg(ra.attname ORDER BY k.ord) AS parent_cols,
+               c.confdeltype::text AS delete_action
+        FROM pg_constraint c
+        JOIN pg_class src ON src.oid = c.conrelid
+        JOIN pg_class ref ON ref.oid = c.confrelid
+        JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(src_attnum, ref_attnum, ord) ON TRUE
+        JOIN pg_attribute sa ON sa.attrelid = c.conrelid AND sa.attnum = k.src_attnum
+        JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = k.ref_attnum
+        WHERE c.contype = 'f' AND c.conname = 'fk_checkpoint_items_version_matches_record'
+        GROUP BY src.relname, ref.relname, c.confdeltype
+        """
+    )
+    assert row is not None
+    assert row["child"] == "checkpoint_items"
+    assert row["parent"] == "memory_versions"
+    assert list(row["child_cols"]) == ["tenant_id", "record_id", "version_id"]
+    assert list(row["parent_cols"]) == ["tenant_id", "record_id", "id"]
+    assert row["delete_action"] == "c"
