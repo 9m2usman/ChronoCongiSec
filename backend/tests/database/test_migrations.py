@@ -407,6 +407,91 @@ def test_0006_stops_and_lists_offending_ids_without_changing_anything(empty_db: 
 
 
 # ---------------------------------------------------------------------------
+# Migration 0007 (gateway chain integrity) on existing data
+# ---------------------------------------------------------------------------
+
+
+async def _seed_gateway_chain_at_0006(database: str, *, mismatched_execution: bool = False) -> dict[str, str]:
+    """A tenant, an agent and two proposals with decisions; one approval and one execution.
+
+    With ``mismatched_execution`` the execution of proposal 1 cites proposal 2's decision,
+    which 0006 still allows (both FKs were only tenant-consistent).
+    """
+    keys = ("tenant", "agent", "p1", "p2", "d1", "d2", "approval", "execution")
+    ids = {k: str(uuid.uuid4()) for k in keys}
+    t = ids["tenant"]
+    statements = [
+        ("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Co', $2)", t, "co-" + t[:8]),
+        ("INSERT INTO agents (id, tenant_id, name) VALUES ($1, $2, 'bot')", ids["agent"], t),
+    ]
+    for p, d in (("p1", "d1"), ("p2", "d2")):
+        statements += [
+            ("INSERT INTO tool_proposals (id, tenant_id, agent_id, action_id, tool_name, operation, "
+             "idempotency_key, trace_id) VALUES ($1, $2, $3, 'a', 't', 'o', $1, 'tr')", ids[p], t, ids["agent"]),
+            ("INSERT INTO policy_decisions (id, tenant_id, proposal_id, decision, memory_trust, policy_result) "
+             "VALUES ($1, $2, $3, 'X', 'X', 'X')", ids[d], t, ids[p]),
+        ]
+    decision_for_execution = ids["d2"] if mismatched_execution else ids["d1"]
+    statements += [
+        ("INSERT INTO approvals (id, tenant_id, decision_id) VALUES ($1, $2, $3)", ids["approval"], t, ids["d1"]),
+        ("INSERT INTO tool_executions (id, tenant_id, proposal_id, decision_id) VALUES ($1, $2, $3, $4)",
+         ids["execution"], t, ids["p1"], decision_for_execution),
+    ]
+    await _execute(database, *statements)
+    return ids
+
+
+def test_0007_keeps_existing_chain_and_restricts_deletes(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0006")
+    ids = asyncio.run(_seed_gateway_chain_at_0006(empty_db))
+
+    helpers.upgrade(empty_db, "0007")
+
+    row = asyncio.run(_fetchrow(empty_db, "SELECT proposal_id, decision_id FROM tool_executions WHERE id = $1",
+                                ids["execution"]))
+    assert (row["proposal_id"], row["decision_id"]) == (ids["p1"], ids["d1"])
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        asyncio.run(_execute(empty_db, ("DELETE FROM tool_proposals WHERE id = $1", ids["p1"])))
+    assert asyncio.run(_count(empty_db, "policy_decisions", ids["tenant"])) == 2
+    assert asyncio.run(_count(empty_db, "approvals", ids["tenant"])) == 1
+
+
+def test_0007_downgrade_restores_0006_cascade_without_deleting_rows(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0006")
+    ids = asyncio.run(_seed_gateway_chain_at_0006(empty_db))
+    helpers.upgrade(empty_db, "0007")
+
+    helpers.downgrade(empty_db, "0006")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0006"
+    for table, expected in (("tool_proposals", 2), ("policy_decisions", 2), ("approvals", 1), ("tool_executions", 1)):
+        assert asyncio.run(_count(empty_db, table, ids["tenant"])) == expected
+    parent_key = asyncio.run(_fetchrow(
+        empty_db, "SELECT 1 FROM pg_constraint WHERE conname = 'uq_policy_decisions_tenant_id_proposal_id_id'"))
+    assert parent_key is None
+    # 0006 behaviour is back: deleting a proposal cascades through its decision, approval and execution.
+    asyncio.run(_execute(empty_db, ("DELETE FROM tool_proposals WHERE id = $1", ids["p1"])))
+    assert asyncio.run(_count(empty_db, "policy_decisions", ids["tenant"])) == 1
+    assert asyncio.run(_count(empty_db, "approvals", ids["tenant"])) == 0
+    assert asyncio.run(_count(empty_db, "tool_executions", ids["tenant"])) == 0
+
+
+def test_0007_stops_without_changes_when_an_execution_cites_another_proposals_decision(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0006")
+    ids = asyncio.run(_seed_gateway_chain_at_0006(empty_db, mismatched_execution=True))
+
+    with pytest.raises(RuntimeError, match="Migration 0007 stopped") as exc_info:
+        helpers.upgrade(empty_db, "0007")
+
+    assert ids["execution"] in str(exc_info.value)
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0006"
+    parent_key = asyncio.run(_fetchrow(
+        empty_db, "SELECT 1 FROM pg_constraint WHERE conname = 'uq_policy_decisions_tenant_id_proposal_id_id'"))
+    assert parent_key is None, "a failed 0007 must not leave its parent key behind"
+    assert asyncio.run(_count(empty_db, "tool_executions", ids["tenant"])) == 1
+
+
+# ---------------------------------------------------------------------------
 # Offline mode (``alembic upgrade --sql``): SQL generation only, no connection
 # ---------------------------------------------------------------------------
 
@@ -437,15 +522,19 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "ck_sources_status",                               # 0006 (edge pre-check skipped offline)
         "ck_provenance_edges_no_self_loop",                # 0006
         "uq_provenance_edges_tenant_from_to_relation",     # 0006
+        "fk_tool_executions_decision_matches_proposal",    # 0007 (pre-check skipped offline)
+        "uq_policy_decisions_tenant_id_proposal_id_id",    # 0007
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
-    assert "UPDATE alembic_version SET version_num='0006'" in sql
+    assert "UPDATE alembic_version SET version_num='0007'" in sql
 
 
 def test_offline_downgrade_generates_sql_back_to_base() -> None:
     sql = _offline_sql("downgrade", "head:base")
 
     for marker in (
+        "DROP CONSTRAINT fk_tool_executions_decision_matches_proposal",  # 0007
+        "DROP CONSTRAINT uq_policy_decisions_tenant_id_proposal_id_id",  # 0007
         "DROP CONSTRAINT uq_provenance_edges_tenant_from_to_relation",  # 0006
         "DROP COLUMN status",                                           # 0006 (sources)
         "DROP CONSTRAINT fk_checkpoint_items_version_matches_record",  # 0005
