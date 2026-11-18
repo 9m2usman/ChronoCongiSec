@@ -492,6 +492,112 @@ def test_0007_stops_without_changes_when_an_execution_cites_another_proposals_de
 
 
 # ---------------------------------------------------------------------------
+# Migration 0008 (pre-recovery snapshot, recovery chain) on existing data
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_SHA_SQL = "encode(sha256(convert_to(pre_recovery_snapshot_json::text, 'UTF8')), 'hex')"
+
+
+async def _seed_recovery_at_0007(database: str, violation: str | None = None) -> dict[str, str]:
+    """A checkpoint with one item, a captured plan with an action, and an uncaptured plan.
+
+    ``violation`` adds one row that 0008 must refuse: "duplicate_item", "executed_without_snapshot"
+    or "action_without_snapshot".
+    """
+    keys = ("tenant", "rec", "ver", "cp", "item", "item_dup", "plan_cap", "plan_open", "action", "action_bad")
+    ids = {k: str(uuid.uuid4()) for k in keys}
+    t = ids["tenant"]
+    statements = [
+        ("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Co', $2)", t, "co-" + t[:8]),
+        ("INSERT INTO memory_records (id, tenant_id) VALUES ($1, $2)", ids["rec"], t),
+        ("INSERT INTO memory_versions (id, tenant_id, record_id, version, content, checksum) "
+         "VALUES ($1, $2, $3, 1, 'c', 'h')", ids["ver"], t, ids["rec"]),
+        ("INSERT INTO checkpoints (id, tenant_id, name, integrity_hash) VALUES ($1, $2, 'cp', 'h')", ids["cp"], t),
+        ("INSERT INTO checkpoint_items (id, tenant_id, checkpoint_id, record_id, version_id, checksum) "
+         "VALUES ($1, $2, $3, $4, $5, 'h')", ids["item"], t, ids["cp"], ids["rec"], ids["ver"]),
+        ("INSERT INTO recovery_plans (id, tenant_id, checkpoint_id, pre_recovery_snapshot_json) "
+         "VALUES ($1, $2, $3, '{\"state\": \"contaminated\"}'::jsonb)", ids["plan_cap"], t, ids["cp"]),
+        ("INSERT INTO recovery_plans (id, tenant_id, checkpoint_id) VALUES ($1, $2, $3)", ids["plan_open"], t, ids["cp"]),
+        ("INSERT INTO recovery_actions (id, tenant_id, plan_id, resource_id, action_taken) "
+         "VALUES ($1, $2, $3, 'r', 'X')", ids["action"], t, ids["plan_cap"]),
+    ]
+    if violation == "duplicate_item":
+        statements.append((
+            "INSERT INTO checkpoint_items (id, tenant_id, checkpoint_id, record_id, version_id, checksum) "
+            "VALUES ($1, $2, $3, $4, $5, 'h')", ids["item_dup"], t, ids["cp"], ids["rec"], ids["ver"]))
+    elif violation == "executed_without_snapshot":
+        statements.append(("UPDATE recovery_plans SET executed_at = now() WHERE id = $1", ids["plan_open"]))
+    elif violation == "action_without_snapshot":
+        statements.append((
+            "INSERT INTO recovery_actions (id, tenant_id, plan_id, resource_id, action_taken) "
+            "VALUES ($1, $2, $3, 'r', 'X')", ids["action_bad"], t, ids["plan_open"]))
+    await _execute(database, *statements)
+    return ids
+
+
+def test_0008_backfills_snapshot_hash_and_keeps_data(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0007")
+    ids = asyncio.run(_seed_recovery_at_0007(empty_db))
+
+    helpers.upgrade(empty_db, "0008")
+
+    captured = asyncio.run(_fetchrow(
+        empty_db, f"SELECT pre_recovery_snapshot_sha256 AS sha, {_SNAPSHOT_SHA_SQL} AS expected "
+                  "FROM recovery_plans WHERE id = $1", ids["plan_cap"]))
+    assert captured["sha"] is not None and captured["sha"] == captured["expected"]
+    open_plan = asyncio.run(_fetchrow(
+        empty_db, "SELECT pre_recovery_snapshot_sha256 FROM recovery_plans WHERE id = $1", ids["plan_open"]))
+    assert open_plan[0] is None
+    for table, expected in (("checkpoint_items", 1), ("recovery_plans", 2), ("recovery_actions", 1)):
+        assert asyncio.run(_count(empty_db, table, ids["tenant"])) == expected
+    # The back-filled snapshot is now protected.
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+        asyncio.run(_execute(empty_db, ("DELETE FROM recovery_plans WHERE id = $1", ids["plan_cap"])))
+
+
+def test_0008_downgrade_restores_0007_and_keeps_snapshots(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0007")
+    ids = asyncio.run(_seed_recovery_at_0007(empty_db))
+    helpers.upgrade(empty_db, "0008")
+
+    helpers.downgrade(empty_db, "0007")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0007"
+    assert not asyncio.run(_column_exists(empty_db, "recovery_plans", "pre_recovery_snapshot_sha256"))
+    snapshot = asyncio.run(_fetchrow(
+        empty_db, "SELECT pre_recovery_snapshot_json::text FROM recovery_plans WHERE id = $1", ids["plan_cap"]))
+    assert "contaminated" in snapshot[0], "downgrade must keep the snapshot itself"
+    # 0007 behaviour is back: an uncaptured plan accepts an action, and a checkpoint delete cascades.
+    asyncio.run(_execute(empty_db, (
+        "INSERT INTO recovery_actions (id, tenant_id, plan_id, resource_id, action_taken) "
+        "VALUES ($1, $2, $3, 'r', 'X')", str(uuid.uuid4()), ids["tenant"], ids["plan_open"])))
+    asyncio.run(_execute(empty_db, ("DELETE FROM checkpoints WHERE id = $1", ids["cp"])))
+    assert asyncio.run(_count(empty_db, "recovery_plans", ids["tenant"])) == 0
+
+
+@pytest.mark.parametrize(
+    ("violation", "message", "offender"),
+    [
+        ("duplicate_item", "same record twice", "item_dup"),
+        ("executed_without_snapshot", "executed recovery_plans without", "plan_open"),
+        ("action_without_snapshot", "recovery_actions whose plan has no", "action_bad"),
+    ],
+)
+def test_0008_stops_and_lists_offending_ids_without_changing_anything(
+    empty_db: str, violation: str, message: str, offender: str
+) -> None:
+    helpers.upgrade(empty_db, "0007")
+    ids = asyncio.run(_seed_recovery_at_0007(empty_db, violation))
+
+    with pytest.raises(RuntimeError, match="Migration 0008 stopped") as exc_info:
+        helpers.upgrade(empty_db, "0008")
+
+    assert message in str(exc_info.value) and ids[offender] in str(exc_info.value)
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0007"
+    assert not asyncio.run(_column_exists(empty_db, "recovery_plans", "pre_recovery_snapshot_sha256"))
+
+
+# ---------------------------------------------------------------------------
 # Offline mode (``alembic upgrade --sql``): SQL generation only, no connection
 # ---------------------------------------------------------------------------
 
@@ -524,15 +630,20 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "uq_provenance_edges_tenant_from_to_relation",     # 0006
         "fk_tool_executions_decision_matches_proposal",    # 0007 (pre-check skipped offline)
         "uq_policy_decisions_tenant_id_proposal_id_id",    # 0007
+        "ck_recovery_plans_snapshot_hash_consistent",      # 0008 (pre-check skipped offline)
+        "trg_protect_recovery_snapshot",                   # 0008
+        "trg_require_recovery_snapshot",                   # 0008
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
-    assert "UPDATE alembic_version SET version_num='0007'" in sql
+    assert "UPDATE alembic_version SET version_num='0008'" in sql
 
 
 def test_offline_downgrade_generates_sql_back_to_base() -> None:
     sql = _offline_sql("downgrade", "head:base")
 
     for marker in (
+        "DROP TRIGGER trg_require_recovery_snapshot",                    # 0008
+        "DROP COLUMN pre_recovery_snapshot_sha256",                      # 0008
         "DROP CONSTRAINT fk_tool_executions_decision_matches_proposal",  # 0007
         "DROP CONSTRAINT uq_policy_decisions_tenant_id_proposal_id_id",  # 0007
         "DROP CONSTRAINT uq_provenance_edges_tenant_from_to_relation",  # 0006

@@ -45,17 +45,17 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("tool_executions", "decision_id", "policy_decisions", "RESTRICT"),  # 0007
     Rel("incidents", "affected_record_id", "memory_records", "SET NULL"),
     Rel("incidents", "agent_id", "agents", "SET NULL"),
-    Rel("incident_evidence", "incident_id", "incidents", "CASCADE"),
+    Rel("incident_evidence", "incident_id", "incidents", "RESTRICT"),  # 0008
     Rel("quarantines", "record_id", "memory_records", "CASCADE"),
     Rel("quarantines", "incident_id", "incidents", "SET NULL"),
     Rel("checkpoints", "agent_id", "agents", "SET NULL"),
-    Rel("checkpoint_items", "checkpoint_id", "checkpoints", "CASCADE"),
+    Rel("checkpoint_items", "checkpoint_id", "checkpoints", "RESTRICT"),  # 0008
     Rel("checkpoint_items", "record_id", "memory_records", "CASCADE"),
     Rel("checkpoint_items", "version_id", "memory_versions", "CASCADE"),
     Rel("recovery_plans", "incident_id", "incidents", "SET NULL"),
-    Rel("recovery_plans", "checkpoint_id", "checkpoints", "CASCADE"),
+    Rel("recovery_plans", "checkpoint_id", "checkpoints", "RESTRICT"),  # 0008
     Rel("recovery_plans", "target_record_id", "memory_records", "SET NULL"),
-    Rel("recovery_actions", "plan_id", "recovery_plans", "CASCADE"),
+    Rel("recovery_actions", "plan_id", "recovery_plans", "RESTRICT"),  # 0008
     Rel("knowledge_relations", "source_entity_id", "knowledge_entities", "CASCADE"),
     Rel("knowledge_relations", "target_entity_id", "knowledge_entities", "CASCADE"),
     Rel("drift_observations", "record_id", "memory_records", "CASCADE"),
