@@ -10,25 +10,27 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.core.exceptions import ForbiddenError, ValidationError
-from backend.app.memory.hashing import sha256_hex
+from backend.app.memory.integrity import MemoryIntegrityError, sha256_hex
 from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import (
     InMemoryMemoryRepository,
     MemoryRepository,
     get_default_repository,
 )
-from backend.app.memory.service import (
+from backend.app.memory.ingestion import (
     MAX_PROVENANCE_DEPTH,
     MAX_TRAVERSAL_BUDGET,
     InvalidProvenanceError,
-    MemoryIntegrityError,
+    _check_dag_cycle,
+    ingest_memory,
+)
+from backend.app.memory.retrieval import (
     MemoryNotFoundError,
     get_memory_detail,
-    ingest_memory,
     retrieve_memory,
     transition_memory_trust_state,
-    update_memory,
 )
+from backend.app.memory.versioning import update_memory
 
 
 @pytest.fixture
@@ -319,7 +321,7 @@ def test_provenance_cyclic_graph_rejected(repo):
     docB, _ = ingest_memory(tenant_id=tenant_id, content="Node B", parent_record_id=docA.id, repository=repo)
 
     # Attempting to link A to derive from B creates A -> B -> A cycle
-    from backend.app.memory.service import _check_dag_cycle
+    from backend.app.memory.provenance import _check_dag_cycle
     with pytest.raises(InvalidProvenanceError) as exc_info:
         _check_dag_cycle(repo, from_id=docB.id, to_id=docA.id, tenant_id=tenant_id)
 
@@ -376,7 +378,7 @@ def test_provenance_large_graph_exceeding_budget_rejected(repo):
             )
         )
 
-    from backend.app.memory.service import _check_dag_cycle
+    from backend.app.memory.provenance import _check_dag_cycle
     with pytest.raises(InvalidProvenanceError) as exc_info:
         _check_dag_cycle(repo, from_id="new-parent", to_id=root_id, tenant_id=tenant_id)
 
@@ -801,3 +803,115 @@ def test_gap_004_memory_detail_access_controls(repo):
     forensic_detail, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=True, repository=repo)
     assert forensic_detail.id == rec.id
     assert forensic_detail.trust_state == TrustState.SUSPICIOUS.value
+
+
+def test_update_memory_trusted_becomes_unverified(repo):
+    """Rule 2: Updating a TRUSTED record appends a new version and transitions trust_state to UNVERIFIED."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Trusted baseline", repository=repo)
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
+    assert repo.get_record(rec.id, tenant_id).trust_state == TrustState.TRUSTED.value
+
+    updated_rec, ver2 = update_memory(tenant_id=tenant_id, record_id=rec.id, content="Trusted edit", repository=repo)
+    assert updated_rec.current_version == 2
+    assert updated_rec.trust_state == TrustState.UNVERIFIED.value
+    assert ver2.version == 2
+    assert len(repo.get_versions(rec.id, tenant_id)) == 2
+
+
+def test_update_memory_unverified_stays_unverified(repo):
+    """Rule 3: Updating an UNVERIFIED record appends a new version and remains UNVERIFIED."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Initial unverified", repository=repo)
+    assert rec.trust_state == TrustState.UNVERIFIED.value
+
+    updated_rec, ver2 = update_memory(tenant_id=tenant_id, record_id=rec.id, content="Unverified edit", repository=repo)
+    assert updated_rec.current_version == 2
+    assert updated_rec.trust_state == TrustState.UNVERIFIED.value
+    assert ver2.version == 2
+    assert len(repo.get_versions(rec.id, tenant_id)) == 2
+
+
+def test_update_memory_suspicious_stays_suspicious(repo):
+    """Rule 4: Updating a SUSPICIOUS record appends a new version and stays SUSPICIOUS (an edit must never clear a flag)."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Suspicious content", repository=repo)
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.SUSPICIOUS.value, repository=repo)
+    assert repo.get_record(rec.id, tenant_id).trust_state == TrustState.SUSPICIOUS.value
+
+    updated_rec, ver2 = update_memory(tenant_id=tenant_id, record_id=rec.id, content="Suspicious edit attempting to clear flag", repository=repo)
+    assert updated_rec.current_version == 2
+    assert updated_rec.trust_state == TrustState.SUSPICIOUS.value
+    assert ver2.version == 2
+    assert len(repo.get_versions(rec.id, tenant_id)) == 2
+
+
+def test_update_memory_refused_on_quarantined_record(repo):
+    """Rule 1: Updating a QUARANTINED record is refused with ValidationError; leaves version count, trust_state and updated_at unchanged."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Malicious injection payload", repository=repo)
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.QUARANTINED.value, repository=repo)
+    baseline_record = repo.get_record(rec.id, tenant_id)
+    baseline_updated_at = baseline_record.updated_at
+
+    with pytest.raises(ValidationError) as exc:
+        update_memory(tenant_id=tenant_id, record_id=rec.id, content="Attempted fix on quarantined record", repository=repo)
+    assert "QUARANTINED" in str(exc.value)
+
+    # Invariants: version count, trust_state, and updated_at unchanged; no new version row
+    after_rec = repo.get_record(rec.id, tenant_id)
+    assert after_rec.current_version == 1
+    assert after_rec.trust_state == TrustState.QUARANTINED.value
+    assert after_rec.updated_at == baseline_updated_at
+    assert len(repo.get_versions(rec.id, tenant_id)) == 1
+
+
+def test_update_memory_refused_on_rejected_record(repo):
+    """Rule 1: Updating a REJECTED record is refused with ValidationError; leaves version count, trust_state and updated_at unchanged."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Rejected content", repository=repo)
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.REJECTED.value, repository=repo)
+    baseline_record = repo.get_record(rec.id, tenant_id)
+    baseline_updated_at = baseline_record.updated_at
+
+    with pytest.raises(ValidationError) as exc:
+        update_memory(tenant_id=tenant_id, record_id=rec.id, content="Attempted fix on rejected record", repository=repo)
+    assert "REJECTED" in str(exc.value)
+
+    after_rec = repo.get_record(rec.id, tenant_id)
+    assert after_rec.current_version == 1
+    assert after_rec.trust_state == TrustState.REJECTED.value
+    assert after_rec.updated_at == baseline_updated_at
+    assert len(repo.get_versions(rec.id, tenant_id)) == 1
+
+
+def test_update_memory_refused_on_superseded_record(repo):
+    """Rule 1: Updating a SUPERSEDED record is refused with ValidationError; leaves version count, trust_state and updated_at unchanged."""
+    tenant_id = "tenant-update-rules"
+    rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Superseded content", repository=repo)
+    transition_memory_trust_state(tenant_id, rec.id, TrustState.SUPERSEDED.value, repository=repo)
+    baseline_record = repo.get_record(rec.id, tenant_id)
+    baseline_updated_at = baseline_record.updated_at
+
+    with pytest.raises(ValidationError) as exc:
+        update_memory(tenant_id=tenant_id, record_id=rec.id, content="Attempted fix on superseded record", repository=repo)
+    assert "SUPERSEDED" in str(exc.value)
+
+    after_rec = repo.get_record(rec.id, tenant_id)
+    assert after_rec.current_version == 1
+    assert after_rec.trust_state == TrustState.SUPERSEDED.value
+    assert after_rec.updated_at == baseline_updated_at
+    assert len(repo.get_versions(rec.id, tenant_id)) == 1
+
+
+def test_update_memory_cross_tenant_refusal_fails_as_not_found(repo):
+    """Updating a record owned by another tenant fails as MemoryNotFoundError even if the target record is in terminal/quarantined state."""
+    tenant_a = "tenant-alpha"
+    tenant_b = "tenant-beta"
+    rec_a, _ = ingest_memory(tenant_id=tenant_a, content="Tenant A memory", repository=repo)
+    transition_memory_trust_state(tenant_a, rec_a.id, TrustState.QUARANTINED.value, repository=repo)
+
+    # Attempting to update tenant A's record from tenant B context raises MemoryNotFoundError
+    with pytest.raises(MemoryNotFoundError) as exc:
+        update_memory(tenant_id=tenant_b, record_id=rec_a.id, content="Cross-tenant update attempt", repository=repo)
+    assert rec_a.id in str(exc.value)

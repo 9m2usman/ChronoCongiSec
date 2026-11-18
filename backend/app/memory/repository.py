@@ -1,5 +1,7 @@
 """Repository interface and in-memory implementation for Memory & Provenance entities.
 
+TEMPORARY in-memory stand-in. Tenant-scoped repositories belong to M6 (backend/app/database/repositories/). Replace when M6's tables land.
+
 Matches Document 05 Section 3.3 (tables: memory_records, memory_versions, provenance_edges).
 """
 

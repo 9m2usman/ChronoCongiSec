@@ -1,16 +1,33 @@
-"""Memory and provenance subsystem."""
+"""Memory and provenance subsystem.
 
-from .hashing import sha256_hex
+Module: backend.app.memory
+Owner: M3 — Knowledge & Memory Systems Lead
+"""
+
+from .ingestion import ingest_memory
+from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
+from .lineage import LineageResult, get_ancestors, get_descendants
 from .models import (
+    AgentRecord,
     MemoryDetailResponse,
     MemoryIngestRequest,
     MemoryRecord,
     MemoryRecordResponse,
+    MemoryRefCheck,
+    MemoryRefStatus,
     MemoryVersion,
     ProvenanceEdge,
     ProvenanceRelationType,
     RecordType,
+    SourceRecord,
     TrustState,
+)
+from .provenance import (
+    MAX_PROVENANCE_DEPTH,
+    MAX_TRAVERSAL_BUDGET,
+    VALID_RELATION_TYPES,
+    InvalidProvenanceError,
+    create_provenance_edge,
 )
 from .repository import (
     InMemoryMemoryRepository,
@@ -18,20 +35,22 @@ from .repository import (
     get_default_repository,
     reset_default_repository,
 )
-from .service import (
-    InvalidProvenanceError,
-    MemoryIntegrityError,
+from .retrieval import (
+    MAX_MEMORY_REFS_PER_PROPOSAL,
     MemoryNotFoundError,
     get_memory_detail,
-    ingest_memory,
     retrieve_memory,
-    update_memory,
+    transition_memory_trust_state,
+    verify_memory_refs,
 )
+from .versioning import update_memory
 
 __all__ = [
     "MemoryRecord",
     "MemoryVersion",
     "ProvenanceEdge",
+    "AgentRecord",
+    "SourceRecord",
     "RecordType",
     "TrustState",
     "ProvenanceRelationType",
@@ -46,8 +65,21 @@ __all__ = [
     "update_memory",
     "retrieve_memory",
     "get_memory_detail",
+    "transition_memory_trust_state",
+    "create_provenance_edge",
+    "get_ancestors",
+    "get_descendants",
+    "LineageResult",
     "MemoryIntegrityError",
     "MemoryNotFoundError",
     "InvalidProvenanceError",
+    "MAX_PROVENANCE_DEPTH",
+    "MAX_TRAVERSAL_BUDGET",
+    "VALID_RELATION_TYPES",
     "sha256_hex",
+    "verify_checksum",
+    "MemoryRefCheck",
+    "MemoryRefStatus",
+    "verify_memory_refs",
+    "MAX_MEMORY_REFS_PER_PROPOSAL",
 ]

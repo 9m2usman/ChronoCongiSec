@@ -1,0 +1,340 @@
+"""Memory retrieval and detail querying operations.
+
+Module: backend.app.memory.retrieval
+Owner: M3 — Knowledge & Memory Systems Lead
+
+Implements Document 02 §13 & §15 and Document 05 §5.1 specifications.
+"""
+
+from datetime import datetime, timezone
+from typing import Any, List, Optional, Tuple
+
+from backend.app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
+from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
+from .models import (
+    MemoryRecord,
+    MemoryRefCheck,
+    MemoryRefStatus,
+    MemoryVersion,
+    ProvenanceEdge,
+    TrustState,
+)
+from .repository import MemoryRepository, get_default_repository
+
+
+class MemoryNotFoundError(NotFoundError):
+    """Raised when a requested memory record is not found."""
+
+    def __init__(
+        self,
+        message: str = "The requested memory record was not found.",
+        details: Any = None,
+    ):
+        super().__init__(message=message, details=details)
+
+
+def retrieve_memory(
+    tenant_id: str,
+    agent_id: Optional[str] = None,
+    trust_state: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    for_forensic: bool = False,
+    exclude_quarantined: bool = True,
+    repository: Optional[MemoryRepository] = None,
+) -> List[MemoryRecord]:
+    """Retrieve memory records for a tenant and optional agent.
+
+    SECURITY INVARIANT:
+    Never expose the `for_forensic` parameter via public API query parameters or client request bodies.
+    Callers requesting `for_forensic=True` must be strictly authenticated and authorized by M1/M4
+    security workflows (e.g. specialized incident triage or audit roles).
+
+    Enforces GAP-001:
+    1. Tenant scoping: only records belonging to `tenant_id` are returned.
+    2. Trust state restriction: Normal agent retrieval returns ONLY eligible TRUSTED records.
+       UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, and SUPERSEDED records are strictly excluded.
+    3. Query parameter validation: Callers cannot request non-TRUSTED states unless for_forensic=True.
+    4. Pagination: respects limit (max 100) and offset.
+    5. Cryptographic integrity: re-verifies stored checksums of all versions against content.
+       If any checksum mismatch is detected, raises MemoryIntegrityError and does not return the record.
+    """
+    repo = repository or get_default_repository()
+
+    # Enforce GAP-001: Normal agent retrieval returns ONLY eligible TRUSTED memory
+    if not for_forensic:
+        if trust_state is not None and trust_state.upper() != TrustState.TRUSTED.value:
+            raise ForbiddenError("Normal agent retrieval is strictly restricted to TRUSTED memory records.")
+        target_trust = TrustState.TRUSTED.value
+        only_trusted = True
+    else:
+        target_trust = trust_state
+        only_trusted = False
+
+    records = repo.list_records(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        trust_state=target_trust,
+        only_trusted=only_trusted,
+        limit=limit,
+        offset=offset,
+    )
+
+    verified_records: List[MemoryRecord] = []
+    for record in records:
+        versions = repo.get_versions(record.id, tenant_id)
+        for ver in versions:
+            expected_checksum = ver.checksum
+            computed_checksum = sha256_hex(ver.content)
+            if computed_checksum != expected_checksum:
+                raise MemoryIntegrityError(
+                    f"Cryptographic integrity violation: MemoryRecord '{record.id}' "
+                    f"Version {ver.version} checksum mismatch! "
+                    f"Stored='{expected_checksum}', Computed='{computed_checksum}'."
+                )
+        verified_records.append(record)
+
+    return verified_records
+
+
+def get_memory_detail(
+    tenant_id: str,
+    record_id: str,
+    for_forensic: bool = False,
+    repository: Optional[MemoryRepository] = None,
+) -> Tuple[MemoryRecord, List[MemoryVersion], List[ProvenanceEdge]]:
+    """Fetch complete memory detail including full version history and provenance edges.
+
+    SECURITY INVARIANT:
+    Never expose the `for_forensic` parameter via public API query parameters or client request bodies.
+    Normal agent-facing API routes must strictly call `get_memory_detail(..., for_forensic=False)`.
+    Callers requesting `for_forensic=True` must be gated by explicit M1/M4 authorization checks.
+
+    Enforces GAP-004:
+    1. Tenant scoping: only records belonging to tenant_id are accessed.
+    2. Trust safety: Normal detail access applies the exact same trust invariant as list retrieval.
+       Only eligible TRUSTED current memory may be exposed to normal agent-facing detail operations.
+       Non-TRUSTED records (UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, SUPERSEDED) return 404.
+    3. Forensic override: for_forensic=True permits authorized security analyst inspection.
+    4. Cryptographic integrity: re-verifies checksums across all versions for tampering detection.
+    """
+    repo = repository or get_default_repository()
+    record = repo.get_record(record_id, tenant_id)
+    if not record:
+        raise MemoryNotFoundError(
+            f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
+        )
+
+    # Enforce GAP-004: Normal detail access requires TRUSTED state
+    if not for_forensic and record.trust_state != TrustState.TRUSTED.value:
+        raise MemoryNotFoundError(
+            f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
+        )
+
+    versions = repo.get_versions(record_id, tenant_id)
+    for ver in versions:
+        expected = ver.checksum
+        computed = sha256_hex(ver.content)
+        if computed != expected:
+            raise MemoryIntegrityError(
+                f"Cryptographic integrity violation: MemoryRecord '{record_id}' "
+                f"Version {ver.version} checksum mismatch! "
+                f"Stored='{expected}', Computed='{computed}'."
+            )
+
+    edges = repo.get_edges_for_record(record_id, tenant_id)
+    return record, versions, edges
+
+
+def transition_memory_trust_state(
+    tenant_id: str,
+    record_id: str,
+    new_trust_state: str,
+    reason: str = "Authorized M4 security policy transition",
+    analyst_id: Optional[str] = None,
+    repository: Optional[MemoryRepository] = None,
+) -> MemoryRecord:
+    """Transition a memory record's trust state according to M4 Security Engine lifecycle rules.
+
+    M4 owns trust decisions. This function allows authorized M4 workflows (and test harnesses)
+    to transition a record from UNVERIFIED -> TRUSTED, or SUSPICIOUS, or QUARANTINED.
+    """
+    valid_states = {s.value for s in TrustState}
+    target_state = new_trust_state.upper()
+    if target_state not in valid_states:
+        raise ValidationError(f"Invalid trust state '{new_trust_state}'. Must be one of {valid_states}.")
+
+    repo = repository or get_default_repository()
+    record = repo.get_record(record_id, tenant_id)
+    if not record:
+        raise MemoryNotFoundError(f"Memory record '{record_id}' not found for tenant '{tenant_id}'.")
+
+    record.trust_state = target_state
+    record.updated_at = datetime.now(timezone.utc)
+    return repo.update_record(record)
+
+
+# Default maximum number of memory references evaluated in a single action proposal.
+# Enforced as an M3 default pending M4/M2 formal confirmation.
+MAX_MEMORY_REFS_PER_PROPOSAL = 100
+
+
+# Interface not yet confirmed by M4/M2; shape may change.
+def verify_memory_refs(
+    tenant_id: str,
+    memory_refs: Any,
+    repository: Optional[MemoryRepository] = None,
+) -> List[MemoryRefCheck]:
+    """Verify memory references for an action proposal at the Security Gateway (Gate G4).
+
+    Evaluates whether each referenced memory record exists within the tenant, verifies the
+    cryptographic integrity of its current active version, and extracts its exact trust state
+    and version for downstream policy evaluation by M4 Security Engine.
+
+    SECURITY INVARIANTS:
+    1. Read-only: Performs zero state transitions, updates, or writes (no record/version changes).
+    2. Fail closed: Any unexpected exception evaluates to status=ERROR, never OK.
+    3. Strict tenant isolation: Nonexistent records and records belonging to other tenants both
+       return NOT_FOUND with identical sanitized reason messages (zero existence leakage).
+    4. Exact trust reflection: Returns the record's trust_state exactly as stored without alteration.
+       No ALLOW/BLOCK decision is made here; policy decision is exclusively owned by M4.
+    5. Input safety: Empty, malformed, non-string, or oversized lists are safely handled without raising.
+    6. Internal isolation: No imports from backend.app.security or backend.app.gateway.
+    """
+    repo = repository or get_default_repository()
+
+    # Reject non-list inputs or oversized lists beyond maximum allowed boundary
+    if not isinstance(memory_refs, list):
+        return [
+            MemoryRefCheck(
+                record_id=None,
+                status=MemoryRefStatus.INVALID_REF,
+                trust_state=None,
+                current_version=None,
+                reason="Invalid memory_refs payload: expected a list of reference identifiers.",
+            )
+        ]
+
+    if len(memory_refs) > MAX_MEMORY_REFS_PER_PROPOSAL:
+        return [
+            MemoryRefCheck(
+                record_id=None,
+                status=MemoryRefStatus.ERROR,
+                trust_state=None,
+                current_version=None,
+                reason=f"Proposal exceeds maximum allowed memory references limit of {MAX_MEMORY_REFS_PER_PROPOSAL}.",
+            )
+        ]
+
+    results: List[MemoryRefCheck] = []
+    seen_ids: set = set()
+
+    for ref in memory_refs:
+        # Validate ref type and non-emptiness
+        if not isinstance(ref, str) or not ref.strip():
+            results.append(
+                MemoryRefCheck(
+                    record_id=ref if isinstance(ref, str) else None,
+                    status=MemoryRefStatus.INVALID_REF,
+                    trust_state=None,
+                    current_version=None,
+                    reason="Invalid reference: identifier must be a non-empty string.",
+                )
+            )
+            continue
+
+        ref_id = ref.strip()
+
+        # Check for duplicates within the current proposal
+        if ref_id in seen_ids:
+            results.append(
+                MemoryRefCheck(
+                    record_id=ref_id,
+                    status=MemoryRefStatus.DUPLICATE_REF,
+                    trust_state=None,
+                    current_version=None,
+                    reason=f"Duplicate memory reference '{ref_id}' in proposal.",
+                )
+            )
+            continue
+
+        seen_ids.add(ref_id)
+
+        try:
+            # Query repository directly within strict tenant scoping boundary
+            record = repo.get_record(ref_id, tenant_id)
+            if not record or record.tenant_id != tenant_id:
+                results.append(
+                    MemoryRefCheck(
+                        record_id=ref_id,
+                        status=MemoryRefStatus.NOT_FOUND,
+                        trust_state=None,
+                        current_version=None,
+                        reason="Memory record not found or inaccessible in tenant scope.",
+                    )
+                )
+                continue
+
+            # Fetch the current version of the record
+            current_ver_num = record.current_version
+            version_obj = repo.get_version(ref_id, current_ver_num, tenant_id)
+            if not version_obj:
+                results.append(
+                    MemoryRefCheck(
+                        record_id=ref_id,
+                        status=MemoryRefStatus.INTEGRITY_FAILED,
+                        trust_state=record.trust_state,
+                        current_version=current_ver_num,
+                        reason=f"Current version {current_ver_num} missing for record '{ref_id}'.",
+                    )
+                )
+                continue
+
+            # Verify cryptographic integrity of the current version's content
+            expected_checksum = version_obj.checksum
+            computed_checksum = sha256_hex(version_obj.content)
+            if computed_checksum != expected_checksum:
+                results.append(
+                    MemoryRefCheck(
+                        record_id=ref_id,
+                        status=MemoryRefStatus.INTEGRITY_FAILED,
+                        trust_state=record.trust_state,
+                        current_version=current_ver_num,
+                        reason="Cryptographic checksum mismatch on current record version.",
+                    )
+                )
+                continue
+
+            # Current version content matches checksum; return OK with exact stored trust state
+            results.append(
+                MemoryRefCheck(
+                    record_id=ref_id,
+                    status=MemoryRefStatus.OK,
+                    trust_state=record.trust_state,
+                    current_version=current_ver_num,
+                    reason="Memory reference verified and current version integrity valid.",
+                )
+            )
+        except Exception:
+            # Fail closed: convert any unexpected repository or internal exception to ERROR
+            results.append(
+                MemoryRefCheck(
+                    record_id=ref_id,
+                    status=MemoryRefStatus.ERROR,
+                    trust_state=None,
+                    current_version=None,
+                    reason="Unexpected error encountered during memory reference verification.",
+                )
+            )
+
+    return results
+
+
+__all__ = [
+    "MemoryNotFoundError",
+    "retrieve_memory",
+    "get_memory_detail",
+    "transition_memory_trust_state",
+    "verify_memory_refs",
+    "MAX_MEMORY_REFS_PER_PROPOSAL",
+]

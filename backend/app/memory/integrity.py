@@ -1,13 +1,33 @@
-"""Cryptographic content hashing utilities for Memory & Provenance.
+"""Cryptographic content hashing and integrity verification for Memory & Provenance.
 
 Important:
 SHA-256 content checksums provide integrity comparison and tamper detection,
 not proof of authenticity or non-repudiation. They are not digital signatures
 or authentication mechanisms.
+
+Module: backend.app.memory.integrity
+Owner: M3 — Knowledge & Memory Systems Lead
 """
 
 import hashlib
-from typing import Optional
+from typing import Any, Optional
+from backend.app.core.exceptions import AMSCException
+
+
+class MemoryIntegrityError(AMSCException):
+    """Raised when cryptographic checksum verification fails for a memory record."""
+
+    def __init__(
+        self,
+        message: str = "Cryptographic checksum verification failed.",
+        details: Any = None,
+    ):
+        super().__init__(
+            message=message,
+            code="MEMORY_INTEGRITY_VIOLATION",
+            status_code=500,
+            details=details,
+        )
 
 
 def sha256_hex(content: Optional[str] = None) -> str:
@@ -32,3 +52,17 @@ def sha256_hex(content: Optional[str] = None) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     stripped = normalized.strip()
     return hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+
+def verify_checksum(content: Optional[str], checksum: Optional[str]) -> bool:
+    """Verify that content's canonical SHA-256 matches the expected checksum."""
+    if checksum is None or content is None:
+        return False
+    return sha256_hex(content).lower() == checksum.strip().lower()
+
+
+__all__ = [
+    "sha256_hex",
+    "verify_checksum",
+    "MemoryIntegrityError",
+]
