@@ -36,13 +36,13 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("retrieval_events", "agent_id", "agents", "CASCADE"),
     Rel("retrieval_events", "record_id", "memory_records", "CASCADE"),
     Rel("tool_proposals", "agent_id", "agents", "RESTRICT"),  # 0003: gateway history is evidence
-    Rel("policy_decisions", "proposal_id", "tool_proposals", "CASCADE"),
+    Rel("policy_decisions", "proposal_id", "tool_proposals", "RESTRICT"),  # 0007
     Rel("policy_decisions", "incident_id", "incidents", "SET NULL"),
-    Rel("approvals", "decision_id", "policy_decisions", "CASCADE"),
+    Rel("approvals", "decision_id", "policy_decisions", "RESTRICT"),  # 0007
     # 0003: the approver must be a member of the approval's tenant; RESTRICT keeps "who approved".
     Rel("approvals", "approver_user_id", "memberships", "RESTRICT", "user_id"),
-    Rel("tool_executions", "proposal_id", "tool_proposals", "CASCADE"),
-    Rel("tool_executions", "decision_id", "policy_decisions", "CASCADE"),
+    Rel("tool_executions", "proposal_id", "tool_proposals", "RESTRICT"),  # 0007
+    Rel("tool_executions", "decision_id", "policy_decisions", "RESTRICT"),  # 0007
     Rel("incidents", "affected_record_id", "memory_records", "SET NULL"),
     Rel("incidents", "agent_id", "agents", "SET NULL"),
     Rel("incident_evidence", "incident_id", "incidents", "CASCADE"),
@@ -86,6 +86,14 @@ LINKED_RELATIONSHIPS: tuple[LinkedRel, ...] = (
         "memory_versions",
         ("tenant_id", "record_id", "id"),
         "CASCADE",
+    ),
+    # Migration 0007: an execution's decision must belong to the SAME proposal.
+    LinkedRel(
+        "tool_executions",
+        ("tenant_id", "proposal_id", "decision_id"),
+        "policy_decisions",
+        ("tenant_id", "proposal_id", "id"),
+        "RESTRICT",
     ),
 )
 

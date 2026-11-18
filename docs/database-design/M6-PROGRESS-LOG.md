@@ -412,4 +412,114 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 .venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "411 passed"
 ```
 
+---
+
+## Day 4 — Atomic gateway transaction (2026-11-18)
+
+Branch: `feat/m6-day4-atomic-gateway`, created from `origin/main` at `38aa164` (PR #9 merged, head `0006`). The upstream was removed so a stray push cannot target `main`. Baseline before any change: `pytest backend/tests/database`: 411 passed.
+
+**Work mode:** M1, M2 and M4 have not pushed code or answered yet. Everything that does not depend on them is built now. Everything that depends on their decisions is NOT guessed and is listed in **OPEN-DEPENDENCIES** at the end of this log, for one final integration migration.
+
+**Why**
+- DOC-006:155 (M6 Day 4): "Implement atomic transaction wrapping proposal, decision, and tool execution". Deliverable: transactional repository. Exit: "No tool execution recorded without decision".
+- Gate G4 (DOC-006:158): "Decision and audit trail committed".
+- GAP-008 (doc 08:42): "M6 must expose transaction-scoped repository operations … use uniqueness constraints … fault-injection tests at each write boundary".
+- The RESTRICT on the gateway chain was approved by the M6 lead (2026-11-18).
+
+**Built**
+- `backend/app/database/unit_of_work.py`: `UnitOfWork(session_factory, statement_timeout_ms=None, lock_timeout_ms=None)`. Usage: `async with uow(tenant_id) as tx:` with `tx.proposals`, `tx.decisions`, `tx.approvals`, `tx.executions` and `tx.audit`.
+  - One new session and one transaction per block. Normal exit commits; any exception (including cancellation) rolls back and is re-raised. The session is always closed.
+  - All repositories share the session and the tenant. An empty tenant is refused.
+  - The transaction starts with `set_config('app.tenant_id', tenant, true)`. This is transaction-local, so it never leaks to the next user of a pooled connection; it is groundwork for RLS (no policies yet).
+  - Optional, transaction-local `statement_timeout` / `lock_timeout`. Off by default, because the values are an operations decision (OD-14).
+- `backend/app/database/repositories/gateway.py` (tenant-scoped, never commit, store values as given):
+  - `ToolProposalRepository.get_by_idempotency_key`;
+  - `PolicyDecisionRepository.get_for_proposal`;
+  - `ApprovalRepository.list_for_decision` (bounded);
+  - `ToolExecutionRepository.get_for_proposal`;
+  - `AuditEventRepository`: `append`, `list_recent` (newest first, bounded); `update` and `delete` raise `AppendOnlyError`. The database also refuses them (0004).
+- `backend/alembic/versions/0007_gateway_chain_integrity.py` (revision `0007`, parent `0006`):
+  - Parent key `uq_policy_decisions_tenant_id_proposal_id_id`, and `fk_tool_executions_decision_matches_proposal` (`tool_executions (tenant_id, proposal_id, decision_id) -> policy_decisions (tenant_id, proposal_id, id)`, RESTRICT): an execution can no longer cite the decision of another proposal. `decision_id` was already NOT NULL with an FK, so an execution without a decision was already impossible.
+  - CASCADE becomes RESTRICT on `policy_decisions.proposal_id`, `approvals.decision_id`, `tool_executions.proposal_id` and `tool_executions.decision_id`.
+  - Pre-check: if an existing execution cites another proposal's decision, the upgrade stops with the execution ids and changes nothing (skipped in offline mode).
+  - Downgrade restores the exact 0006 state. No rows are deleted in either direction.
+  - **Not included on purpose:** CHECKs on decision, status and execution_status values, and the "execution only if ALLOW" rule. See OD-1 to OD-9.
+- Models (`models/gateway.py`) match the migration. `relationships.py` marks the four chain relations as RESTRICT and adds the new `LinkedRel`. The shared factory handled the new linked FK without changes.
+
+**Tests**
+- `test_unit_of_work.py` (new, 31 tests, real commits, a fresh tenant per test):
+  - full chain commits;
+  - fault injection after every write boundary (proposal, decision, execution, audit), a database error midway, and cancellation all leave nothing;
+  - empty tenant refused; another tenant's entity refused; cross-tenant FK inside the UoW rejected; tenant-scoped reads;
+  - a separate session per UoW;
+  - the tenant setting does not leak on the same pooled connection (same backend pid, verified), after commit or after rollback;
+  - timeouts are transaction-local; a statement timeout cancels and rolls back; invalid timeout values are refused;
+  - two concurrent transactions with the same idempotency key: exactly one commits, the other gets `uq_tenant_idemp_key`;
+  - audit repository is append-only; audit `list_recent` and approvals listing are bounded; lookup keys are validated;
+  - committed chain rows cannot be deleted.
+- `test_gateway_chain.py` (new, raw SQL):
+  - own decision accepted;
+  - another proposal's decision rejected on insert and on update;
+  - missing decision rejected;
+  - the factory builds a consistent execution;
+  - chain parents with dependants cannot be deleted.
+- `test_migrations.py`:
+  - 0007 keeps the existing chain and restricts deletes;
+  - downgrade restores the 0006 CASCADE without deleting rows;
+  - the pre-check stops and lists the ids with no schema change;
+  - offline SQL now covers 0007 and the head is `0007`.
+- The existing parametrized relationship tests now cover the four chain relations as RESTRICT, and the linked FK through `LINKED_RELATIONSHIPS`.
+
+**Test result**
+- `pytest backend/tests/database -q`: **452 passed** (411 + 41 new).
+- `pytest -q` (full backend): **626 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0007`. No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. 3-column FK removed (migration + model): 8 FAILED.
+  - B. `policy_decisions.proposal_id` left as CASCADE: 2 FAILED.
+  - C. UnitOfWork commits even when the block raises: 9 FAILED.
+  - D. `set_config(..., false)` (not transaction-local): 2 FAILED.
+  - E. 0007 pre-check removed: 1 FAILED.
+  - F. Audit repository allows update: 1 FAILED.
+
+**Problems and fixes**
+- Finding: the model/migration drift test (`compare_metadata`) does **not** compare FK `ON DELETE` rules. Proof B passed that test. Delete rules are guarded by `test_relationships_match_expected_list_exactly` and `test_linked_relationships_match_expected_list_exactly`, which did fail. This gap is now documented, so nobody relies on the drift test for delete rules.
+- `UnitOfWork` tests must really commit, so the rollback-per-test `session` fixture cannot be used. Fix: a separate engine per test on the module's temporary database, and a fresh tenant per test, so committed rows never collide. Tenant rows cannot be cleaned up (RESTRICT), so they stay until the temporary database is dropped.
+- The pool-leak test needs a guaranteed connection reuse. Fix: an engine with `pool_size=1, max_overflow=0`, plus an assertion on `pg_backend_pid()`, so the test cannot pass vacuously.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "452 passed"
+```
+
+---
+
+## OPEN-DEPENDENCIES (living list — not implemented on purpose)
+
+Rules: nothing here is guessed or hard-coded in a migration. Each item is applied in **one final integration migration** after the owner pushes code or confirms. "Waits" names the constraint or code that is blocked. Update this list every day.
+
+| ID | Question | Owner | Waits |
+|---|---|---|---|
+| OD-1 | `policy_decisions.decision` values: DOC-005:320 and M5 use `ALLOW/BLOCK/REQUIRES_APPROVAL`; M1's gateway branch writes `REVIEW`. Which set is final? | M4 (+ M1, M5) | CHECK on `policy_decisions.decision` |
+| OD-2 | `policy_decisions.memory_trust` values: DOC-005:321 lists `TRUSTED/SUSPICIOUS/QUARANTINED/NOT_REFERENCED`; M1 also writes `UNVERIFIED`. | M4 (+ M3) | CHECK on `memory_trust` |
+| OD-3 | `policy_decisions.policy_result` values: DOC-005 and M1 agree on `PERMITTED/DENIED/ELEVATED`. Please confirm. | M4 | CHECK on `policy_result` |
+| OD-4 | `policy_decisions.execution_status` values: DOC-005 `EXECUTED/NOT_EXECUTED/PENDING_APPROVAL`; M1 adds `PENDING_EXECUTION/FAILED/UNKNOWN`; M5 types only `EXECUTED/NOT_EXECUTED`. | M1 + M2 + M4 (+ M5) | CHECK on `execution_status` |
+| OD-5 | `tool_executions.status` values: DOC-005 `SUCCESS/FAILED/TIMEOUT`; M1 also writes `UNKNOWN` and `BLOCKED_BY_TOCTOU`. | M2 (+ M1) | CHECK on `tool_executions.status` |
+| OD-6 | Execution rule: may an execution row exist only for an `ALLOW` decision (and an approved `REQUIRES_APPROVAL`)? M1 writes a `BLOCKED_BY_TOCTOU` execution row for an ALLOW decision. | M4 (+ M2) | Trigger on `tool_executions` INSERT |
+| OD-7 | Approval flow: `approvals.status` values (DOC-005 `PENDING/APPROVED/REJECTED`), how many approvals, which status permits execution, approver role. | M4 | CHECK on `approvals.status`; part of the OD-6 trigger |
+| OD-8 | Retries: `tool_executions.proposal_id` is UNIQUE (one execution per proposal). Are retries needed? | M2 | Keep or drop the UNIQUE; possibly an attempt number |
+| OD-9 | Audit vocabulary and `actor_id` format (`event_type`, `action`, `outcome`). | M4 + M1 | CHECKs on `audit_events` (append-only: wrong values cannot be fixed later) |
+| OD-10 | Gateway persistence owner: M1's `SqlAlchemyGatewayRepository` (in M1's `api/gateway.py`), or an M6 adapter on `UnitOfWork` implementing M1's `GatewayRepositoryProtocol`? | M1 | M6 adapter module |
+| OD-11 | Session/transaction owner per request: does M1 open one `UnitOfWork` per request, or does the repository open its own? | M1 | Wiring of `UnitOfWork` into the app |
+| OD-12 | Idempotency source: DB `UNIQUE (tenant_id, idempotency_key)` (M1 code), Redis `SET NX` (TRD:220), or both? M1 maps every `IntegrityError` to "duplicate idempotency key" (409), which hides FK and tenant errors. | M1 (+ M7) | Error mapping in the adapter |
+| OD-13 | Who wires the async M6 repositories into M3's memory services (sync today)? Transaction-scoped memory writes (record + version + edge, GAP-008)? | M3 | M6 memory UoW repositories |
+| OD-14 | Values for `statement_timeout` / `lock_timeout` in production. | M7 (+ M1) | `UnitOfWork(...)` configuration |
+| OD-15 | `sources.status` in the API (DOC-005:716 requires M1/M6/M5 approval of enums); whether ingestion rejects by `trust_state`. | M1 + M5; M4 | API exposure; no DB change needed |
+| OD-16 | `SourceRecord.status` default `"ACTIVE"` and missing `trust_state`; `MembershipRecord.status` default `"ACTIVE"` (fail-open mappings). | M3; M1 | Nothing in the DB; mapping code in their modules |
+| OD-17 | Rollback semantics (new version vs moving `current_version`) and the checkpoint `integrity_hash` method. | M3 + M4 | Day 5 recovery constraints |
+| OD-18 | Restricted app role, RLS, separate migration credential, TLS. | M7 (+ M1) | RLS policies, role grants |
+| OD-19 | Branch model (P2), RBAC source of truth (P7). | M1 + M3 + M4 | Branch/role migrations |
+| OD-20 | DOC-005 does not yet describe migrations 0003–0007. | Project owner | Documentation only |
+
 
