@@ -342,4 +342,74 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 .venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "355 passed"
 ```
 
+---
+
+## M3 requests: source status, provenance edge rules, memory read helpers (2026-11-18)
+
+Branch: `feat/m6-m3-requests`, created from `origin/main` at `404dbdd` (PR #8 merged). The upstream was removed so a stray push cannot target `main`. `main` was green before starting: `pytest backend/tests/database`: 355 passed.
+
+**Why:** M3 asked for these and agreed the design.
+- GAP-003 (gap register line 37) requires ingestion to accept only ACTIVE sources, but DOC-005 has no `sources.status`.
+- DOC-005 line 277 and TRD section 15.2 define the three relation types.
+- GAP-005 (line 39) requires bounded database reads; GAP-008 (line 42) asks for uniqueness constraints.
+
+**Built**
+- `backend/alembic/versions/0006_source_status_and_provenance_edge_rules.py` (revision `0006`, parent `0005`, single head):
+  - `sources.status VARCHAR(32) NOT NULL`, `CHECK (status IN ('ACTIVE','INACTIVE'))` (`ck_sources_status`). Existing rows become INACTIVE; new rows default to ACTIVE. `trust_state` is untouched.
+  - `provenance_edges`:
+    - `ck_provenance_edges_relation_type` (DERIVED_FROM, TRANSFORMED_INTO, SUPERSEDES);
+    - `uq_provenance_edges_tenant_from_to_relation` (tenant_id, from_record_id, to_record_id, relation_type);
+    - `ck_provenance_edges_no_self_loop` (from_record_id <> to_record_id).
+  - Edge direction is not normalised: A->B and B->A are both allowed. Cycle detection stays in M3's service code.
+  - Pre-check: duplicates, self-loops and unknown relation types are looked up first. If any exist, the upgrade stops with the offending ids (up to 20 per kind) and changes nothing. It never deletes data. Offline `--sql` mode skips the pre-check (no data access); PostgreSQL would still refuse the constraints.
+  - **Downgrade:** drops the three edge constraints and the `sources.status` column. Stored status values are lost, and no rows are deleted. A later upgrade sets every existing source to INACTIVE again, so sources must be re-activated explicitly (covered by a test).
+- Models (`models/memory.py`): `Source.status` + CHECK, `SOURCE_STATUSES`, `PROVENANCE_RELATION_TYPES`, and the three edge constraints. The model/migration drift test is clean.
+- `backend/app/database/repositories/memory.py` (async, tenant-scoped, read-only, never commits):
+  - `ProvenanceEdgeRepository.edges_for_record(record_id, limit=50, offset=0) -> EdgePage(edges, has_more, limit, offset)`: edges where the record is `from` OR `to`, ordered by `id`. It fetches `limit + 1` rows to compute `has_more`, with a maximum limit of 100.
+  - `MemoryVersionRepository.current_version_for_record(record_id)`: the version `memory_records.current_version` points to.
+  - `MemoryVersionRepository.highest_version_for_record(record_id)`: the largest version number.
+  - Both version helpers exist because the two can differ (for example after a rollback). Which one counts as eligible is M3's and M4's decision.
+- `repositories/base.py`: `check_page(limit, offset)` is shared by `list()` and the new helper. Non-integer offsets are now rejected too.
+
+**Tests**
+- `test_source_and_edge_rules.py` (new, raw SQL): source status default/allowed/unknown/NULL/update; relation types accepted and rejected; duplicate rejected on insert and update; the same pair with another relation type allowed; reverse direction allowed; self-loop rejected on insert and update; per-tenant independence.
+- `test_memory_repositories.py` (new, ORM): both directions in id order; tenant isolation (edges and versions); paging with `has_more` (true, true, false, then empty); exact fit; at most 100; invalid limit, offset and record_id rejected; current vs highest version, and missing versions.
+- `test_migrations.py`:
+  - 0006 on existing data (sources become INACTIVE, trust_state and edges intact, new rows ACTIVE);
+  - downgrade keeps rows and removes the rules;
+  - re-upgrade after downgrade resets sources to INACTIVE;
+  - the pre-check stops for duplicate, self-loop and bad relation type, listing the ids, with no schema change and no deleted rows;
+  - offline SQL includes 0006 and the head is now `0006`.
+
+**Test result**
+- `pytest backend/tests/database -q`: **411 passed** (355 before + 56 new).
+- `pytest -q` (full backend): **585 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. UNIQUE removed: 4 FAILED.
+  - B. Existing sources back-filled as ACTIVE: 2 FAILED.
+  - C. Pre-check removed: 4 FAILED.
+  - D. Self-loop CHECK removed: 3 FAILED.
+  - E. `has_more` without the extra row: 2 FAILED.
+  - F. Tenant filter dropped from the helpers: 2 FAILED.
+
+**Problems and fixes**
+- A Bash heredoc that contained Python string literals broke the shell quoting again. Fix: wrote the edit script to the scratchpad with the file tool and ran it from there.
+- The convention name for the 4-column UNIQUE would be longer than PostgreSQL's 63-character limit. Fix: an explicit name, `uq_provenance_edges_tenant_from_to_relation`, wrapped in `op.f()` so the naming convention does not rewrite it (same lesson as `ck_memberships_status` in 0003).
+
+**Open points / for other members**
+- **M3:** `SourceRecord.status` still defaults to `"ACTIVE"` and has no `trust_state`, which is fail-open when a record is built from a database row. This was requested from M3, but it is not changed yet on `origin/feat/m3-memory-provenance` (checked at `d018ff1`). It is M3's module, so M6 does not change it.
+- **M3:** M6 repositories are async; the memory services must become async to use them (TRD line 116). GAP-008's transaction-scoped write operations (record + version + edge in one transaction) are not part of this PR.
+- **M4 (+ M3):** whether ingestion must also reject sources by `trust_state` is a trust decision and was not implemented.
+- **M1 + M5:** if `sources.status` is returned by the API, DOC-005 section 8 (line 716) requires their approval of the new enum.
+- **Doc owner:** DOC-005 does not yet list `sources.status` or the new edge constraints.
+- The new UNIQUE starts with `(tenant_id, from_record_id)`, so `idx_provenance_from` is now redundant. It is kept because it is a DOC-005 index; it could be dropped later in its own migration.
+- The Day 4 gateway migration will now be `0007`.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "411 passed"
+```
+
 

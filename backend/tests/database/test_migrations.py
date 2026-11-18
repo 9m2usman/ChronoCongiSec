@@ -269,6 +269,144 @@ def test_0005_refuses_existing_mismatched_checkpoint_item_without_partial_change
 
 
 # ---------------------------------------------------------------------------
+# Migration 0006 (sources.status, provenance edge rules) on existing data
+# ---------------------------------------------------------------------------
+
+
+async def _execute(database: str, *statements: tuple) -> None:
+    conn = await asyncpg.connect(helpers.asyncpg_dsn(database))
+    try:
+        for sql, *args in statements:
+            await conn.execute(sql, *args)
+    finally:
+        await conn.close()
+
+
+_EDGE_INSERT = (
+    "INSERT INTO provenance_edges (id, tenant_id, from_record_id, to_record_id, relation_type) "
+    "VALUES ($1, $2, $3, $4, $5)"
+)
+
+
+async def _seed_sources_and_edges_at_0005(database: str) -> dict[str, str]:
+    """Rows written with the 0005 schema: two sources and valid edges (incl. both directions)."""
+    keys = ("tenant", "src_1", "src_2", "rec_a", "rec_b", "rec_c", "e_ab", "e_ba", "e_ac_t")
+    ids = {k: str(uuid.uuid4()) for k in keys}
+    t = ids["tenant"]
+    await _execute(
+        database,
+        ("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Co', $2)", t, "co-" + t[:8]),
+        ("INSERT INTO sources (id, tenant_id, name) VALUES ($1, $2, 'feed-1')", ids["src_1"], t),
+        ("INSERT INTO sources (id, tenant_id, name, trust_state) VALUES ($1, $2, 'feed-2', 'TRUSTED')",
+         ids["src_2"], t),
+        ("INSERT INTO memory_records (id, tenant_id) VALUES ($1, $2)", ids["rec_a"], t),
+        ("INSERT INTO memory_records (id, tenant_id) VALUES ($1, $2)", ids["rec_b"], t),
+        ("INSERT INTO memory_records (id, tenant_id) VALUES ($1, $2)", ids["rec_c"], t),
+        (_EDGE_INSERT, ids["e_ab"], t, ids["rec_a"], ids["rec_b"], "DERIVED_FROM"),
+        (_EDGE_INSERT, ids["e_ba"], t, ids["rec_b"], ids["rec_a"], "DERIVED_FROM"),
+        (_EDGE_INSERT, ids["e_ac_t"], t, ids["rec_a"], ids["rec_c"], "TRANSFORMED_INTO"),
+    )
+    return ids
+
+
+async def _column_exists(database: str, table: str, column: str) -> bool:
+    row = await _fetchrow(
+        database,
+        "SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2",
+        table,
+        column,
+    )
+    return row is not None
+
+
+async def _count(database: str, table: str, tenant_id: str) -> int:
+    return (await _fetchrow(database, f"SELECT count(*) FROM {table} WHERE tenant_id = $1", tenant_id))[0]
+
+
+def test_0006_keeps_data_and_never_activates_old_sources(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0005")
+    ids = asyncio.run(_seed_sources_and_edges_at_0005(empty_db))
+
+    helpers.upgrade(empty_db, "0006")
+
+    for src, trust in (("src_1", "UNVERIFIED"), ("src_2", "TRUSTED")):
+        row = asyncio.run(_fetchrow(empty_db, "SELECT status, trust_state FROM sources WHERE id = $1", ids[src]))
+        assert row["status"] == "INACTIVE", "pre-existing sources must not be silently activated"
+        assert row["trust_state"] == trust, "trust_state must be untouched"
+    edges = asyncio.run(_fetchrow(
+        empty_db, "SELECT array_agg(id ORDER BY id) AS ids FROM provenance_edges WHERE tenant_id = $1", ids["tenant"]
+    ))
+    assert edges["ids"] == sorted([ids["e_ab"], ids["e_ba"], ids["e_ac_t"]])
+
+    new_source = str(uuid.uuid4())
+    asyncio.run(_execute(
+        empty_db, ("INSERT INTO sources (id, tenant_id, name) VALUES ($1, $2, 'new')", new_source, ids["tenant"])
+    ))
+    assert asyncio.run(_fetchrow(empty_db, "SELECT status FROM sources WHERE id = $1", new_source))[0] == "ACTIVE"
+
+
+def test_0006_downgrade_drops_status_and_rules_but_keeps_rows(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0005")
+    ids = asyncio.run(_seed_sources_and_edges_at_0005(empty_db))
+    helpers.upgrade(empty_db, "0006")
+
+    helpers.downgrade(empty_db, "0005")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0005"
+    assert not asyncio.run(_column_exists(empty_db, "sources", "status"))
+    assert asyncio.run(_count(empty_db, "sources", ids["tenant"])) == 2
+    assert asyncio.run(_count(empty_db, "provenance_edges", ids["tenant"])) == 3
+    # The 0005 behaviour is back: a duplicate edge is accepted again.
+    asyncio.run(_execute(
+        empty_db, (_EDGE_INSERT, str(uuid.uuid4()), ids["tenant"], ids["rec_a"], ids["rec_b"], "DERIVED_FROM")
+    ))
+    # Upgrading again would set every existing source to INACTIVE (documented), but first
+    # the pre-check refuses because of the duplicate inserted above.
+    with pytest.raises(RuntimeError, match="duplicate edges"):
+        helpers.upgrade(empty_db, "0006")
+
+
+def test_0006_reupgrade_after_downgrade_sets_existing_sources_inactive(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0005")
+    ids = asyncio.run(_seed_sources_and_edges_at_0005(empty_db))
+    helpers.upgrade(empty_db, "0006")
+    asyncio.run(_execute(empty_db, ("UPDATE sources SET status = 'ACTIVE' WHERE id = $1", ids["src_1"])))
+
+    helpers.downgrade(empty_db, "0005")
+    helpers.upgrade(empty_db, "0006")
+
+    row = asyncio.run(_fetchrow(empty_db, "SELECT status FROM sources WHERE id = $1", ids["src_1"]))
+    assert row["status"] == "INACTIVE", "downgrade discards status; re-activation must be explicit"
+
+
+@pytest.mark.parametrize("violation", ["duplicate", "self_loop", "bad_relation_type"])
+def test_0006_stops_and_lists_offending_ids_without_changing_anything(empty_db: str, violation: str) -> None:
+    helpers.upgrade(empty_db, "0005")
+    ids = asyncio.run(_seed_sources_and_edges_at_0005(empty_db))
+    bad_id = str(uuid.uuid4())
+    t = ids["tenant"]
+    if violation == "duplicate":
+        row = (_EDGE_INSERT, bad_id, t, ids["rec_a"], ids["rec_b"], "DERIVED_FROM")  # same as e_ab
+        expected = ["duplicate edges", ids["e_ab"], bad_id]
+    elif violation == "self_loop":
+        row = (_EDGE_INSERT, bad_id, t, ids["rec_c"], ids["rec_c"], "DERIVED_FROM")
+        expected = ["self-loop", bad_id]
+    else:
+        row = (_EDGE_INSERT, bad_id, t, ids["rec_b"], ids["rec_c"], "RELATED_TO")
+        expected = ["unknown relation_type", bad_id]
+    asyncio.run(_execute(empty_db, row))
+
+    with pytest.raises(RuntimeError, match="Migration 0006 stopped") as exc_info:
+        helpers.upgrade(empty_db, "0006")
+
+    for text in expected:
+        assert text in str(exc_info.value)
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0005"
+    assert not asyncio.run(_column_exists(empty_db, "sources", "status")), "nothing may change on failure"
+    assert asyncio.run(_count(empty_db, "provenance_edges", t)) == 4, "no edge may be deleted"
+
+
+# ---------------------------------------------------------------------------
 # Offline mode (``alembic upgrade --sql``): SQL generation only, no connection
 # ---------------------------------------------------------------------------
 
@@ -296,15 +434,20 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "fk_approvals_approver_user_id_tenant",            # 0003
         "trg_audit_events_no_truncate",                    # 0004
         "fk_checkpoint_items_version_matches_record",      # 0005
+        "ck_sources_status",                               # 0006 (edge pre-check skipped offline)
+        "ck_provenance_edges_no_self_loop",                # 0006
+        "uq_provenance_edges_tenant_from_to_relation",     # 0006
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
-    assert "UPDATE alembic_version SET version_num='0005'" in sql
+    assert "UPDATE alembic_version SET version_num='0006'" in sql
 
 
 def test_offline_downgrade_generates_sql_back_to_base() -> None:
     sql = _offline_sql("downgrade", "head:base")
 
     for marker in (
+        "DROP CONSTRAINT uq_provenance_edges_tenant_from_to_relation",  # 0006
+        "DROP COLUMN status",                                           # 0006 (sources)
         "DROP CONSTRAINT fk_checkpoint_items_version_matches_record",  # 0005
         "DROP TRIGGER IF EXISTS trg_audit_events_no_truncate",          # 0004
         "DROP CONSTRAINT ck_memberships_status",                        # 0003
