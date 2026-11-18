@@ -579,6 +579,125 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 
 ---
 
+## Day 6 — Append-only audit verification and restricted app role preparation (2026-11-18)
+
+Branch: `feat/m6-day6-audit-and-app-role`, created from `origin/main` at `8202f79` (Day 5 PR #11 merged, head `0008`). Upstream removed. Baseline: `pytest backend/tests/database`: 496 passed.
+
+**Approved by the M6 lead:**
+1. A hash-chained audit with a per-tenant chain and backfill.
+2. Policy decisions immutable except `execution_status`.
+3. App role code and temporary-role tests only; no docker-compose or `.env` changes.
+4. No RLS in the migration: design and OD only.
+
+**Why**
+- DOC-006:187 (M6 Day 6): "Verify append-only constraints on audit events table". Deliverable: audit verification DDL. Exit: "Direct UPDATE/DELETE statements rejected".
+- TRD SEC-010.
+- TRD section 8 "Append-Only Immutability": `audit_events` **and `policy_decisions`** are permanent forensic records.
+- Doc 07:144 and :549: "Append-only/hash-chained audit evidence", "tamper-evident evidence for decisions".
+- Weakness found on Day 1–3: the app connects as a superuser/table owner, who can switch triggers off without leaving a trace.
+
+**Built**
+- `backend/alembic/versions/0009_audit_hash_chain_and_decision_immutability.py` (revision `0009`, parent `0008`):
+  - `audit_events.chain_seq` (1, 2, 3 … per tenant), `prev_hash` and `event_hash`, with `uq_audit_events_tenant_id_chain_seq` and `ck_audit_events_chain_link` (the first event has no `prev_hash`; every later event has one).
+  - `amsc_audit_event_hash(...)`: SHA-256 over the previous hash and every audit field, joined with U+001F. NULLs are coalesced so they cannot shift fields. Timestamps are hashed as UTC epoch seconds, so the result does not depend on DateStyle or the session time zone.
+  - Trigger `trg_audit_events_chain` (BEFORE INSERT): takes a per-tenant advisory transaction lock, reads the tenant's last event, and fills the three columns. Values sent by the caller are ignored.
+  - `amsc_audit_chain_break(tenant_id)`: the first broken `chain_seq` (wrong hash, wrong link, or a gap), or NULL if the chain is intact.
+  - `amsc_audit_protection_report()`: one row per check. It confirms that the append-only, chain and tenant triggers are enabled and that every tenant's chain is intact. Usable by M7/CI.
+  - Trigger `trg_policy_decisions_permanent`: a decision can never be deleted. `proposal_id`, `decision`, `memory_trust`, `policy_result`, `reasons_json`, `incident_id`, `created_at` and `id` cannot change. Only `execution_status` may change.
+  - Downgrade restores the exact 0008 state. The chain columns and their values, the functions and the two new triggers are removed; 0004's triggers stay.
+- **One-time trigger pause for the backfill (documented in the migration):** existing audit rows get their chain in `(occurred_at, id)` order per tenant. Writing the new columns on existing rows is an UPDATE, which 0004 forbids. So `trg_audit_events_no_update_delete` is **disabled for the backfill and enabled again right after, in the same transaction**.
+  - The backfill only writes `chain_seq`, `prev_hash` and `event_hash`. A test compares every original audit field before and after.
+  - If anything fails, the whole migration rolls back and the trigger stays enabled. A test (and proof B) checks that the trigger is enabled after the upgrade.
+  - This requires running migrations as the table owner, which is the owner role's job in the split below.
+- `backend/app/database/roles.py`: SQL generation only, never executed by the application:
+  - `app_role_create_statement(name)`: LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS, with no password (set by M7).
+  - `app_role_grant_statements(name, owner_role=None)`:
+    - DML on application tables;
+    - `audit_events`: SELECT and INSERT only;
+    - `policy_decisions`: SELECT, INSERT and `UPDATE (execution_status)` only;
+    - nothing on `alembic_version`; TRUNCATE revoked everywhere;
+    - default privileges for future tables.
+  - `app_role_script(...)` gives M7 the whole script. `APP_ROLE_ATTRIBUTES_SQL` and `TABLES_OWNED_BY_ROLE_SQL` are read-only checks.
+  - Role names are validated against `^[a-z_][a-z0-9_]{0,62}$` (no SQL injection through names).
+- `AuditEventRepository.append` refuses caller-set chain values and returns the database-assigned ones. `list_recent` orders by `chain_seq`; the new `chain_break()` calls the verification function.
+- Test helpers: `create_temp_login_role` / `drop_temp_login_role` with a strict `^amsc_test_role_[0-9a-f]{16}$` guard (same idea as the temporary databases), and `role_dsn`.
+
+**Tests**
+- `test_audit_chain.py` (new):
+  - per-tenant linked chains; caller values ignored; the hash covers every field;
+  - tamper detection: an edited event, an edit with a recomputed hash (caught at the next link), a deleted middle event;
+  - documented limit: tail truncation is not detectable without an external anchor;
+  - CHECK and UNIQUE hold even with the chain trigger bypassed;
+  - the protection report is green when healthy and red after tampering;
+  - 12 concurrent committed inserts give one gapless chain;
+  - the repository returns the database chain values.
+- `test_decision_permanence.py` (new): every content column is immutable; references cannot be attached or moved; `execution_status` stays updatable; delete is always refused; an incident cited by a decision cannot be deleted, while an uncited one can.
+- `test_app_role.py` (new; a temporary login role, always dropped):
+  - no dangerous attributes and owns no tables;
+  - can append audit events and gets a chain;
+  - cannot UPDATE/DELETE/TRUNCATE audit events, disable or drop triggers, or switch to `session_replication_role = replica` (42501);
+  - can update `execution_status` but cannot change or delete decisions;
+  - ordinary DML works; cannot create tables, read `alembic_version`, TRUNCATE, or disable the tenant trigger;
+  - can read the protection report;
+  - role names are validated; the script content is checked (no password);
+  - no temporary roles are left behind.
+- `test_migrations.py`:
+  - 0009 backfills chains in time order without changing any audit field and re-enables the trigger;
+  - downgrade restores 0008 and keeps the rows;
+  - re-upgrade rebuilds valid chains;
+  - offline SQL includes the pause/enable and the new triggers (head `0009`).
+- Existing tests updated to expect the **stronger** permanent-decision rejection (SQLSTATE 55000) where it now fires before the FK check. Every case still asserts that nothing changed:
+  - re-pointing `policy_decisions.proposal_id` / `incident_id`;
+  - deleting a decision that has approvals or executions;
+  - the UoW delete test.
+  - Deleting an incident cited by a decision is now refused, even though the FK says SET NULL, because `incident_id` is permanent (a deliberate consequence of decision 2).
+
+**Test result**
+- `pytest backend/tests/database -q`: **552 passed** (496 + 56 new).
+- `pytest -q` (full backend): **726 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0009`. No `amsc_test_*` databases and no `amsc_test_role_*` roles were left behind. The dev database `amsc` was not touched.
+- The machine was slow today: the DB suite took about 5.5 minutes instead of about 1.5.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. Chain not linked to the previous event: 10 FAILED.
+  - B. Backfill forgets to re-enable the append-only trigger: 5 FAILED.
+  - C. Verification skips the hash comparison: 2 FAILED.
+  - D. Hash does not cover `actor_id`: 1 FAILED.
+  - E. `decision` column left mutable: 1 FAILED.
+  - F. App role keeps UPDATE on `audit_events`: 2 FAILED.
+  - G. App role may TRUNCATE: 1 FAILED.
+  - No temporary roles were left after the proofs.
+
+**Problems and fixes**
+- `asyncpg.Connection` uses `__slots__`, so the test fixture could not attach the role name to it. Fix: the test reads `SELECT current_user`.
+- asyncpg sends typed parameters, so a string for a `timestamptz` parameter is rejected. Fix: `$3::text::timestamptz` in the seed SQL.
+- Hashing `occurred_at` as text would depend on DateStyle and the time zone. Fix: `extract(epoch FROM occurred_at)::text`.
+- `concat_ws` silently skips NULLs, which could let two different rows hash alike. Fix: `coalesce` on the nullable fields (`prev_hash`, `trace_id`).
+- The plpgsql variable `name` in the report function shadowed the `name` type and was confusing. Renamed to `trigger_name`.
+- Concurrency of the chain: inserts for the same tenant are serialised by a per-tenant advisory lock (other tenants are not blocked). This is correct under READ COMMITTED, the default. Under REPEATABLE READ/SERIALIZABLE a concurrent insert fails with the UNIQUE violation instead of forking the chain, which is a safe failure.
+
+**Note for the project owner about migration 0004 (no change made; merged migrations are not edited)**
+- 0004 creates `prevent_audit_event_mutation()` with `CREATE OR REPLACE` and without the `amsc_` prefix used by the other M6 functions. `CREATE OR REPLACE` would silently overwrite a same-named function.
+- Migration 0009 relies on 0004's trigger name `trg_audit_events_no_update_delete` for the one-time pause. Please do not rename it without a new migration.
+- 0004's own tests were strengthened on 2026-11-18 (exact SQLSTATE 55000 and unchanged rows).
+
+**RLS design (not implemented; OD-11 and OD-18)**
+- Policy per tenant table: `ENABLE` + `FORCE ROW LEVEL SECURITY`, with `USING (tenant_id = current_setting('app.tenant_id', true))` and the same `WITH CHECK`. If the setting is missing, the result is NULL, no rows match, and access fails closed.
+- `UnitOfWork` already sets `app.tenant_id` transaction-locally (Day 4), with a tested no-leak guarantee.
+- Global tables (`tenants`, `users`, `permissions`, `role_permissions`) stay without policies. `roles` needs `tenant_id IS NULL OR tenant_id = setting`.
+- Blockers before enabling:
+  - (1) the login path reads `memberships` before a tenant is known; it needs a narrow `SECURITY DEFINER` function or a separate auth role (M1);
+  - (2) every request and background job must run through a tenant-scoped transaction (M1/M2/M3);
+  - (3) the app must connect as the non-owner `amsc_app` (M7). Owners and superusers bypass RLS unless `FORCE` is set, and superusers always bypass it.
+- Enabling RLS before (1) and (2) would break login on the day M7 switches the role. That is why it is not in 0009.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "552 passed"
+```
+
+---
+
 ## OPEN-DEPENDENCIES (living list — not implemented on purpose)
 
 Rules: nothing here is guessed or hard-coded in a migration. Each item is applied in **one final integration migration** after the owner pushes code or confirms. "Waits" names the constraint or code that is blocked. Update this list every day.
@@ -595,19 +714,21 @@ Rules: nothing here is guessed or hard-coded in a migration. Each item is applie
 | OD-8 | Retries: `tool_executions.proposal_id` is UNIQUE (one execution per proposal). Are retries needed? | M2 | Keep or drop the UNIQUE; possibly an attempt number |
 | OD-9 | Audit vocabulary and `actor_id` format (`event_type`, `action`, `outcome`). | M4 + M1 | CHECKs on `audit_events` (append-only: wrong values cannot be fixed later) |
 | OD-10 | Gateway persistence owner: M1's `SqlAlchemyGatewayRepository` (in M1's `api/gateway.py`), or an M6 adapter on `UnitOfWork` implementing M1's `GatewayRepositoryProtocol`? | M1 | M6 adapter module |
-| OD-11 | Session/transaction owner per request: does M1 open one `UnitOfWork` per request, or does the repository open its own? | M1 | Wiring of `UnitOfWork` into the app |
+| OD-11 | Session/transaction owner per request: does M1 open one `UnitOfWork` per request, or does the repository open its own? **Updated Day 6:** RLS also needs (a) every request and background job inside a tenant-scoped transaction that sets `app.tenant_id` (the UoW already does this), and (b) a login path that can read `tenants`/`users`/`memberships` before a tenant is known (a `SECURITY DEFINER` function or a separate auth role). | M1 (+ M2, M3 for jobs) | Wiring of `UnitOfWork`; RLS policies (design in the Day 6 entry) |
 | OD-12 | Idempotency source: DB `UNIQUE (tenant_id, idempotency_key)` (M1 code), Redis `SET NX` (TRD:220), or both? M1 maps every `IntegrityError` to "duplicate idempotency key" (409), which hides FK and tenant errors. | M1 (+ M7) | Error mapping in the adapter |
 | OD-13 | Who wires the async M6 repositories into M3's memory services (sync today)? Transaction-scoped memory writes (record + version + edge, GAP-008)? | M3 | M6 memory UoW repositories |
 | OD-14 | Values for `statement_timeout` / `lock_timeout` in production. | M7 (+ M1) | `UnitOfWork(...)` configuration |
 | OD-15 | `sources.status` in the API (DOC-005:716 requires M1/M6/M5 approval of enums); whether ingestion rejects by `trust_state`. | M1 + M5; M4 | API exposure; no DB change needed |
 | OD-16 | `SourceRecord.status` default `"ACTIVE"` and missing `trust_state`; `MembershipRecord.status` default `"ACTIVE"` (fail-open mappings). | M3; M1 | Nothing in the DB; mapping code in their modules |
 | OD-17 | Rollback semantics: append a new version or move `current_version` back? Day 5 provides both building blocks (`append_version`, `compare_and_set_current_version`). Also the checkpoint `integrity_hash` method (DOC-005: "Merkle or combined SHA-256"). | M3 + M4 | Which restore callback M4/M3 use; a CHECK/verification for `checkpoints.integrity_hash` |
-| OD-18 | Restricted app role, RLS, separate migration credential, TLS. | M7 (+ M1) | RLS policies, role grants |
+| OD-18 | Restricted app role, RLS, separate migration credential, TLS. **Updated Day 6:** M6 now provides `backend/app/database/roles.py` (create statement, grants, full script, read-only checks), proven by temporary-role tests. M7 needs to: create the owner role (runs migrations, owns tables) and `amsc_app` (via `app_role_script`) in docker-compose / `.env.example` / CI; set passwords outside the repo; point the app's `DATABASE_URL` at `amsc_app` and Alembic at the owner; give the CI test user `CREATEROLE` (the role tests create temporary roles); run `amsc_audit_protection_report()` in CI. | M7 (+ M1) | Applying the role split; RLS policies (also OD-11) |
 | OD-19 | Branch model (P2), RBAC source of truth (P7). | M1 + M3 + M4 | Branch/role migrations |
-| OD-20 | DOC-005 does not yet describe migrations 0003–0008 (including the new `recovery_plans.pre_recovery_snapshot_sha256` column). | Project owner | Documentation only |
+| OD-20 | DOC-005 does not yet describe migrations 0003–0009 (including `recovery_plans.pre_recovery_snapshot_sha256` and the audit chain columns). | Project owner | Documentation only |
 | OD-21 | Recovery vocabulary: `recovery_plans.status` values and allowed transitions (DOC-005 `PENDING/PREVIEWED/EXECUTED/FAILED`), `recovery_actions.action_taken` / `outcome` values, and the trust state of restored records (TRD section 18: TRUSTED only after revalidation, else UNVERIFIED/quarantine). | M4 (+ M3) | CHECKs on plan status / action values; possibly a status-transition trigger |
 | OD-22 | Owner of `api/recovery.py`: DOC-006:171 names M6, `ownership.md` names M4. M6 delivered the DB layer (`RewindCoordinator`) only. | Project owner + M4 | API route wiring |
 | OD-23 | Where to record irreversible external actions executed before a rollback (TRD section 18, "Honest Outcome Classification"). | M4 + M2 | Possibly a column or table, plus the restore callback |
+| OD-25 | TRD section 8 says `policy_decisions` are fully permanent, but M1's gateway updates `policy_decisions.execution_status` after the tool runs. 0009 keeps `execution_status` as the only mutable column. Should the execution outcome live only in `tool_executions`, so decisions become fully append-only? | M1 + M4 | Making `execution_status` immutable too (trigger + revoking the column grant in `roles.py`) |
+| OD-26 | External anchoring of the audit chain head (TRD :517 Merkle log sealing, "Phase 2"; GAP-011 KMS/HSM). Without it, a superuser can rebuild a whole chain or cut its tail undetected (tested limit). | Project owner + M4 + M7 | Anchor table/export job and its verification |
 | OD-24 | Memory-side CASCADE paths still open: deleting a `memory_records`/`memory_versions` row cascades into versions, provenance, retrieval history, quarantines and checkpoint items (0002/0005). Should memory rows ever be physically deleted? | M3 + M4 | RESTRICT on the memory-side FKs |
 
 

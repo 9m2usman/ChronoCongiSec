@@ -7,7 +7,7 @@ trace_spans, audit_events, outbox_events.
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -105,7 +105,15 @@ class TraceSpan(Base):
 
 
 class AuditEvent(Base):
-    """Append-only system log (immutability enforced on Day 6)."""
+    """Append-only, hash-chained system log.
+
+    - Migration 0004: UPDATE / DELETE / TRUNCATE are rejected by triggers.
+    - Migration 0009: every tenant has its own hash chain. A BEFORE INSERT trigger assigns
+      ``chain_seq`` (1, 2, 3 ... per tenant), ``prev_hash`` (the previous event's hash, NULL
+      for the first) and ``event_hash`` (``amsc_audit_event_hash(...)``). Values supplied by
+      the caller for these three columns are ignored. ``amsc_audit_chain_break(tenant_id)``
+      returns the first broken ``chain_seq`` (NULL if the chain is intact).
+    """
 
     __tablename__ = "audit_events"
 
@@ -119,6 +127,18 @@ class AuditEvent(Base):
     trace_id: Mapped[Optional[str]] = mapped_column(String(TRACE_ID_LENGTH))
     details_json: Mapped[dict[str, Any]] = jsonb_object_column()
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=NOW)
+    # Filled by the database trigger (0009); never set these from application code.
+    chain_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "chain_seq"),
+        CheckConstraint(
+            "(chain_seq = 1 AND prev_hash IS NULL) OR (chain_seq > 1 AND prev_hash IS NOT NULL)",
+            name="chain_link",
+        ),
+    )
 
 
 Index("idx_audit_tenant_occurred", AuditEvent.tenant_id, AuditEvent.occurred_at.desc())

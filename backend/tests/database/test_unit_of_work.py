@@ -415,8 +415,9 @@ async def test_gateway_chain_rows_cannot_be_deleted_once_committed(session_facto
         decision = await tx.decisions.add(_decision(proposal.id))
         await tx.executions.add(_execution(proposal.id, decision.id))
 
+    # Proposal: RESTRICT FK (IntegrityError). Decision: permanent-record trigger (0009, SQLSTATE 55000).
     for repo_name, entity_id in (("proposals", proposal.id), ("decisions", decision.id)):
-        with pytest.raises(IntegrityError):
+        with pytest.raises(DBAPIError):
             async with uow(tenant_id) as tx:
                 await getattr(tx, repo_name).delete(entity_id)
 
