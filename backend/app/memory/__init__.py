@@ -13,6 +13,8 @@ from .models import (
     MemoryIngestRequest,
     MemoryRecord,
     MemoryRecordResponse,
+    MemoryRefCheck,
+    MemoryRefStatus,
     MemoryVersion,
     ProvenanceEdge,
     ProvenanceRelationType,
@@ -34,10 +36,12 @@ from .repository import (
     reset_default_repository,
 )
 from .retrieval import (
+    MAX_MEMORY_REFS_PER_PROPOSAL,
     MemoryNotFoundError,
     get_memory_detail,
     retrieve_memory,
     transition_memory_trust_state,
+    verify_memory_refs,
 )
 from .versioning import update_memory
 
@@ -74,4 +78,8 @@ __all__ = [
     "VALID_RELATION_TYPES",
     "sha256_hex",
     "verify_checksum",
+    "MemoryRefCheck",
+    "MemoryRefStatus",
+    "verify_memory_refs",
+    "MAX_MEMORY_REFS_PER_PROPOSAL",
 ]

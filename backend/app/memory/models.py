@@ -30,6 +30,30 @@ class TrustState(str, Enum):
     SUPERSEDED = "SUPERSEDED"
 
 
+class MemoryRefStatus(str, Enum):
+    """Status outcomes for memory reference verification by Gateway (Gate G4)."""
+    OK = "OK"
+    NOT_FOUND = "NOT_FOUND"
+    INTEGRITY_FAILED = "INTEGRITY_FAILED"
+    INVALID_REF = "INVALID_REF"
+    DUPLICATE_REF = "DUPLICATE_REF"
+    ERROR = "ERROR"
+
+
+class MemoryRefCheck(BaseModel):
+    """Outcome of validating a single memory reference in an action proposal.
+    
+    Holds verification status, trust state (if found), version, and reason.
+    """
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    record_id: Optional[str] = None
+    status: MemoryRefStatus
+    trust_state: Optional[str] = None
+    current_version: Optional[int] = None
+    reason: str
+
+
 class ProvenanceRelationType(str, Enum):
     """Provenance edge relation types as defined in Document 02 §15.2 and Document 05 Table 14."""
     DERIVED_FROM = "DERIVED_FROM"
