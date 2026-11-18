@@ -17,7 +17,7 @@ those owners confirm.
 from collections.abc import Sequence
 from typing import Any, NoReturn, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.database.models import (
     Approval,
@@ -89,25 +89,40 @@ class ToolExecutionRepository(TenantScopedRepository[ToolExecution]):
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
 
+CHAIN_COLUMNS = ("chain_seq", "prev_hash", "event_hash")
+
+
 class AuditEventRepository(TenantScopedRepository[AuditEvent]):
-    """Insert and read only. The database rejects UPDATE/DELETE/TRUNCATE too (migration 0004)."""
+    """Insert and read only. The database rejects UPDATE/DELETE/TRUNCATE too (migration 0004)
+    and assigns the per-tenant hash chain on insert (migration 0009)."""
 
     model = AuditEvent
 
     async def append(self, event: AuditEvent) -> AuditEvent:
-        return await self.add(event)
+        """Insert one event; the returned object carries the chain values the database assigned."""
+        for column in CHAIN_COLUMNS:
+            if getattr(event, column) is not None:
+                raise ValueError(f"{column} is assigned by the database; do not set it")
+        await self.add(event)
+        await self.session.refresh(event, attribute_names=list(CHAIN_COLUMNS) + ["occurred_at"])
+        return event
 
     async def list_recent(self, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0) -> Sequence[AuditEvent]:
-        """Newest first (uses idx_audit_tenant_occurred), bounded."""
+        """Newest first by the tenant's chain order (UNIQUE (tenant_id, chain_seq)), bounded."""
         check_page(limit, offset)
         stmt = (
             select(AuditEvent)
             .where(AuditEvent.tenant_id == self.tenant_id)
-            .order_by(AuditEvent.occurred_at.desc(), AuditEvent.id)
+            .order_by(AuditEvent.chain_seq.desc())
             .limit(limit)
             .offset(offset)
         )
         return (await self.session.execute(stmt)).scalars().all()
+
+    async def chain_break(self) -> Optional[int]:
+        """First broken chain_seq of this tenant's audit chain, or None if it is intact."""
+        stmt = select(func.amsc_audit_chain_break(self.tenant_id))
+        return (await self.session.execute(stmt)).scalar()
 
     async def update(self, entity_id: str, **values: Any) -> NoReturn:
         raise AppendOnlyError("audit_events is append-only; updates are not allowed")

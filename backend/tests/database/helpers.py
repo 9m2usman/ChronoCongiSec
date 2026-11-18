@@ -141,6 +141,57 @@ def drop_temp_database(name: str) -> None:
     asyncio.run(_admin_execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 
+TEMP_ROLE_PREFIX = "amsc_test_role_"
+TEMP_ROLE_PATTERN = re.compile(r"^amsc_test_role_[0-9a-f]{16}$")
+
+
+def check_temp_role_name(name: str) -> str:
+    """Only roles produced by ``create_temp_login_role`` may ever be dropped."""
+    if not isinstance(name, str) or not TEMP_ROLE_PATTERN.fullmatch(name):
+        raise UnsafeTestDatabaseError(f"Refusing to touch non-test role {name!r}")
+    return name
+
+
+async def create_temp_login_role(create_statement_for) -> tuple[str, str]:
+    """Create a throwaway LOGIN role (cluster-wide) and return (name, password).
+
+    ``create_statement_for(name)`` returns the CREATE ROLE statement under test
+    (``backend.app.database.roles.app_role_create_statement``). Needs CREATEROLE.
+    """
+    name = check_temp_role_name(f"{TEMP_ROLE_PREFIX}{uuid.uuid4().hex[:16]}")
+    password = uuid.uuid4().hex
+    conn = await asyncpg.connect(asyncpg_dsn(MAINTENANCE_DATABASE))
+    try:
+        await conn.execute(create_statement_for(name))
+        await conn.execute(f"ALTER ROLE \"{name}\" PASSWORD '{password}'")  # generated hex only
+    finally:
+        await conn.close()
+    return name, password
+
+
+async def drop_temp_login_role(name: str, databases: list[str]) -> None:
+    """Remove the role's privileges in each database, then drop the role."""
+    check_temp_role_name(name)
+    for database in databases:
+        check_temp_database_name(database)
+        conn = await asyncpg.connect(asyncpg_dsn(database))
+        try:
+            await conn.execute(f'DROP OWNED BY "{name}"')
+        finally:
+            await conn.close()
+    conn = await asyncpg.connect(asyncpg_dsn(MAINTENANCE_DATABASE))
+    try:
+        await conn.execute(f'DROP ROLE IF EXISTS "{name}"')
+    finally:
+        await conn.close()
+
+
+def role_dsn(database: str, role: str, password: str) -> str:
+    """asyncpg DSN for the test server, logging in as ``role``."""
+    url = _server_url().set(drivername="postgresql", database=database, username=role, password=password)
+    return url.render_as_string(hide_password=False)
+
+
 def alembic_config(database: str) -> Config:
     cfg = Config(str(ALEMBIC_INI))
     cfg.attributes["database_url"] = sqlalchemy_url(database)

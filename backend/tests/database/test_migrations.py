@@ -598,6 +598,101 @@ def test_0008_stops_and_lists_offending_ids_without_changing_anything(
 
 
 # ---------------------------------------------------------------------------
+# Migration 0009 (audit hash chain, permanent decisions) on existing data
+# ---------------------------------------------------------------------------
+
+_AUDIT_FIELDS = "id, tenant_id, actor_id, event_type, resource_id, action, outcome, trace_id, details_json, occurred_at"
+
+
+async def _seed_audit_at_0008(database: str) -> dict[str, str]:
+    """Two tenants with audit events inserted OUT of time order, plus one policy decision."""
+    keys = ("t1", "t2", "a_late", "a_early", "a_mid", "b_only", "agent", "proposal", "decision")
+    ids = {k: str(uuid.uuid4()) for k in keys}
+    audit = (
+        "INSERT INTO audit_events (id, tenant_id, actor_id, event_type, resource_id, action, outcome, occurred_at) "
+        "VALUES ($1, $2, 'actor', 'E', 'r', 'x', 'o', $3::text::timestamptz)"
+    )
+    await _execute(
+        database,
+        ("INSERT INTO tenants (id, name, slug) VALUES ($1, 'One', $2)", ids["t1"], "co-" + ids["t1"][:8]),
+        ("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Two', $2)", ids["t2"], "co-" + ids["t2"][:8]),
+        (audit, ids["a_late"], ids["t1"], "2026-11-18T12:00:00+00:00"),
+        (audit, ids["a_early"], ids["t1"], "2026-11-18T10:00:00+00:00"),
+        (audit, ids["a_mid"], ids["t1"], "2026-11-18T11:00:00+00:00"),
+        (audit, ids["b_only"], ids["t2"], "2026-11-18T09:00:00+00:00"),
+        ("INSERT INTO agents (id, tenant_id, name) VALUES ($1, $2, 'bot')", ids["agent"], ids["t1"]),
+        ("INSERT INTO tool_proposals (id, tenant_id, agent_id, action_id, tool_name, operation, idempotency_key, "
+         "trace_id) VALUES ($1, $2, $3, 'a', 't', 'o', $1, 'tr')", ids["proposal"], ids["t1"], ids["agent"]),
+        ("INSERT INTO policy_decisions (id, tenant_id, proposal_id, decision, memory_trust, policy_result) "
+         "VALUES ($1, $2, $3, 'X', 'X', 'X')", ids["decision"], ids["t1"], ids["proposal"]),
+    )
+    return ids
+
+
+async def _fetch(database: str, sql: str, *args):
+    conn = await asyncpg.connect(helpers.asyncpg_dsn(database))
+    try:
+        return await conn.fetch(sql, *args)
+    finally:
+        await conn.close()
+
+
+def test_0009_backfills_chains_in_time_order_without_changing_audit_fields(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0008")
+    ids = asyncio.run(_seed_audit_at_0008(empty_db))
+    before = asyncio.run(_fetch(empty_db, f"SELECT {_AUDIT_FIELDS} FROM audit_events ORDER BY id"))
+
+    helpers.upgrade(empty_db, "0009")
+
+    after = asyncio.run(_fetch(empty_db, f"SELECT {_AUDIT_FIELDS} FROM audit_events ORDER BY id"))
+    assert [dict(r) for r in after] == [dict(r) for r in before], "the backfill may only add chain columns"
+    order = asyncio.run(_fetch(empty_db, "SELECT id FROM audit_events WHERE tenant_id = $1 ORDER BY chain_seq",
+                               ids["t1"]))
+    assert [r["id"] for r in order] == [ids["a_early"], ids["a_mid"], ids["a_late"]]
+    for tenant in ("t1", "t2"):
+        assert asyncio.run(_fetchrow(empty_db, "SELECT amsc_audit_chain_break($1)", ids[tenant]))[0] is None
+    report = asyncio.run(_fetch(empty_db, "SELECT ok FROM amsc_audit_protection_report()"))
+    assert report and all(r["ok"] for r in report), "the paused trigger must be enabled again"
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+        asyncio.run(_execute(empty_db, ("UPDATE audit_events SET action = 'T' WHERE id = $1", ids["a_mid"])))
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+        asyncio.run(_execute(empty_db, ("UPDATE policy_decisions SET decision = 'Y' WHERE id = $1", ids["decision"])))
+
+
+def test_0009_downgrade_restores_0008_and_keeps_audit_rows(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0008")
+    ids = asyncio.run(_seed_audit_at_0008(empty_db))
+    before = asyncio.run(_fetch(empty_db, f"SELECT {_AUDIT_FIELDS} FROM audit_events ORDER BY id"))
+    helpers.upgrade(empty_db, "0009")
+
+    helpers.downgrade(empty_db, "0008")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0008"
+    for column in ("chain_seq", "prev_hash", "event_hash"):
+        assert not asyncio.run(_column_exists(empty_db, "audit_events", column))
+    after = asyncio.run(_fetch(empty_db, f"SELECT {_AUDIT_FIELDS} FROM audit_events ORDER BY id"))
+    assert [dict(r) for r in after] == [dict(r) for r in before]
+    functions = asyncio.run(_fetch(empty_db, "SELECT proname FROM pg_proc WHERE proname LIKE 'amsc_audit%'"))
+    assert functions == []
+    # 0004 still protects audit rows; decisions are updatable again (0008 behaviour).
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError):
+        asyncio.run(_execute(empty_db, ("UPDATE audit_events SET action = 'T' WHERE id = $1", ids["a_mid"])))
+    asyncio.run(_execute(empty_db, ("UPDATE policy_decisions SET decision = 'Y' WHERE id = $1", ids["decision"])))
+
+
+def test_0009_reupgrade_after_downgrade_rebuilds_valid_chains(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0008")
+    ids = asyncio.run(_seed_audit_at_0008(empty_db))
+    helpers.upgrade(empty_db, "0009")
+    helpers.downgrade(empty_db, "0008")
+
+    helpers.upgrade(empty_db, "0009")
+
+    for tenant in ("t1", "t2"):
+        assert asyncio.run(_fetchrow(empty_db, "SELECT amsc_audit_chain_break($1)", ids[tenant]))[0] is None
+
+
+# ---------------------------------------------------------------------------
 # Offline mode (``alembic upgrade --sql``): SQL generation only, no connection
 # ---------------------------------------------------------------------------
 
@@ -633,15 +728,21 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "ck_recovery_plans_snapshot_hash_consistent",      # 0008 (pre-check skipped offline)
         "trg_protect_recovery_snapshot",                   # 0008
         "trg_require_recovery_snapshot",                   # 0008
+        "DISABLE TRIGGER trg_audit_events_no_update_delete",  # 0009 one-time backfill pause
+        "ENABLE TRIGGER trg_audit_events_no_update_delete",   # 0009
+        "trg_audit_events_chain",                          # 0009
+        "trg_policy_decisions_permanent",                  # 0009
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
-    assert "UPDATE alembic_version SET version_num='0008'" in sql
+    assert "UPDATE alembic_version SET version_num='0009'" in sql
 
 
 def test_offline_downgrade_generates_sql_back_to_base() -> None:
     sql = _offline_sql("downgrade", "head:base")
 
     for marker in (
+        "DROP TRIGGER trg_policy_decisions_permanent",                   # 0009
+        "DROP COLUMN chain_seq",                                         # 0009
         "DROP TRIGGER trg_require_recovery_snapshot",                    # 0008
         "DROP COLUMN pre_recovery_snapshot_sha256",                      # 0008
         "DROP CONSTRAINT fk_tool_executions_decision_matches_proposal",  # 0007

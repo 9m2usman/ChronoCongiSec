@@ -10,6 +10,11 @@ docs/database-design/M6-PROGRESS-LOG.md.
 Day 4 (migration 0007): the whole proposal -> decision -> approval/execution chain
 is ON DELETE RESTRICT, and an execution's decision must belong to its proposal.
 
+Day 6 (migration 0009, TRD section 8 "Append-Only Immutability"): a committed policy
+decision is permanent. A trigger rejects any DELETE and any UPDATE of its content; only
+``execution_status`` may still change, because the gateway records the execution outcome
+there (see OD-25).
+
 Forensic history (migration 0003): every table here uses ``tenant_id ... ON DELETE
 RESTRICT``, and ``tool_proposals.agent_id`` is RESTRICT, so deleting a tenant or an
 agent can never silently erase proposals, decisions, approvals or executions.

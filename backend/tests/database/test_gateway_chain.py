@@ -84,7 +84,9 @@ async def test_chain_parents_with_dependants_cannot_be_deleted(factory: RowFacto
     await factory.create("approvals", tenant, decision_id=decision)
     target = proposal if column == "proposal" else decision
 
-    with pytest.raises(asyncpg.ForeignKeyViolationError):
+    # A proposal is protected by RESTRICT; a decision by its permanent-record trigger (0009).
+    expected = asyncpg.ForeignKeyViolationError if table == "tool_proposals" else asyncpg.ObjectNotInPrerequisiteStateError
+    with pytest.raises(expected):
         async with tx_conn.transaction():
             await tx_conn.execute(f"DELETE FROM {table} WHERE id = $1", target)
 
