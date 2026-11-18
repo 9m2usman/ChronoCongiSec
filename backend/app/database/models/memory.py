@@ -14,7 +14,7 @@ because ``metadata`` is reserved by SQLAlchemy's declarative base.
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import CheckConstraint, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.database.base import (
@@ -30,6 +30,18 @@ from backend.app.database.base import (
 )
 
 
+# Source lifecycle (migration 0006, requested by M3; GAP-003 requires ingestion to accept
+# only ACTIVE sources). Lifecycle only: trust is tracked separately in trust_state.
+SOURCE_STATUSES = ("ACTIVE", "INACTIVE")
+
+# DOC-005 Table 14 / TRD section 15.2.
+PROVENANCE_RELATION_TYPES = ("DERIVED_FROM", "TRANSFORMED_INTO", "SUPERSEDES")
+
+
+def _in_list(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN (" + ", ".join(f"'{v}'" for v in values) + ")"
+
+
 class Source(Base):
     __tablename__ = "sources"
 
@@ -41,9 +53,14 @@ class Source(Base):
     )
     uri: Mapped[Optional[str]] = mapped_column(String(1024))
     trust_state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'UNVERIFIED'"))
+    # New rows default to ACTIVE; rows that existed before 0006 were set to INACTIVE.
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
     created_at: Mapped[datetime] = created_at_column()
 
-    __table_args__ = (tenant_parent_key(),)
+    __table_args__ = (
+        tenant_parent_key(),
+        CheckConstraint(_in_list("status", SOURCE_STATUSES), name="status"),
+    )
 
 
 class Document(Base):
@@ -134,6 +151,14 @@ class ProvenanceEdge(Base):
         # DOC-005 indexes already lead with (tenant_id, <ref>), so no extra FK index.
         Index("idx_provenance_from", "tenant_id", "from_record_id"),
         Index("idx_provenance_to", "tenant_id", "to_record_id"),
+        # Migration 0006 (requested by M3). Edges stay directional: A->B and B->A are
+        # different edges; the database does not reinterpret or normalise direction.
+        UniqueConstraint(
+            "tenant_id", "from_record_id", "to_record_id", "relation_type",
+            name="uq_provenance_edges_tenant_from_to_relation",
+        ),
+        CheckConstraint(_in_list("relation_type", PROVENANCE_RELATION_TYPES), name="relation_type"),
+        CheckConstraint("from_record_id <> to_record_id", name="no_self_loop"),
         *tenant_fk("provenance_edges", "from_record_id", "memory_records", "CASCADE", index=False),
         *tenant_fk("provenance_edges", "to_record_id", "memory_records", "CASCADE", index=False),
     )

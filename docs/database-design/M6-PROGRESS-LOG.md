@@ -342,4 +342,460 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 .venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "355 passed"
 ```
 
+---
+
+## M3 requests: source status, provenance edge rules, memory read helpers (2026-11-18)
+
+Branch: `feat/m6-m3-requests`, created from `origin/main` at `404dbdd` (PR #8 merged). The upstream was removed so a stray push cannot target `main`. `main` was green before starting: `pytest backend/tests/database`: 355 passed.
+
+**Why:** M3 asked for these and agreed the design.
+- GAP-003 (gap register line 37) requires ingestion to accept only ACTIVE sources, but DOC-005 has no `sources.status`.
+- DOC-005 line 277 and TRD section 15.2 define the three relation types.
+- GAP-005 (line 39) requires bounded database reads; GAP-008 (line 42) asks for uniqueness constraints.
+
+**Built**
+- `backend/alembic/versions/0006_source_status_and_provenance_edge_rules.py` (revision `0006`, parent `0005`, single head):
+  - `sources.status VARCHAR(32) NOT NULL`, `CHECK (status IN ('ACTIVE','INACTIVE'))` (`ck_sources_status`). Existing rows become INACTIVE; new rows default to ACTIVE. `trust_state` is untouched.
+  - `provenance_edges`:
+    - `ck_provenance_edges_relation_type` (DERIVED_FROM, TRANSFORMED_INTO, SUPERSEDES);
+    - `uq_provenance_edges_tenant_from_to_relation` (tenant_id, from_record_id, to_record_id, relation_type);
+    - `ck_provenance_edges_no_self_loop` (from_record_id <> to_record_id).
+  - Edge direction is not normalised: A->B and B->A are both allowed. Cycle detection stays in M3's service code.
+  - Pre-check: duplicates, self-loops and unknown relation types are looked up first. If any exist, the upgrade stops with the offending ids (up to 20 per kind) and changes nothing. It never deletes data. Offline `--sql` mode skips the pre-check (no data access); PostgreSQL would still refuse the constraints.
+  - **Downgrade:** drops the three edge constraints and the `sources.status` column. Stored status values are lost, and no rows are deleted. A later upgrade sets every existing source to INACTIVE again, so sources must be re-activated explicitly (covered by a test).
+- Models (`models/memory.py`): `Source.status` + CHECK, `SOURCE_STATUSES`, `PROVENANCE_RELATION_TYPES`, and the three edge constraints. The model/migration drift test is clean.
+- `backend/app/database/repositories/memory.py` (async, tenant-scoped, read-only, never commits):
+  - `ProvenanceEdgeRepository.edges_for_record(record_id, limit=50, offset=0) -> EdgePage(edges, has_more, limit, offset)`: edges where the record is `from` OR `to`, ordered by `id`. It fetches `limit + 1` rows to compute `has_more`, with a maximum limit of 100.
+  - `MemoryVersionRepository.current_version_for_record(record_id)`: the version `memory_records.current_version` points to.
+  - `MemoryVersionRepository.highest_version_for_record(record_id)`: the largest version number.
+  - Both version helpers exist because the two can differ (for example after a rollback). Which one counts as eligible is M3's and M4's decision.
+- `repositories/base.py`: `check_page(limit, offset)` is shared by `list()` and the new helper. Non-integer offsets are now rejected too.
+
+**Tests**
+- `test_source_and_edge_rules.py` (new, raw SQL): source status default/allowed/unknown/NULL/update; relation types accepted and rejected; duplicate rejected on insert and update; the same pair with another relation type allowed; reverse direction allowed; self-loop rejected on insert and update; per-tenant independence.
+- `test_memory_repositories.py` (new, ORM): both directions in id order; tenant isolation (edges and versions); paging with `has_more` (true, true, false, then empty); exact fit; at most 100; invalid limit, offset and record_id rejected; current vs highest version, and missing versions.
+- `test_migrations.py`:
+  - 0006 on existing data (sources become INACTIVE, trust_state and edges intact, new rows ACTIVE);
+  - downgrade keeps rows and removes the rules;
+  - re-upgrade after downgrade resets sources to INACTIVE;
+  - the pre-check stops for duplicate, self-loop and bad relation type, listing the ids, with no schema change and no deleted rows;
+  - offline SQL includes 0006 and the head is now `0006`.
+
+**Test result**
+- `pytest backend/tests/database -q`: **411 passed** (355 before + 56 new).
+- `pytest -q` (full backend): **585 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. UNIQUE removed: 4 FAILED.
+  - B. Existing sources back-filled as ACTIVE: 2 FAILED.
+  - C. Pre-check removed: 4 FAILED.
+  - D. Self-loop CHECK removed: 3 FAILED.
+  - E. `has_more` without the extra row: 2 FAILED.
+  - F. Tenant filter dropped from the helpers: 2 FAILED.
+
+**Problems and fixes**
+- A Bash heredoc that contained Python string literals broke the shell quoting again. Fix: wrote the edit script to the scratchpad with the file tool and ran it from there.
+- The convention name for the 4-column UNIQUE would be longer than PostgreSQL's 63-character limit. Fix: an explicit name, `uq_provenance_edges_tenant_from_to_relation`, wrapped in `op.f()` so the naming convention does not rewrite it (same lesson as `ck_memberships_status` in 0003).
+
+**Open points / for other members**
+- **M3:** `SourceRecord.status` still defaults to `"ACTIVE"` and has no `trust_state`, which is fail-open when a record is built from a database row. This was requested from M3, but it is not changed yet on `origin/feat/m3-memory-provenance` (checked at `d018ff1`). It is M3's module, so M6 does not change it.
+- **M3:** M6 repositories are async; the memory services must become async to use them (TRD line 116). GAP-008's transaction-scoped write operations (record + version + edge in one transaction) are not part of this PR.
+- **M4 (+ M3):** whether ingestion must also reject sources by `trust_state` is a trust decision and was not implemented.
+- **M1 + M5:** if `sources.status` is returned by the API, DOC-005 section 8 (line 716) requires their approval of the new enum.
+- **Doc owner:** DOC-005 does not yet list `sources.status` or the new edge constraints.
+- The new UNIQUE starts with `(tenant_id, from_record_id)`, so `idx_provenance_from` is now redundant. It is kept because it is a DOC-005 index; it could be dropped later in its own migration.
+- The Day 4 gateway migration will now be `0007`.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "411 passed"
+```
+
+---
+
+## Day 4 — Atomic gateway transaction (2026-11-18)
+
+Branch: `feat/m6-day4-atomic-gateway`, created from `origin/main` at `38aa164` (PR #9 merged, head `0006`). The upstream was removed so a stray push cannot target `main`. Baseline before any change: `pytest backend/tests/database`: 411 passed.
+
+**Work mode:** M1, M2 and M4 have not pushed code or answered yet. Everything that does not depend on them is built now. Everything that depends on their decisions is NOT guessed and is listed in **OPEN-DEPENDENCIES** at the end of this log, for one final integration migration.
+
+**Why**
+- DOC-006:155 (M6 Day 4): "Implement atomic transaction wrapping proposal, decision, and tool execution". Deliverable: transactional repository. Exit: "No tool execution recorded without decision".
+- Gate G4 (DOC-006:158): "Decision and audit trail committed".
+- GAP-008 (doc 08:42): "M6 must expose transaction-scoped repository operations … use uniqueness constraints … fault-injection tests at each write boundary".
+- The RESTRICT on the gateway chain was approved by the M6 lead (2026-11-18).
+
+**Built**
+- `backend/app/database/unit_of_work.py`: `UnitOfWork(session_factory, statement_timeout_ms=None, lock_timeout_ms=None)`. Usage: `async with uow(tenant_id) as tx:` with `tx.proposals`, `tx.decisions`, `tx.approvals`, `tx.executions` and `tx.audit`.
+  - One new session and one transaction per block. Normal exit commits; any exception (including cancellation) rolls back and is re-raised. The session is always closed.
+  - All repositories share the session and the tenant. An empty tenant is refused.
+  - The transaction starts with `set_config('app.tenant_id', tenant, true)`. This is transaction-local, so it never leaks to the next user of a pooled connection; it is groundwork for RLS (no policies yet).
+  - Optional, transaction-local `statement_timeout` / `lock_timeout`. Off by default, because the values are an operations decision (OD-14).
+- `backend/app/database/repositories/gateway.py` (tenant-scoped, never commit, store values as given):
+  - `ToolProposalRepository.get_by_idempotency_key`;
+  - `PolicyDecisionRepository.get_for_proposal`;
+  - `ApprovalRepository.list_for_decision` (bounded);
+  - `ToolExecutionRepository.get_for_proposal`;
+  - `AuditEventRepository`: `append`, `list_recent` (newest first, bounded); `update` and `delete` raise `AppendOnlyError`. The database also refuses them (0004).
+- `backend/alembic/versions/0007_gateway_chain_integrity.py` (revision `0007`, parent `0006`):
+  - Parent key `uq_policy_decisions_tenant_id_proposal_id_id`, and `fk_tool_executions_decision_matches_proposal` (`tool_executions (tenant_id, proposal_id, decision_id) -> policy_decisions (tenant_id, proposal_id, id)`, RESTRICT): an execution can no longer cite the decision of another proposal. `decision_id` was already NOT NULL with an FK, so an execution without a decision was already impossible.
+  - CASCADE becomes RESTRICT on `policy_decisions.proposal_id`, `approvals.decision_id`, `tool_executions.proposal_id` and `tool_executions.decision_id`.
+  - Pre-check: if an existing execution cites another proposal's decision, the upgrade stops with the execution ids and changes nothing (skipped in offline mode).
+  - Downgrade restores the exact 0006 state. No rows are deleted in either direction.
+  - **Not included on purpose:** CHECKs on decision, status and execution_status values, and the "execution only if ALLOW" rule. See OD-1 to OD-9.
+- Models (`models/gateway.py`) match the migration. `relationships.py` marks the four chain relations as RESTRICT and adds the new `LinkedRel`. The shared factory handled the new linked FK without changes.
+
+**Tests**
+- `test_unit_of_work.py` (new, 31 tests, real commits, a fresh tenant per test):
+  - full chain commits;
+  - fault injection after every write boundary (proposal, decision, execution, audit), a database error midway, and cancellation all leave nothing;
+  - empty tenant refused; another tenant's entity refused; cross-tenant FK inside the UoW rejected; tenant-scoped reads;
+  - a separate session per UoW;
+  - the tenant setting does not leak on the same pooled connection (same backend pid, verified), after commit or after rollback;
+  - timeouts are transaction-local; a statement timeout cancels and rolls back; invalid timeout values are refused;
+  - two concurrent transactions with the same idempotency key: exactly one commits, the other gets `uq_tenant_idemp_key`;
+  - audit repository is append-only; audit `list_recent` and approvals listing are bounded; lookup keys are validated;
+  - committed chain rows cannot be deleted.
+- `test_gateway_chain.py` (new, raw SQL):
+  - own decision accepted;
+  - another proposal's decision rejected on insert and on update;
+  - missing decision rejected;
+  - the factory builds a consistent execution;
+  - chain parents with dependants cannot be deleted.
+- `test_migrations.py`:
+  - 0007 keeps the existing chain and restricts deletes;
+  - downgrade restores the 0006 CASCADE without deleting rows;
+  - the pre-check stops and lists the ids with no schema change;
+  - offline SQL now covers 0007 and the head is `0007`.
+- The existing parametrized relationship tests now cover the four chain relations as RESTRICT, and the linked FK through `LINKED_RELATIONSHIPS`.
+
+**Test result**
+- `pytest backend/tests/database -q`: **452 passed** (411 + 41 new).
+- `pytest -q` (full backend): **626 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0007`. No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. 3-column FK removed (migration + model): 8 FAILED.
+  - B. `policy_decisions.proposal_id` left as CASCADE: 2 FAILED.
+  - C. UnitOfWork commits even when the block raises: 9 FAILED.
+  - D. `set_config(..., false)` (not transaction-local): 2 FAILED.
+  - E. 0007 pre-check removed: 1 FAILED.
+  - F. Audit repository allows update: 1 FAILED.
+
+**Problems and fixes**
+- Finding: the model/migration drift test (`compare_metadata`) does **not** compare FK `ON DELETE` rules. Proof B passed that test. Delete rules are guarded by `test_relationships_match_expected_list_exactly` and `test_linked_relationships_match_expected_list_exactly`, which did fail. This gap is now documented, so nobody relies on the drift test for delete rules.
+- `UnitOfWork` tests must really commit, so the rollback-per-test `session` fixture cannot be used. Fix: a separate engine per test on the module's temporary database, and a fresh tenant per test, so committed rows never collide. Tenant rows cannot be cleaned up (RESTRICT), so they stay until the temporary database is dropped.
+- The pool-leak test needs a guaranteed connection reuse. Fix: an engine with `pool_size=1, max_overflow=0`, plus an assertion on `pg_backend_pid()`, so the test cannot pass vacuously.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "452 passed"
+```
+
+---
+
+## Day 5 — Atomic agent rewind with pre-recovery snapshot (2026-11-18)
+
+Branch: `feat/m6-day5-atomic-rewind`, created from `origin/main` at `2e4d943` (Day 4 PR #10 merged, head `0007`). Upstream removed. Baseline: `pytest backend/tests/database`: 452 passed.
+
+**Approved by the M6 lead:** the two-transaction rewind with generic restore operations; RESTRICT on the recovery chain; UNIQUE on `checkpoint_items`; a separate `pre_recovery_snapshot_sha256` column.
+
+**Why**
+- DOC-006:171 (M6 Day 5): "Implement atomic Agent Rewind rollback with pre-recovery state preservation". Exit: "Pre-recovery snapshot committed before rollback".
+- TRD section 18: "capture a complete snapshot of the contaminated records before modifying any database state". SEC-007.
+- GAP-008: recovery must be atomic, with optimistic concurrency.
+
+**Built**
+- `backend/alembic/versions/0008_recovery_snapshot_and_chain_integrity.py` (revision `0008`, parent `0007`):
+  - `recovery_plans.pre_recovery_snapshot_sha256 VARCHAR(64)`, NULL until captured. The hash is computed by PostgreSQL as `sha256(snapshot::text)`, so application code never has to reproduce jsonb's text format.
+  - `ck_recovery_plans_snapshot_hash_consistent`: an empty snapshot means NULL hash; a captured snapshot must carry exactly the database-computed hash.
+  - `ck_recovery_plans_executed_requires_snapshot`: `executed_at` can only be set once a snapshot exists.
+  - Trigger `trg_protect_recovery_snapshot`: once captured, the snapshot and hash cannot change, and the plan cannot be deleted (SQLSTATE 55000).
+  - Trigger `trg_require_recovery_snapshot`: no `recovery_actions` row (insert, or a move to another plan) for a plan without a snapshot (55000).
+  - `uq_checkpoint_items_tenant_id_checkpoint_id_record_id`: a checkpoint holds each record at most once.
+  - CASCADE becomes RESTRICT on `checkpoint_items.checkpoint_id`, `recovery_plans.checkpoint_id`, `recovery_actions.plan_id` and `incident_evidence.incident_id`.
+  - Existing data: non-empty snapshots get their hash back-filled. The upgrade stops, listing ids and changing nothing, for a duplicated checkpoint record, an executed plan without a snapshot, or an action whose plan has no snapshot.
+  - Downgrade restores the exact 0007 state. The hash column is dropped; the snapshots are kept. No rows are deleted.
+- `backend/app/database/rewind.py`: `RewindCoordinator` (built on `UnitOfWork`):
+  - `capture_snapshot(tenant, plan, snapshot)` is transaction 1. It locks the plan, writes the snapshot and the database hash, and **commits**. A snapshot can be captured only once.
+  - `execute_rollback(tenant, plan, expected_snapshot_sha256=..., restore=...)` is transaction 2. It locks the plan, requires the committed snapshot, refuses an already executed plan, and requires the stored hash to equal both the caller's hash and a fresh recomputation. Then it runs the caller's `restore(rtx)` callback, sets `executed_at` and commits. Any failure rolls back transaction 2 only: the snapshot stays and the rewind can be retried.
+  - Generic restore operations on `rtx`:
+    - `checkpoint_item_for(record_id)`;
+    - `append_version(...)`: highest + 1, under a row lock;
+    - `compare_and_set_current_version(record_id, expected, new)`: optimistic concurrency; the target version must exist;
+    - `record_action(resource_id, action_taken, outcome)`.
+  - Typed refusals: `PlanNotFound`, `RecordNotFound`, `SnapshotAlreadyCaptured`, `SnapshotMissing`, `SnapshotMismatch`, `PlanAlreadyExecuted`, `ConcurrencyConflict`.
+  - It decides no business meaning. Snapshot content, target version, new-version vs pointer move, trust state and status values are left to M3/M4 (OD-17, OD-21).
+- Models (`models/recovery.py`) match the migration. `relationships.py` marks the four chain relations as RESTRICT.
+- Shared factory: recovery plans are created with a captured snapshot by default (the hash comes from PostgreSQL), because a recovery action now requires one. Pass `pre_recovery_snapshot_json="{}"` for an uncaptured plan.
+
+**Tests**
+- `test_rewind.py` (new, 23 tests, real commits, a fresh tenant per test):
+  - capture commits the snapshot and the database hash; capture only once; invalid snapshots refused; another tenant's plan not found;
+  - rollback without a snapshot, or with a wrong hash, is refused;
+  - a successful rollback is atomic; the snapshot is visible to an independent session while transaction 2 runs (ordering proof);
+  - a failure inside the rollback keeps the snapshot and changes nothing else, and a retry succeeds;
+  - a plan cannot be executed twice; two concurrent executions let exactly one win;
+  - compare-and-set conflict; missing target version; `append_version` numbering;
+  - restore operations are tenant-scoped; arguments are validated.
+- `test_recovery_rules.py` (new, raw SQL):
+  - no action for an uncaptured plan (insert or move);
+  - `executed_at` requires a snapshot;
+  - snapshot and hash must be consistent (3 cases); capturing later with the database hash is allowed;
+  - a captured snapshot cannot be replaced or erased; other plan columns can still change;
+  - a captured plan cannot be deleted; an uncaptured plan without actions can be deleted;
+  - a checkpoint cannot hold the same record twice; the same record in two checkpoints is allowed;
+  - RESTRICT on the checkpoint and incident chains.
+- `test_migrations.py`: 0008 back-fills hashes and keeps data; downgrade restores 0007 and keeps snapshots; the pre-check stops for all three violations; offline SQL now covers 0008 (head `0008`).
+- `test_cross_tenant_fks.py`: a recovery plan with a captured snapshot is refused by its own delete trigger (55000) before the RESTRICT FK is checked, so that case now expects the stronger error. Parent and child must still be intact. The FK rule itself is still asserted by the relationship list test.
+
+**Test result**
+- `pytest backend/tests/database -q`: **496 passed** (452 + 44 new).
+- `pytest -q` (full backend): **670 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0008`. No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. Hash CHECK without `IS NOT NULL`: 1 FAILED.
+  - B. Snapshot immutability removed: 2 FAILED.
+  - C. "Action requires snapshot" trigger removed: 4 FAILED.
+  - D. Coordinator skips the hash comparison: 1 FAILED.
+  - E. Compare-and-set ignores `expected`: 1 FAILED.
+  - F. `checkpoint_items.checkpoint_id` left as CASCADE: 2 FAILED.
+  - G. Checkpoint UNIQUE removed: 1 FAILED.
+  - H. Existing snapshots not back-filled: 2 FAILED.
+
+**Problems and fixes**
+- **Real defect found by a test:** the first version of the hash CHECK was `... OR (snapshot <> '{}' AND sha = <computed>)`. With `sha = NULL` that clause is NULL, and PostgreSQL accepts a CHECK that evaluates to NULL, so a snapshot without a hash was allowed. Fix: `sha IS NOT NULL AND sha = <computed>`. Proof A keeps it covered.
+  - Follow-up check: the CHECKs from 0003 (`memberships.status`) and 0006 (`sources.status`, `relation_type`, self-loop) only use NOT NULL columns, so they cannot be bypassed this way.
+- A recovery plan with a captured snapshot is refused by its delete trigger before the RESTRICT FK fires. The generic RESTRICT test now expects the stronger error for that one parent, and still asserts that nothing was deleted.
+- In two checkpoint tests the factory created a second version numbered 1 for the same record (`uq_record_version`). Fix: those tests create one version explicitly and reuse it.
+- In SQL `UPDATE ... SET a = x, b = f(a)`, `f(a)` sees the OLD value of `a`. So the coordinator computes the hash from the bound snapshot parameter, not from the column, in the same statement.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "496 passed"
+```
+
+---
+
+## Day 6 — Append-only audit verification and restricted app role preparation (2026-11-18)
+
+Branch: `feat/m6-day6-audit-and-app-role`, created from `origin/main` at `8202f79` (Day 5 PR #11 merged, head `0008`). Upstream removed. Baseline: `pytest backend/tests/database`: 496 passed.
+
+**Approved by the M6 lead:**
+1. A hash-chained audit with a per-tenant chain and backfill.
+2. Policy decisions immutable except `execution_status`.
+3. App role code and temporary-role tests only; no docker-compose or `.env` changes.
+4. No RLS in the migration: design and OD only.
+
+**Why**
+- DOC-006:187 (M6 Day 6): "Verify append-only constraints on audit events table". Deliverable: audit verification DDL. Exit: "Direct UPDATE/DELETE statements rejected".
+- TRD SEC-010.
+- TRD section 8 "Append-Only Immutability": `audit_events` **and `policy_decisions`** are permanent forensic records.
+- Doc 07:144 and :549: "Append-only/hash-chained audit evidence", "tamper-evident evidence for decisions".
+- Weakness found on Day 1–3: the app connects as a superuser/table owner, who can switch triggers off without leaving a trace.
+
+**Built**
+- `backend/alembic/versions/0009_audit_hash_chain_and_decision_immutability.py` (revision `0009`, parent `0008`):
+  - `audit_events.chain_seq` (1, 2, 3 … per tenant), `prev_hash` and `event_hash`, with `uq_audit_events_tenant_id_chain_seq` and `ck_audit_events_chain_link` (the first event has no `prev_hash`; every later event has one).
+  - `amsc_audit_event_hash(...)`: SHA-256 over the previous hash and every audit field, joined with U+001F. NULLs are coalesced so they cannot shift fields. Timestamps are hashed as UTC epoch seconds, so the result does not depend on DateStyle or the session time zone.
+  - Trigger `trg_audit_events_chain` (BEFORE INSERT): takes a per-tenant advisory transaction lock, reads the tenant's last event, and fills the three columns. Values sent by the caller are ignored.
+  - `amsc_audit_chain_break(tenant_id)`: the first broken `chain_seq` (wrong hash, wrong link, or a gap), or NULL if the chain is intact.
+  - `amsc_audit_protection_report()`: one row per check. It confirms that the append-only, chain and tenant triggers are enabled and that every tenant's chain is intact. Usable by M7/CI.
+  - Trigger `trg_policy_decisions_permanent`: a decision can never be deleted. `proposal_id`, `decision`, `memory_trust`, `policy_result`, `reasons_json`, `incident_id`, `created_at` and `id` cannot change. Only `execution_status` may change.
+  - Downgrade restores the exact 0008 state. The chain columns and their values, the functions and the two new triggers are removed; 0004's triggers stay.
+- **One-time trigger pause for the backfill (documented in the migration):** existing audit rows get their chain in `(occurred_at, id)` order per tenant. Writing the new columns on existing rows is an UPDATE, which 0004 forbids. So `trg_audit_events_no_update_delete` is **disabled for the backfill and enabled again right after, in the same transaction**.
+  - The backfill only writes `chain_seq`, `prev_hash` and `event_hash`. A test compares every original audit field before and after.
+  - If anything fails, the whole migration rolls back and the trigger stays enabled. A test (and proof B) checks that the trigger is enabled after the upgrade.
+  - This requires running migrations as the table owner, which is the owner role's job in the split below.
+- `backend/app/database/roles.py`: SQL generation only, never executed by the application:
+  - `app_role_create_statement(name)`: LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS, with no password (set by M7).
+  - `app_role_grant_statements(name, owner_role=None)`:
+    - DML on application tables;
+    - `audit_events`: SELECT and INSERT only;
+    - `policy_decisions`: SELECT, INSERT and `UPDATE (execution_status)` only;
+    - nothing on `alembic_version`; TRUNCATE revoked everywhere;
+    - default privileges for future tables.
+  - `app_role_script(...)` gives M7 the whole script. `APP_ROLE_ATTRIBUTES_SQL` and `TABLES_OWNED_BY_ROLE_SQL` are read-only checks.
+  - Role names are validated against `^[a-z_][a-z0-9_]{0,62}$` (no SQL injection through names).
+- `AuditEventRepository.append` refuses caller-set chain values and returns the database-assigned ones. `list_recent` orders by `chain_seq`; the new `chain_break()` calls the verification function.
+- Test helpers: `create_temp_login_role` / `drop_temp_login_role` with a strict `^amsc_test_role_[0-9a-f]{16}$` guard (same idea as the temporary databases), and `role_dsn`.
+
+**Tests**
+- `test_audit_chain.py` (new):
+  - per-tenant linked chains; caller values ignored; the hash covers every field;
+  - tamper detection: an edited event, an edit with a recomputed hash (caught at the next link), a deleted middle event;
+  - documented limit: tail truncation is not detectable without an external anchor;
+  - CHECK and UNIQUE hold even with the chain trigger bypassed;
+  - the protection report is green when healthy and red after tampering;
+  - 12 concurrent committed inserts give one gapless chain;
+  - the repository returns the database chain values.
+- `test_decision_permanence.py` (new): every content column is immutable; references cannot be attached or moved; `execution_status` stays updatable; delete is always refused; an incident cited by a decision cannot be deleted, while an uncited one can.
+- `test_app_role.py` (new; a temporary login role, always dropped):
+  - no dangerous attributes and owns no tables;
+  - can append audit events and gets a chain;
+  - cannot UPDATE/DELETE/TRUNCATE audit events, disable or drop triggers, or switch to `session_replication_role = replica` (42501);
+  - can update `execution_status` but cannot change or delete decisions;
+  - ordinary DML works; cannot create tables, read `alembic_version`, TRUNCATE, or disable the tenant trigger;
+  - can read the protection report;
+  - role names are validated; the script content is checked (no password);
+  - no temporary roles are left behind.
+- `test_migrations.py`:
+  - 0009 backfills chains in time order without changing any audit field and re-enables the trigger;
+  - downgrade restores 0008 and keeps the rows;
+  - re-upgrade rebuilds valid chains;
+  - offline SQL includes the pause/enable and the new triggers (head `0009`).
+- Existing tests updated to expect the **stronger** permanent-decision rejection (SQLSTATE 55000) where it now fires before the FK check. Every case still asserts that nothing changed:
+  - re-pointing `policy_decisions.proposal_id` / `incident_id`;
+  - deleting a decision that has approvals or executions;
+  - the UoW delete test.
+  - Deleting an incident cited by a decision is now refused, even though the FK says SET NULL, because `incident_id` is permanent (a deliberate consequence of decision 2).
+
+**Test result**
+- `pytest backend/tests/database -q`: **552 passed** (496 + 56 new).
+- `pytest -q` (full backend): **726 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0009`. No `amsc_test_*` databases and no `amsc_test_role_*` roles were left behind. The dev database `amsc` was not touched.
+- The machine was slow today: the DB suite took about 5.5 minutes instead of about 1.5.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. Chain not linked to the previous event: 10 FAILED.
+  - B. Backfill forgets to re-enable the append-only trigger: 5 FAILED.
+  - C. Verification skips the hash comparison: 2 FAILED.
+  - D. Hash does not cover `actor_id`: 1 FAILED.
+  - E. `decision` column left mutable: 1 FAILED.
+  - F. App role keeps UPDATE on `audit_events`: 2 FAILED.
+  - G. App role may TRUNCATE: 1 FAILED.
+  - No temporary roles were left after the proofs.
+
+**Problems and fixes**
+- `asyncpg.Connection` uses `__slots__`, so the test fixture could not attach the role name to it. Fix: the test reads `SELECT current_user`.
+- asyncpg sends typed parameters, so a string for a `timestamptz` parameter is rejected. Fix: `$3::text::timestamptz` in the seed SQL.
+- Hashing `occurred_at` as text would depend on DateStyle and the time zone. Fix: `extract(epoch FROM occurred_at)::text`.
+- `concat_ws` silently skips NULLs, which could let two different rows hash alike. Fix: `coalesce` on the nullable fields (`prev_hash`, `trace_id`).
+- The plpgsql variable `name` in the report function shadowed the `name` type and was confusing. Renamed to `trigger_name`.
+- Concurrency of the chain: inserts for the same tenant are serialised by a per-tenant advisory lock (other tenants are not blocked). This is correct under READ COMMITTED, the default. Under REPEATABLE READ/SERIALIZABLE a concurrent insert fails with the UNIQUE violation instead of forking the chain, which is a safe failure.
+
+**Note for the project owner about migration 0004 (no change made; merged migrations are not edited)**
+- 0004 creates `prevent_audit_event_mutation()` with `CREATE OR REPLACE` and without the `amsc_` prefix used by the other M6 functions. `CREATE OR REPLACE` would silently overwrite a same-named function.
+- Migration 0009 relies on 0004's trigger name `trg_audit_events_no_update_delete` for the one-time pause. Please do not rename it without a new migration.
+- 0004's own tests were strengthened on 2026-11-18 (exact SQLSTATE 55000 and unchanged rows).
+
+**RLS design (not implemented; OD-11 and OD-18)**
+- Policy per tenant table: `ENABLE` + `FORCE ROW LEVEL SECURITY`, with `USING (tenant_id = current_setting('app.tenant_id', true))` and the same `WITH CHECK`. If the setting is missing, the result is NULL, no rows match, and access fails closed.
+- `UnitOfWork` already sets `app.tenant_id` transaction-locally (Day 4), with a tested no-leak guarantee.
+- Global tables (`tenants`, `users`, `permissions`, `role_permissions`) stay without policies. `roles` needs `tenant_id IS NULL OR tenant_id = setting`.
+- Blockers before enabling:
+  - (1) the login path reads `memberships` before a tenant is known; it needs a narrow `SECURITY DEFINER` function or a separate auth role (M1);
+  - (2) every request and background job must run through a tenant-scoped transaction (M1/M2/M3);
+  - (3) the app must connect as the non-owner `amsc_app` (M7). Owners and superusers bypass RLS unless `FORCE` is set, and superusers always bypass it.
+- Enabling RLS before (1) and (2) would break login on the day M7 switches the role. That is why it is not in 0009.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "552 passed"
+```
+
+---
+
+## Day 7 — Migration lifecycle (clean to seeded, forward and backward) and integration guide (2026-11-18)
+
+Branch: `feat/m6-day7-migration-lifecycle`, created from `origin/main` at `e25c628` (Day 6 PR #13 merged, head `0009`). Upstream removed. **No new migration**: no test found a defect that needed `0010`.
+
+**Approved by the M6 lead:** an exact-inverse fingerprint test; a test-only fixture dataset labelled "illustrative test data, not decisions"; a checksum guard for merged migrations 0001–0009; `INTEGRATION-GUIDE.md` in English for the team.
+
+**Why**
+- DOC-006:203 (M6 Day 7): "Verify database migrations from clean database to fully seeded state". Deliverable: migration clean test. Exit: "Migration runs forward and backward cleanly".
+- Gate G7: "complete documentation handover".
+- Found while planning: no product seed exists (`core/seed.py`, DOC-006:124, belongs to M7) and there is no CI workflow (`.github` contains only `CodeOwners.template`).
+
+**Built (tests and docs only; no application or migration code changed)**
+- `backend/tests/database/schema_fingerprint.py`: columns (type, nullability, default), constraints (`pg_get_constraintdef`), indexes, triggers (including enabled/disabled) and functions (`md5(pg_get_functiondef)`) of the `public` schema. Column order and OIDs are ignored, and `alembic_version` is excluded.
+- `backend/tests/database/seed_fixture.py`: **illustrative test data, not decisions**, and not the product seed (OD-27).
+  - One company with the four branches from TRD section 12.1, plus one isolation tenant (OD-28).
+  - Every one of the 36 tables gets rows.
+  - The gateway chain goes through `UnitOfWork`, the rewind through `RewindCoordinator`, and audit events through `AuditEventRepository`.
+  - Status/decision values are DOC-005 examples only and are not enforced by the schema.
+- `backend/tests/database/migration_manifest.py`: SHA-256 of merged migrations 0001–0009, computed with line endings normalised to `\n`. The values were cross-checked against the git blobs on `main`. `python -m backend.tests.database.migration_manifest` prints current hashes for adding a newly merged migration.
+- `backend/tests/database/test_migration_governance.py` (no database needed):
+  - every merged migration is unchanged;
+  - no file is inserted into merged history;
+  - revisions form a gap-free `0001…` chain whose file names match the revision and whose `down_revision` is the previous number;
+  - every migration has a docstring.
+- `backend/tests/database/test_migration_lifecycle.py`:
+  - **Exact inverse:** one database walks up revision by revision, recording a fingerprint after each step. It then walks down revision by revision, and every step must equal the recorded fingerprint, down to base. A re-upgrade must reproduce the head fingerprint.
+  - **Non-vacuous guard:** the head fingerprint must contain 36 tables, the key triggers and functions, and FK and CHECK constraints.
+  - **Clean to fully seeded and back:**
+    - fresh database, upgrade to head, seed (every table non-empty), verify integrity;
+    - walk down one revision at a time to `0001`, asserting that every table's row count is unchanged after every step;
+    - walk back up to head the same way (all pre-checks pass on this data);
+    - at the end: audit chains intact for both tenants, protection report green, rewind result kept, audit fields, decisions and the recovery snapshot byte-identical.
+    - The documented downgrade effects are asserted: memberships and sources end up `INACTIVE` (0003/0006), and the snapshot hash is rebuilt (0008).
+  - **Isolation:** the seed keeps audit events, branches and memory per tenant.
+- `docs/database-design/INTEGRATION-GUIDE.md`: setup; connecting; "which tool for which job"; examples (gateway unit of work, rewind); what the database rejects (SQLSTATE → class → what to do); rules that follow from it; migration history and what each downgrade loses; how to request a schema change; **how to add a newly merged migration's hash to the manifest**; the least-privilege role for M7; and open questions for M1/M3/M4/M7.
+
+**Test result**
+- New tests: 16 (governance 12, lifecycle 4). They passed on the first run, so the proof below was essential.
+- `pytest backend/tests/database -q`: **568 passed** (552 + 16 new).
+- `pytest -q` (full backend): **742 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0009`. No `amsc_test_*` databases or `amsc_test_role_*` roles left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. 0009 downgrade leaves its report function behind: 2 FAILED.
+  - B. 0007 downgrade also drops an index created by 0002 (removes too much): 1 FAILED.
+  - C. 0003 downgrade silently deletes approvals: 1 FAILED.
+  - D. A merged migration edited (one comment line in 0004): 1 FAILED.
+  - E. A new migration skips a number (0011 after 0009): 1 FAILED.
+  - F. Fingerprint ignores triggers: 1 FAILED (the non-vacuous guard).
+  - G. Fixture forgets a table (`outbox_events`): 1 FAILED.
+  - No test databases were left after the proofs.
+
+**Problems and fixes**
+- Comparing fingerprints from separate fresh databases per revision would need ten databases. Fix: one database walks up and records each fingerprint, then walks down and compares, which is the same guarantee in one database.
+- Column order can legitimately differ after drop/re-add cycles, so `ordinal_position` is not part of the fingerprint. Definitions are compared through PostgreSQL's deparsers (`pg_get_constraintdef`, `pg_get_triggerdef`, `pg_get_functiondef`), so formatting differences in migration code do not matter.
+- `0001 → base` drops every table by design. The seeded round trip therefore stops at `0001`; the exact-inverse test covers `0001 → base` on an empty database.
+- Git stores LF while the Windows checkout has CRLF. Fix: the manifest hashes text with normalised line endings, and the values were verified against the git blobs (`git show origin/main:<file> | tr -d '\r' | sha256sum`).
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database/test_migration_lifecycle.py backend/tests/database/test_migration_governance.py -v
+```
+
+---
+
+## OPEN-DEPENDENCIES (living list — not implemented on purpose)
+
+Rules: nothing here is guessed or hard-coded in a migration. Each item is applied in **one final integration migration** after the owner pushes code or confirms. "Waits" names the constraint or code that is blocked. Update this list every day.
+
+| ID | Question | Owner | Waits |
+|---|---|---|---|
+| OD-1 | `policy_decisions.decision` values: DOC-005:320 and M5 use `ALLOW/BLOCK/REQUIRES_APPROVAL`; M1's gateway branch writes `REVIEW`. Which set is final? | M4 (+ M1, M5) | CHECK on `policy_decisions.decision` |
+| OD-2 | `policy_decisions.memory_trust` values: DOC-005:321 lists `TRUSTED/SUSPICIOUS/QUARANTINED/NOT_REFERENCED`; M1 also writes `UNVERIFIED`. | M4 (+ M3) | CHECK on `memory_trust` |
+| OD-3 | `policy_decisions.policy_result` values: DOC-005 and M1 agree on `PERMITTED/DENIED/ELEVATED`. Please confirm. | M4 | CHECK on `policy_result` |
+| OD-4 | `policy_decisions.execution_status` values: DOC-005 `EXECUTED/NOT_EXECUTED/PENDING_APPROVAL`; M1 adds `PENDING_EXECUTION/FAILED/UNKNOWN`; M5 types only `EXECUTED/NOT_EXECUTED`. | M1 + M2 + M4 (+ M5) | CHECK on `execution_status` |
+| OD-5 | `tool_executions.status` values: DOC-005 `SUCCESS/FAILED/TIMEOUT`; M1 also writes `UNKNOWN` and `BLOCKED_BY_TOCTOU`. | M2 (+ M1) | CHECK on `tool_executions.status` |
+| OD-6 | Execution rule: may an execution row exist only for an `ALLOW` decision (and an approved `REQUIRES_APPROVAL`)? M1 writes a `BLOCKED_BY_TOCTOU` execution row for an ALLOW decision. | M4 (+ M2) | Trigger on `tool_executions` INSERT |
+| OD-7 | Approval flow: `approvals.status` values (DOC-005 `PENDING/APPROVED/REJECTED`), how many approvals, which status permits execution, approver role. | M4 | CHECK on `approvals.status`; part of the OD-6 trigger |
+| OD-8 | Retries: `tool_executions.proposal_id` is UNIQUE (one execution per proposal). Are retries needed? | M2 | Keep or drop the UNIQUE; possibly an attempt number |
+| OD-9 | Audit vocabulary and `actor_id` format (`event_type`, `action`, `outcome`). | M4 + M1 | CHECKs on `audit_events` (append-only: wrong values cannot be fixed later) |
+| OD-10 | Gateway persistence owner: M1's `SqlAlchemyGatewayRepository` (in M1's `api/gateway.py`), or an M6 adapter on `UnitOfWork` implementing M1's `GatewayRepositoryProtocol`? | M1 | M6 adapter module |
+| OD-11 | Session/transaction owner per request: does M1 open one `UnitOfWork` per request, or does the repository open its own? **Updated Day 6:** RLS also needs (a) every request and background job inside a tenant-scoped transaction that sets `app.tenant_id` (the UoW already does this), and (b) a login path that can read `tenants`/`users`/`memberships` before a tenant is known (a `SECURITY DEFINER` function or a separate auth role). | M1 (+ M2, M3 for jobs) | Wiring of `UnitOfWork`; RLS policies (design in the Day 6 entry) |
+| OD-12 | Idempotency source: DB `UNIQUE (tenant_id, idempotency_key)` (M1 code), Redis `SET NX` (TRD:220), or both? M1 maps every `IntegrityError` to "duplicate idempotency key" (409), which hides FK and tenant errors. | M1 (+ M7) | Error mapping in the adapter |
+| OD-13 | Who wires the async M6 repositories into M3's memory services (sync today)? Transaction-scoped memory writes (record + version + edge, GAP-008)? | M3 | M6 memory UoW repositories |
+| OD-14 | Values for `statement_timeout` / `lock_timeout` in production. | M7 (+ M1) | `UnitOfWork(...)` configuration |
+| OD-15 | `sources.status` in the API (DOC-005:716 requires M1/M6/M5 approval of enums); whether ingestion rejects by `trust_state`. | M1 + M5; M4 | API exposure; no DB change needed |
+| OD-16 | `SourceRecord.status` default `"ACTIVE"` and missing `trust_state`; `MembershipRecord.status` default `"ACTIVE"` (fail-open mappings). | M3; M1 | Nothing in the DB; mapping code in their modules |
+| OD-17 | Rollback semantics: append a new version or move `current_version` back? Day 5 provides both building blocks (`append_version`, `compare_and_set_current_version`). Also the checkpoint `integrity_hash` method (DOC-005: "Merkle or combined SHA-256"). | M3 + M4 | Which restore callback M4/M3 use; a CHECK/verification for `checkpoints.integrity_hash` |
+| OD-18 | Restricted app role, RLS, separate migration credential, TLS. **Updated Day 6:** M6 now provides `backend/app/database/roles.py` (create statement, grants, full script, read-only checks), proven by temporary-role tests. M7 needs to: create the owner role (runs migrations, owns tables) and `amsc_app` (via `app_role_script`) in docker-compose / `.env.example` / CI; set passwords outside the repo; point the app's `DATABASE_URL` at `amsc_app` and Alembic at the owner; give the CI test user `CREATEROLE` (the role tests create temporary roles); run `amsc_audit_protection_report()` in CI. | M7 (+ M1) | Applying the role split; RLS policies (also OD-11) |
+| OD-19 | Branch model (P2), RBAC source of truth (P7). | M1 + M3 + M4 | Branch/role migrations |
+| OD-20 | DOC-005 does not yet describe migrations 0003–0009 (including `recovery_plans.pre_recovery_snapshot_sha256` and the audit chain columns). | Project owner | Documentation only |
+| OD-21 | Recovery vocabulary: `recovery_plans.status` values and allowed transitions (DOC-005 `PENDING/PREVIEWED/EXECUTED/FAILED`), `recovery_actions.action_taken` / `outcome` values, and the trust state of restored records (TRD section 18: TRUSTED only after revalidation, else UNVERIFIED/quarantine). | M4 (+ M3) | CHECKs on plan status / action values; possibly a status-transition trigger |
+| OD-22 | Owner of `api/recovery.py`: DOC-006:171 names M6, `ownership.md` names M4. M6 delivered the DB layer (`RewindCoordinator`) only. | Project owner + M4 | API route wiring |
+| OD-23 | Where to record irreversible external actions executed before a rollback (TRD section 18, "Honest Outcome Classification"). | M4 + M2 | Possibly a column or table, plus the restore callback |
+| OD-25 | TRD section 8 says `policy_decisions` are fully permanent, but M1's gateway updates `policy_decisions.execution_status` after the tool runs. 0009 keeps `execution_status` as the only mutable column. Should the execution outcome live only in `tool_executions`, so decisions become fully append-only? | M1 + M4 | Making `execution_status` immutable too (trigger + revoking the column grant in `roles.py`) |
+| OD-26 | External anchoring of the audit chain head (TRD :517 Merkle log sealing, "Phase 2"; GAP-011 KMS/HSM). Without it, a superuser can rebuild a whole chain or cut its tail undetected (tested limit). | Project owner + M4 + M7 | Anchor table/export job and its verification |
+| OD-27 | The product seed `core/seed.py` (DOC-006:124, M7) does not exist. Until it does, the lifecycle test uses M6's `seed_fixture.py` (illustrative test data, not decisions). When M7 delivers the seed, the same down/up round trip should run on it, and CI should run both. | M7 | A lifecycle test variant on the real seed; CI job |
+| OD-28 | How many tenants does the seed contain? TRD section 12.1 / line 267: "Only ONE company is seeded"; DOC-006 gate G2 (line 215): "database seed populates 3 tenants". The M6 fixture uses one company plus one isolation tenant. | Project owner + M7 | Shape of the product seed and the isolation demo (Demo 3) |
+| OD-24 | Memory-side CASCADE paths still open: deleting a `memory_records`/`memory_versions` row cascades into versions, provenance, retrieval history, quarantines and checkpoint items (0002/0005). Should memory rows ever be physically deleted? | M3 + M4 | RESTRICT on the memory-side FKs |
+
 

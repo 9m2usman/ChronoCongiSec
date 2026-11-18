@@ -25,6 +25,18 @@ from backend.tests.database.relationships import TENANT_RELATIONSHIPS, Rel
 
 pytestmark = pytest.mark.asyncio
 
+# Tables whose content cannot change after insert (0009: policy decisions, except
+# execution_status). Re-pointing a reference is refused by the trigger (55000) before
+# the FK is checked; the stronger rejection is expected there.
+IMMUTABLE_CONTENT_TABLES = {"policy_decisions"}
+
+
+def _expected_forged_update_error(child: str):
+    if child in IMMUTABLE_CONTENT_TABLES:
+        return pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="permanent")
+    return pytest.raises(asyncpg.ForeignKeyViolationError)
+
+
 CASCADE_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "CASCADE"]
 SET_NULL_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "SET NULL"]
 RESTRICT_RELS = [r for r in TENANT_RELATIONSHIPS if r.on_delete == "RESTRICT"]
@@ -80,7 +92,7 @@ async def test_forged_cross_tenant_update_is_rejected(factory: RowFactory, tx_co
     child_id = await factory.create(rel.child, tenant_a, **{rel.column: own_parent})
     _, foreign_parent = await _parent(factory, rel, tenant_b)
 
-    with pytest.raises(asyncpg.ForeignKeyViolationError):
+    with _expected_forged_update_error(rel.child):
         async with tx_conn.transaction():
             await tx_conn.execute(
                 f"UPDATE {rel.child} SET {rel.column} = $1 WHERE id = $2", foreign_parent, child_id
@@ -108,6 +120,16 @@ async def test_set_null_delete_keeps_child_and_tenant(factory: RowFactory, tx_co
     parent_id = await factory.create(rel.parent, tenant_a)
     child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_id})
 
+    if rel.child in IMMUTABLE_CONTENT_TABLES:
+        # The FK says SET NULL, but the child's reference is permanent (0009): the parent
+        # delete is refused instead, and both rows stay exactly as they were.
+        with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="permanent"):
+            async with tx_conn.transaction():
+                await tx_conn.execute(f"DELETE FROM {rel.parent} WHERE id = $1", parent_id)
+        assert await tx_conn.fetchval(f"SELECT {rel.column} FROM {rel.child} WHERE id = $1", child_id) == parent_id
+        assert await tx_conn.fetchval(f"SELECT count(*) FROM {rel.parent} WHERE id = $1", parent_id) == 1
+        return
+
     await tx_conn.execute(f"DELETE FROM {rel.parent} WHERE id = $1", parent_id)
 
     row = await tx_conn.fetchrow(f"SELECT tenant_id, {rel.column} AS ref FROM {rel.child} WHERE id = $1", child_id)
@@ -116,13 +138,30 @@ async def test_set_null_delete_keeps_child_and_tenant(factory: RowFactory, tx_co
     assert row["tenant_id"] == tenant_a
 
 
+# A recovery plan whose pre-recovery snapshot was captured is refused by its own delete
+# trigger (migration 0008, SQLSTATE 55000) before the RESTRICT FK is checked. The FK rule
+# itself is still asserted by test_relationships_match_expected_list_exactly.
+# Policy decisions are permanent (0009): their own trigger refuses any DELETE (55000)
+# before the RESTRICT FK is checked.
+DELETE_TRIGGER_GUARDED_PARENTS = {
+    "recovery_plans": "cannot be deleted",
+    "policy_decisions": "DELETE is forbidden",
+}
+
+
+def _expected_restrict_error(parent: str):
+    if parent in DELETE_TRIGGER_GUARDED_PARENTS:
+        return pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match=DELETE_TRIGGER_GUARDED_PARENTS[parent])
+    return pytest.raises(asyncpg.ForeignKeyViolationError)
+
+
 @pytest.mark.parametrize("rel", RESTRICT_RELS, ids=_ids(RESTRICT_RELS))
 async def test_restrict_delete_keeps_parent_and_child(factory: RowFactory, tx_conn, rel: Rel) -> None:
     tenant_a = await factory.tenant()
     parent_id, parent_key = await _parent(factory, rel, tenant_a)
     child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_key})
 
-    with pytest.raises(asyncpg.ForeignKeyViolationError):
+    with _expected_restrict_error(rel.parent):
         async with tx_conn.transaction():
             await tx_conn.execute(f"DELETE FROM {rel.parent} WHERE id = $1", parent_id)
 

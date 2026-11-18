@@ -3,7 +3,17 @@
 Tables: tool_proposals, policy_decisions, approvals, tool_executions.
 
 Decision/status values are stored as plain strings exactly as in DOC-005; this
-layer does not interpret them (decision semantics belong to M4).
+layer does not interpret them (decision semantics belong to M4). Their allowed
+values are deliberately NOT constrained yet: see OPEN-DEPENDENCIES in
+docs/database-design/M6-PROGRESS-LOG.md.
+
+Day 4 (migration 0007): the whole proposal -> decision -> approval/execution chain
+is ON DELETE RESTRICT, and an execution's decision must belong to its proposal.
+
+Day 6 (migration 0009, TRD section 8 "Append-Only Immutability"): a committed policy
+decision is permanent. A trigger rejects any DELETE and any UPDATE of its content; only
+``execution_status`` may still change, because the gateway records the execution outcome
+there (see OD-25).
 
 Forensic history (migration 0003): every table here uses ``tenant_id ... ON DELETE
 RESTRICT``, and ``tool_proposals.agent_id`` is RESTRICT, so deleting a tenant or an
@@ -74,8 +84,11 @@ class PolicyDecision(Base):
 
     __table_args__ = (
         tenant_parent_key(),
+        # Parent key for tool_executions' "decision belongs to the same proposal" FK (0007).
+        UniqueConstraint("tenant_id", "proposal_id", "id"),
         # proposal_id is already UNIQUE, which covers FK lookups.
-        *tenant_fk("policy_decisions", "proposal_id", "tool_proposals", "CASCADE", index=False),
+        # RESTRICT (0007): a proposal with a decision cannot be deleted (forensic history).
+        *tenant_fk("policy_decisions", "proposal_id", "tool_proposals", "RESTRICT", index=False),
         *tenant_fk("policy_decisions", "incident_id", "incidents", "SET NULL"),
     )
 
@@ -95,7 +108,8 @@ class Approval(Base):
     responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        *tenant_fk("approvals", "decision_id", "policy_decisions", "CASCADE"),
+        # RESTRICT (0007): a decision with approvals cannot be deleted.
+        *tenant_fk("approvals", "decision_id", "policy_decisions", "RESTRICT"),
         ForeignKeyConstraint(
             ["tenant_id", "approver_user_id"],
             ["memberships.tenant_id", "memberships.user_id"],
@@ -120,6 +134,16 @@ class ToolExecution(Base):
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=NOW)
 
     __table_args__ = (
-        *tenant_fk("tool_executions", "proposal_id", "tool_proposals", "CASCADE", index=False),
-        *tenant_fk("tool_executions", "decision_id", "policy_decisions", "CASCADE"),
+        # RESTRICT (0007): executions are evidence; their proposal/decision cannot be deleted.
+        *tenant_fk("tool_executions", "proposal_id", "tool_proposals", "RESTRICT", index=False),
+        *tenant_fk("tool_executions", "decision_id", "policy_decisions", "RESTRICT"),
+        # 0007: the decision must belong to THIS execution's proposal, not only to the same
+        # tenant ("no tool execution recorded without its decision", DOC-006 Day 4).
+        # Lookups are covered by the UNIQUE index on proposal_id, so no extra index.
+        ForeignKeyConstraint(
+            ["tenant_id", "proposal_id", "decision_id"],
+            ["policy_decisions.tenant_id", "policy_decisions.proposal_id", "policy_decisions.id"],
+            name="fk_tool_executions_decision_matches_proposal",
+            ondelete="RESTRICT",
+        ),
     )
