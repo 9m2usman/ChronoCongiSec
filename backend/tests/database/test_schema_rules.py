@@ -95,7 +95,7 @@ async def test_every_tenant_id_references_tenants(ro_conn: asyncpg.Connection) -
 # Day 2: composite tenant-consistent references (AMSC-DOC-005 §1)
 # ---------------------------------------------------------------------------
 
-from backend.tests.database.relationships import TENANT_RELATIONSHIPS  # noqa: E402
+from backend.tests.database.relationships import LINKED_RELATIONSHIPS, TENANT_RELATIONSHIPS  # noqa: E402
 
 _FK_QUERY = """
 SELECT c.conname, src.relname AS child, ref.relname AS parent, c.confdeltype::text AS confdeltype,
@@ -120,27 +120,44 @@ async def _foreign_keys(conn: asyncpg.Connection) -> list[asyncpg.Record]:
     return await conn.fetch(_FK_QUERY)
 
 
+def _linked_signature(fk) -> tuple:
+    return (fk["child"], tuple(fk["child_cols"]), fk["parent"], tuple(fk["parent_cols"]))
+
+
 async def test_every_reference_between_tenant_tables_is_composite(ro_conn: asyncpg.Connection) -> None:
-    """A tenant-owned child may reference a tenant-owned parent only via (tenant_id, id)."""
+    """A tenant-owned child may reference a tenant-owned parent only via (tenant_id, <key>).
+
+    Two-column FKs are the normal case. A wider FK is allowed only if it is listed
+    in ``LINKED_RELATIONSHIPS`` and still starts with tenant_id -> tenant_id.
+    """
     tenant_tables = set(await _tenant_id_columns(ro_conn))
+    linked = {(r.child, r.columns, r.parent, r.parent_columns) for r in LINKED_RELATIONSHIPS}
     violations = []
     checked = 0
     for fk in await _foreign_keys(ro_conn):
         if fk["child"] not in tenant_tables or fk["parent"] not in tenant_tables:
             continue  # references to tenants / global tables
-        if (
-            fk["child"] == "checkpoint_items"
-            and list(fk["child_cols"]) == ["tenant_id", "record_id", "version_id"]
-            and fk["parent"] == "memory_versions"
-            and list(fk["parent_cols"]) == ["tenant_id", "record_id", "id"]
-        ):
-            continue  # Day 3: the version must belong to this exact record.
         checked += 1
         pairs = dict(zip(fk["child_cols"], fk["parent_cols"]))
-        if pairs.get("tenant_id") != "tenant_id" or len(pairs) != 2:
+        width_ok = len(pairs) == 2 or _linked_signature(fk) in linked
+        if pairs.get("tenant_id") != "tenant_id" or list(fk["child_cols"])[0] != "tenant_id" or not width_ok:
             violations.append(f"{fk['conname']}: {fk['child_cols']} -> {fk['parent']}{fk['parent_cols']}")
     assert violations == [], "Non tenant-consistent references:\n" + "\n".join(violations)
-    assert checked >= len(TENANT_RELATIONSHIPS), f"Only {checked} tenant-to-tenant FKs inspected"
+    expected = len(TENANT_RELATIONSHIPS) + len(LINKED_RELATIONSHIPS)
+    assert checked == expected, f"Inspected {checked} tenant-to-tenant FKs, expected {expected}"
+
+
+async def test_linked_relationships_match_expected_list_exactly(ro_conn: asyncpg.Connection) -> None:
+    """Every FK wider than (tenant_id, <ref>) is listed with its delete rule, and every listed one exists."""
+    actual = {
+        (*_linked_signature(fk), _DELETE_ACTIONS[fk["confdeltype"]])
+        for fk in await _foreign_keys(ro_conn)
+        if len(fk["child_cols"]) > 2
+    }
+    expected = {tuple(rel) for rel in LINKED_RELATIONSHIPS}
+
+    assert expected - actual == set(), f"Missing or wrong linked FKs: {sorted(expected - actual)}"
+    assert actual - expected == set(), f"Unlisted linked FKs: {sorted(actual - expected)}"
 
 
 async def test_relationships_match_expected_list_exactly(ro_conn: asyncpg.Connection) -> None:

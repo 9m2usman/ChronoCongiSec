@@ -7,11 +7,14 @@ Owner: M6
 """
 
 import asyncio
+import io
 import uuid
 
 import asyncpg
 import pytest
+from alembic import command
 from alembic.autogenerate import compare_metadata
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -199,3 +202,112 @@ def test_0003_downgrade_keeps_data(empty_db: str) -> None:
     m = asyncio.run(_fetchrow(empty_db, "SELECT * FROM memberships WHERE id = $1", ids["membership"]))
     assert m is not None and "status" not in m.keys()
     assert asyncio.run(_fetchrow(empty_db, "SELECT id FROM approvals WHERE id = $1", ids["approval"])) is not None
+
+
+# ---------------------------------------------------------------------------
+# Migrations 0004 / 0005 on a database that already contains data
+# ---------------------------------------------------------------------------
+
+
+async def _seed_checkpoint_at(database: str, *, mismatched: bool = False) -> dict[str, str]:
+    """A tenant with an audit event and one checkpoint item (valid unless ``mismatched``)."""
+    ids = {k: str(uuid.uuid4()) for k in ("tenant", "audit", "rec_a", "rec_b", "ver_a", "ver_b", "cp", "item")}
+    conn = await asyncpg.connect(helpers.asyncpg_dsn(database))
+    try:
+        await conn.execute("INSERT INTO tenants (id, name, slug) VALUES ($1, 'Co', $2)",
+                           ids["tenant"], "co-" + ids["tenant"][:8])
+        await conn.execute(
+            "INSERT INTO audit_events (id, tenant_id, actor_id, event_type, resource_id, action, outcome) "
+            "VALUES ($1, $2, 'u', 'E', 'r', 'a', 'o')", ids["audit"], ids["tenant"])
+        for rec, ver in (("rec_a", "ver_a"), ("rec_b", "ver_b")):
+            await conn.execute("INSERT INTO memory_records (id, tenant_id) VALUES ($1, $2)", ids[rec], ids["tenant"])
+            await conn.execute(
+                "INSERT INTO memory_versions (id, tenant_id, record_id, version, content, checksum) "
+                "VALUES ($1, $2, $3, 1, 'c', 'h')", ids[ver], ids["tenant"], ids[rec])
+        await conn.execute("INSERT INTO checkpoints (id, tenant_id, name, integrity_hash) VALUES ($1, $2, 'cp', 'h')",
+                           ids["cp"], ids["tenant"])
+        version = ids["ver_b"] if mismatched else ids["ver_a"]
+        await conn.execute(
+            "INSERT INTO checkpoint_items (id, tenant_id, checkpoint_id, record_id, version_id, checksum) "
+            "VALUES ($1, $2, $3, $4, $5, 'h')", ids["item"], ids["tenant"], ids["cp"], ids["rec_a"], version)
+    finally:
+        await conn.close()
+    return ids
+
+
+def test_0004_0005_preserve_existing_data_up_and_down(empty_db: str) -> None:
+    helpers.upgrade(empty_db, "0003")
+    ids = asyncio.run(_seed_checkpoint_at(empty_db))
+
+    helpers.upgrade(empty_db, "head")
+
+    item = asyncio.run(_fetchrow(empty_db, "SELECT record_id, version_id FROM checkpoint_items WHERE id = $1",
+                                 ids["item"]))
+    assert (item["record_id"], item["version_id"]) == (ids["rec_a"], ids["ver_a"])
+    assert asyncio.run(_fetchrow(empty_db, "SELECT id FROM audit_events WHERE id = $1", ids["audit"])) is not None
+
+    helpers.downgrade(empty_db, "0003")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0003"
+    assert asyncio.run(_fetchrow(empty_db, "SELECT id FROM checkpoint_items WHERE id = $1", ids["item"])) is not None
+    assert asyncio.run(_fetchrow(empty_db, "SELECT id FROM audit_events WHERE id = $1", ids["audit"])) is not None
+
+
+def test_0005_refuses_existing_mismatched_checkpoint_item_without_partial_changes(empty_db: str) -> None:
+    """0005 has no explicit pre-check: PostgreSQL rejects the FK and the 0005 transaction rolls back."""
+    helpers.upgrade(empty_db, "0004")
+    ids = asyncio.run(_seed_checkpoint_at(empty_db, mismatched=True))
+
+    with pytest.raises(Exception, match="fk_checkpoint_items_version_matches_record"):
+        helpers.upgrade(empty_db, "0005")
+
+    assert asyncio.run(_fetchrow(empty_db, "SELECT version_num FROM alembic_version"))[0] == "0004"
+    unique_key = asyncio.run(_fetchrow(
+        empty_db, "SELECT 1 FROM pg_constraint WHERE conname = 'uq_memory_versions_tenant_record_id'"))
+    assert unique_key is None, "a failed 0005 must not leave its parent key behind"
+    assert asyncio.run(_fetchrow(empty_db, "SELECT id FROM checkpoint_items WHERE id = $1", ids["item"])) is not None
+
+
+# ---------------------------------------------------------------------------
+# Offline mode (``alembic upgrade --sql``): SQL generation only, no connection
+# ---------------------------------------------------------------------------
+
+# Never connected to: offline mode only needs the dialect.
+OFFLINE_URL = "postgresql+asyncpg://offline@localhost/amsc_test_offline"
+
+
+def _offline_sql(direction: str, revisions: str) -> str:
+    buffer = io.StringIO()
+    cfg = Config(str(helpers.ALEMBIC_INI), output_buffer=buffer)
+    cfg.attributes["database_url"] = OFFLINE_URL
+    cfg.attributes["configure_logger"] = False
+    getattr(command, direction)(cfg, revisions, sql=True)
+    return buffer.getvalue()
+
+
+def test_offline_upgrade_generates_sql_for_every_revision() -> None:
+    sql = _offline_sql("upgrade", "base:head")
+
+    for marker in (
+        "CREATE TABLE tenants",                            # 0001
+        "fk_memory_versions_record_id_tenant",             # 0002
+        "trg_forbid_tenant_id_change",                     # 0002
+        "ck_memberships_status",                           # 0003 (approver pre-check skipped offline)
+        "fk_approvals_approver_user_id_tenant",            # 0003
+        "trg_audit_events_no_truncate",                    # 0004
+        "fk_checkpoint_items_version_matches_record",      # 0005
+    ):
+        assert marker in sql, f"offline upgrade SQL is missing {marker}"
+    assert "UPDATE alembic_version SET version_num='0005'" in sql
+
+
+def test_offline_downgrade_generates_sql_back_to_base() -> None:
+    sql = _offline_sql("downgrade", "head:base")
+
+    for marker in (
+        "DROP CONSTRAINT fk_checkpoint_items_version_matches_record",  # 0005
+        "DROP TRIGGER IF EXISTS trg_audit_events_no_truncate",          # 0004
+        "DROP CONSTRAINT ck_memberships_status",                        # 0003
+        "DROP TABLE tenants",                                           # 0001
+    ):
+        assert marker in sql, f"offline downgrade SQL is missing {marker}"

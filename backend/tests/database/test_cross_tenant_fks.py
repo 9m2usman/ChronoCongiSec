@@ -149,13 +149,26 @@ TENANT_ID_TABLES = sorted({r.child for r in TENANT_RELATIONSHIPS} | {r.parent fo
 })
 
 
+# audit_events rejects EVERY update (migration 0004, SQLSTATE 55000). Its append-only
+# trigger fires before the tenant_id trigger, so the stronger rejection is expected there.
+# The tenant_id trigger itself is still asserted on audit_events by
+# test_tenant_id_immutability_trigger_on_every_tenant_table.
+APPEND_ONLY_TABLES = {"audit_events"}
+
+
+def _expected_tenant_change_error(table: str):
+    if table in APPEND_ONLY_TABLES:
+        return pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="append-only")
+    return pytest.raises(asyncpg.IntegrityConstraintViolationError, match="tenant_id is immutable")
+
+
 @pytest.mark.parametrize("table", TENANT_ID_TABLES)
 async def test_tenant_id_cannot_be_changed(factory: RowFactory, tx_conn, table: str) -> None:
     tenant_a = await factory.tenant()
     tenant_b = await factory.tenant()
     row_id = await factory.create(table, tenant_a)
 
-    with pytest.raises(asyncpg.IntegrityConstraintViolationError, match="tenant_id is immutable"):
+    with _expected_tenant_change_error(table):
         async with tx_conn.transaction():
             await tx_conn.execute(f"UPDATE {table} SET tenant_id = $1 WHERE id = $2", tenant_b, row_id)
 
