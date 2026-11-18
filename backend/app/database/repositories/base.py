@@ -33,6 +33,14 @@ class TenantScopeError(ValueError):
     """Raised when an operation would cross or change a tenant boundary."""
 
 
+def check_page(limit: Any, offset: Any) -> None:
+    """Pagination contract shared by every repository: 1 <= limit <= 100 (int), offset >= 0 (int)."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PAGE_SIZE:
+        raise ValueError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be an integer >= 0")
+
+
 class TenantScopedRepository(Generic[ModelT]):
     """CRUD for one tenant-owned model, always filtered by ``tenant_id``.
 
@@ -63,10 +71,7 @@ class TenantScopedRepository(Generic[ModelT]):
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def list(self, *, limit: int = DEFAULT_PAGE_SIZE, offset: int = 0, **filters: Any) -> Sequence[ModelT]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PAGE_SIZE:
-            raise ValueError(f"limit must be between 1 and {MAX_PAGE_SIZE}")
-        if offset < 0:
-            raise ValueError("offset must be >= 0")
+        check_page(limit, offset)
         self._check_fields(filters)
         stmt = select(self._model).where(self._model.tenant_id == self.tenant_id)
         for name, value in filters.items():
