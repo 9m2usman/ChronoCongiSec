@@ -277,3 +277,69 @@ Questions:
 
 **Scope boundary:** No changes to M3 ingestion/lineage services, M1 APIs/authentication, M4 policy behavior, M5 UI, or M7 Docker/CI ownership. M6 supplies the database constraint and tests only. The existing checkpoint schema/payload remains intact.
 
+---
+
+## Day 1–3 closure verification (2026-11-18)
+
+Branch: local `fix/m6-day1-3-closure`, created from `origin/main` at `b7d68d9` (PR #5 merged in `3b5e6e2`). The upstream was removed so that a stray `git push` cannot target `main`. Nothing is pushed or merged. No Day 4 work.
+
+**Baseline (before any change)**
+- `pytest backend/tests/database`: **11 failed, 328 passed**. These are the same 11 failures as the 17-11 run:
+  - `test_same_tenant_reference_is_accepted`, `test_forged_cross_tenant_update_is_rejected` and `test_cascade_delete_removes_child`, each × `checkpoint_items.{checkpoint_id, record_id, version_id}` (9);
+  - `test_tenant_id_cannot_be_changed[checkpoint_items]`;
+  - `test_tenant_id_cannot_be_changed[audit_events]`.
+
+**Root causes (verified)**
+- 10 failures: the shared `RowFactory` only understood FKs with one reference column. For `checkpoint_items` it created the version for a *different* record, and migration 0005's FK correctly rejected the row. The database rule was right; the test data was wrong.
+- 1 failure: on `audit_events`, the 0004 append-only trigger (`trg_audit_events_no_update_delete`) fires before `trg_forbid_tenant_id_change` (alphabetical trigger order). The UPDATE is refused with SQLSTATE 55000 instead of the tenant message. The rejection is stronger, not weaker.
+
+**What was already correct (no change)**
+- Migrations 0001–0005 and all models are unchanged. Model/migration drift test: no diff. Single head `0005`; chain `0001→0002→0003→0004→0005`.
+- 0004 blocks UPDATE, DELETE and TRUNCATE with SQLSTATE 55000 and is reversible.
+- 0005's 3-column FK and its parent key `UNIQUE (tenant_id, record_id, id)` match the model.
+
+**Changes (tests only, `backend/tests/database/`)**
+- `factory.py`: `SchemaInfo` now loads multi-column ("linked") FKs (`LinkedReference`). `RowFactory.create` keeps their columns consistent:
+  - nothing supplied: the record is created first, then a version of that record;
+  - only `version_id` supplied: `record_id` is copied from that version;
+  - only `record_id` supplied: a version of that record is created;
+  - both supplied: kept unchanged, so negative tests can still forge mismatched or cross-tenant data.
+  - Sole-`tenant_id` FKs are ignored as before.
+- `test_cross_tenant_fks.py`: for `audit_events`, `test_tenant_id_cannot_be_changed` now expects the append-only rejection (`ObjectNotInPrerequisiteStateError`, "append-only"). Every other table still expects "tenant_id is immutable". The tenant trigger on `audit_events` is still asserted by `test_tenant_id_immutability_trigger_on_every_tenant_table`.
+- `test_audit_append_only.py` (owner's tests, strengthened):
+  - Each rejection must be `ObjectNotInPrerequisiteStateError`, with `sqlstate == "55000"` and the trigger's message, instead of any `PostgresError`.
+  - The whole row must be unchanged afterwards (not only the row count).
+  - New tests: INSERT is still allowed; `TRUNCATE tenants CASCADE` is refused; both triggers are installed and enabled.
+- `relationships.py` + `test_schema_rules.py`: the hard-coded `checkpoint_items` exception is replaced by a data-driven `LINKED_RELATIONSHIPS` entry.
+  - The composite rule now counts inspected FKs exactly (`== 38 + 1`, previously `>=`).
+  - New test: `test_linked_relationships_match_expected_list_exactly`.
+- `test_factory.py` (new, 8 tests): factory regression tests, including that forged mismatched, cross-tenant and unknown versions are still rejected.
+- `test_migrations.py` (4 new tests):
+  - 0004/0005 keep existing data on upgrade and downgrade;
+  - a pre-existing mismatched checkpoint item makes 0005 fail and roll back completely (still at `0004`, no leftover parent key);
+  - offline `--sql` upgrade (base→head) and downgrade (head→base) generate the expected SQL. This covers the `78d9f6c` fix.
+
+**Test evidence** (TEST_DATABASE_URL set only for the pytest process; local docker `postgres:16`; temporary `amsc_test_*` databases only)
+- `pytest backend/tests/database -q`: **355 passed, 0 failed** (339 existing + 16 new).
+- `pytest backend/tests/database/test_migrations.py -v`: **11 passed**.
+- `pytest -q` (full backend suite): **529 passed, 0 failed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch **copy**; the repository was not modified:
+  - A. Factory ignores linked FKs: 13 FAILED (the original 10 + 3 factory tests).
+  - B. 0004 without the TRUNCATE trigger: 4 FAILED.
+  - C. 0004 raising `P0001` instead of `55000`: 5 FAILED. The old broad `PostgresError` tests would have passed this break.
+  - D. 0005's 3-column FK removed (migration + model): 12 FAILED.
+
+**Known limitations (not fixed here; migrations 0001–0005 deliberately unchanged)**
+- LOW: 0005 has no explicit pre-check. It still fails safely (FK error, full rollback; see the test above), but without an M6-style message.
+- LOW: the 2-column FK `fk_checkpoint_items_version_id_tenant` and its index are now redundant, because the 3-column FK implies them. They are harmless; dropping them would need a new migration (candidate for later).
+- LOW: 0004's function `prevent_audit_event_mutation` uses `CREATE OR REPLACE` and has no `amsc_` prefix.
+- Security gaps owned outside this task are unchanged: no RLS, app runs as superuser/table owner (append-only triggers can be disabled), shared migration/app credential, TLS not enforced, no timeouts, no CI workflow. See the Phase B notes for owners and questions.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "355 passed"
+```
+
+
