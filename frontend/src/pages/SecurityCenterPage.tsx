@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useSecurityIncidents, useQuarantineMutation } from '@/hooks';
 import { ForensicErrorBoundary } from '@/components/common/ForensicErrorBoundary';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   ShieldAlert,
   ArrowUpRight,
-  Loader2,
   Ban,
   RotateCcw,
   AlertTriangle,
@@ -15,15 +15,17 @@ import {
   ShieldCheck,
   CheckCircle2,
   FileText,
+  AlertCircle,
 } from 'lucide-react';
 
 export const SecurityCenterPage: React.FC = () => {
   const navigate = useNavigate();
   const { activeTenant, openInspector } = useWorkstationStore();
-  const { data: incidents, isLoading } = useSecurityIncidents();
+  const { data: incidents, isLoading, error } = useSecurityIncidents();
   const quarantineMutation = useQuarantineMutation();
 
   const [quarantinedIds, setQuarantinedIds] = useState<Record<string, boolean>>({});
+  const [quarantineError, setQuarantineError] = useState<string | null>(null);
 
   // 4 Kill-Chain Stages
   const KILL_CHAIN_STAGES = [
@@ -65,8 +67,30 @@ export const SecurityCenterPage: React.FC = () => {
     },
   ];
 
-  // Map incidents to kill-chain stages
-  const defaultIncidents = [
+  // Default campaign incidents for active tenant
+  const defaultIncidents = activeTenant.id === 'tenant-betashield' ? [
+    {
+      id: 'INC-BETA-001',
+      stage: 'INGEST_POISONING',
+      threat_type: 'Distributed Port 22 SSH Brute Force Ingress',
+      severity: 'HIGH',
+      target_agent_name: 'CyberDefenseAnalyst-01',
+      tainted_chunk_id: 'rec-beta-101',
+      evidence_summary: 'Brute-force attempts against host gateway evaluated against intrusion response playbook.',
+      created_at: '10m ago',
+    },
+  ] : activeTenant.id === 'tenant-gammaai' ? [
+    {
+      id: 'INC-GAMMA-001',
+      stage: 'DRIFT_SPIKE',
+      threat_type: 'High Replica Spike Threshold Anomaly',
+      severity: 'MEDIUM',
+      target_agent_name: 'CloudInfrastructureBot-01',
+      tainted_chunk_id: 'rec-gamma-201',
+      evidence_summary: 'Cluster autoscaling request evaluating pod memory constraints.',
+      created_at: '45m ago',
+    },
+  ] : [
     {
       id: 'INC-2026-0812-A',
       stage: 'INGEST_POISONING',
@@ -110,6 +134,7 @@ export const SecurityCenterPage: React.FC = () => {
   ];
 
   const handleQuarantine = (chunkId: string) => {
+    setQuarantineError(null);
     quarantineMutation.mutate(
       {
         recordId: chunkId,
@@ -121,6 +146,9 @@ export const SecurityCenterPage: React.FC = () => {
       {
         onSuccess: () => {
           setQuarantinedIds((prev) => ({ ...prev, [chunkId]: true }));
+        },
+        onError: (err: any) => {
+          setQuarantineError(err.message || 'Quarantine mutation failed on server. Memory NOT isolated.');
         },
       }
     );
@@ -153,12 +181,27 @@ export const SecurityCenterPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Quarantine Error Alert */}
+        {quarantineError && (
+          <div className="p-3 bg-red-950/80 border border-red-500 rounded-lg text-xs text-red-200 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{quarantineError}</span>
+            </div>
+            <button
+              onClick={() => setQuarantineError(null)}
+              className="px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-[10px] text-red-200"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {/* Kill-Chain Alert Triage Board (4 Columns) */}
         {isLoading ? (
-          <div className="p-16 flex items-center justify-center text-slate-400 gap-2 text-xs">
-            <Loader2 className="w-5 h-5 animate-spin text-red-400" />
-            Loading kill-chain threat telemetry...
-          </div>
+          <StateBanner type="loading" title="Loading Kill-Chain Threat Telemetry..." message="Evaluating multi-stage poisoning and injection campaigns..." />
+        ) : error ? (
+          <StateBanner type="unavailable" title="Live Security Incidents Stream Offline" message="GET /security/incidents route is pending backend deployment. Loaded campaign baseline." />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {KILL_CHAIN_STAGES.map((stage) => {

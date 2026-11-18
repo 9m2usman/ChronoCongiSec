@@ -1,15 +1,16 @@
 import { create } from 'zustand';
+import { UserProfileResponse } from '@/types';
 
-export type TenantId = 'tenant-alphacorp' | 'tenant-betashield' | 'tenant-gammaai';
+export type TenantId = 'tenant-alphacorp' | 'tenant-betashield' | 'tenant-gammaai' | string;
 
 export interface TenantInfo {
-  id: TenantId;
+  id: string;
   name: string;
   slug: string;
-  badge: string;
+  badge?: string;
 }
 
-export const AVAILABLE_TENANTS: TenantInfo[] = [
+export const DEFAULT_AVAILABLE_TENANTS: TenantInfo[] = [
   { id: 'tenant-alphacorp', name: 'AlphaCorp (Company A)', slug: 'alphacorp', badge: 'FINANCIAL_AI' },
   { id: 'tenant-betashield', name: 'BetaShield (Company B)', slug: 'betashield', badge: 'DEFENSE_CYBER' },
   { id: 'tenant-gammaai', name: 'GammaAI (Company C)', slug: 'gammaai', badge: 'AUTONOMOUS_OPS' },
@@ -24,8 +25,18 @@ export interface InspectorPayload {
   details: Record<string, any>;
 }
 
+export type ApiMode = 'LIVE_CONNECTED' | 'SCHEMA_FALLBACK' | 'BACKEND_OFFLINE';
+
 interface WorkstationState {
+  // Session Authentication
+  authToken: string | null;
+  currentUser: UserProfileResponse | null;
+  setAuth: (token: string | null, user: UserProfileResponse | null) => void;
+  logout: () => void;
+
   // Tenancy
+  availableTenants: TenantInfo[];
+  setAvailableTenants: (tenants: TenantInfo[]) => void;
   activeTenant: TenantInfo;
   setActiveTenant: (tenant: TenantInfo) => void;
 
@@ -48,12 +59,40 @@ interface WorkstationState {
   setAttackReplayOpen: (open: boolean) => void;
 
   // API Mode
-  apiMode: 'LIVE_CONNECTED' | 'SCHEMA_FALLBACK';
-  setApiMode: (mode: 'LIVE_CONNECTED' | 'SCHEMA_FALLBACK') => void;
+  apiMode: ApiMode;
+  setApiMode: (mode: ApiMode) => void;
 }
 
+const INITIAL_TOKEN = typeof window !== 'undefined' ? sessionStorage.getItem('amsc_auth_token') : null;
+
 export const useWorkstationStore = create<WorkstationState>((set) => ({
-  activeTenant: AVAILABLE_TENANTS[0],
+  authToken: INITIAL_TOKEN,
+  currentUser: null,
+  setAuth: (token, user) => {
+    if (typeof window !== 'undefined') {
+      if (token) {
+        sessionStorage.setItem('amsc_auth_token', token);
+      } else {
+        sessionStorage.removeItem('amsc_auth_token');
+      }
+    }
+    set({ authToken: token, currentUser: user });
+  },
+  logout: () => {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('amsc_auth_token');
+    }
+    set({
+      authToken: null,
+      currentUser: null,
+      apiMode: 'SCHEMA_FALLBACK',
+    });
+  },
+
+  availableTenants: DEFAULT_AVAILABLE_TENANTS,
+  setAvailableTenants: (tenants) => set({ availableTenants: tenants }),
+
+  activeTenant: DEFAULT_AVAILABLE_TENANTS[0],
   setActiveTenant: (tenant) => set({ activeTenant: tenant }),
 
   sidebarCollapsed: false,
@@ -70,6 +109,9 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
   attackReplayOpen: false,
   setAttackReplayOpen: (open) => set({ attackReplayOpen: open }),
 
-  apiMode: 'SCHEMA_FALLBACK', // Default to resilient fallback until live backend ping
+  apiMode: 'SCHEMA_FALLBACK',
   setApiMode: (mode) => set({ apiMode: mode }),
 }));
+
+// Backwards compatibility alias
+export const AVAILABLE_TENANTS = DEFAULT_AVAILABLE_TENANTS;

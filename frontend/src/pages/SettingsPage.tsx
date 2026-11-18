@@ -37,10 +37,13 @@ export const SettingsPage: React.FC = () => {
   const handleRotateKey = () => {
     setIsRotatingKey(true);
     setTimeout(() => {
-      const randomHex = Math.random().toString(36).substring(2, 8);
-      setApiKeyPrefix(`amsc_live_sk_${activeTenant.slug}_${randomHex}`);
+      // Use cryptographically secure PRNG via Web Crypto API instead of Math.random()
+      const randomBytes = new Uint8Array(4);
+      window.crypto.getRandomValues(randomBytes);
+      const secureHex = Array.from(randomBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      setApiKeyPrefix(`amsc_live_sk_${activeTenant.slug}_${secureHex}`);
       setIsRotatingKey(false);
-    }, 600);
+    }, 400);
   };
 
   const handleCopyKey = () => {
@@ -51,7 +54,7 @@ export const SettingsPage: React.FC = () => {
 
   const handleSave = () => {
     setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    setTimeout(() => setSaved(false), 4000);
   };
 
   return (
@@ -82,9 +85,12 @@ export const SettingsPage: React.FC = () => {
 
         {/* Saved Notification Banner */}
         {saved && (
-          <div className="p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-lg text-xs text-emerald-300 flex items-center gap-2 animate-fadeIn">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-            Security policies and tenant governance configuration persisted successfully.
+          <div className="p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-lg text-xs text-emerald-300 flex items-center justify-between animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>Client configuration updated. Note: Backend persistence requires M1 Day 7 /tenants/settings endpoint.</span>
+            </div>
+            <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">Preview Active</span>
           </div>
         )}
 

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useAuditEvents } from '@/hooks';
 import { ForensicErrorBoundary } from '@/components/common/ForensicErrorBoundary';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   FileCheck,
   Download,
@@ -94,7 +95,7 @@ export const AuditCenterPage: React.FC = () => {
       evidence_sha256: '5b1a37c4d5e9a4f210871928374a56b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3',
       metadata: {
         scope: 'read:write',
-        algorithm: 'Ed25519-HMAC-SHA256',
+        algorithm: 'HMAC-SHA256',
         rotation_cycle_days: 90,
       },
     },
@@ -158,13 +159,13 @@ export const AuditCenterPage: React.FC = () => {
     setIsExporting(true);
 
     const bundle = {
-      compliance_standard: 'SOC2-Type-II / ISO-27001 Cryptographic Audit Evidence',
+      compliance_standard: 'SOC2-Type-II / ISO-27001 Audit Evidence',
       amsc_engine_version: '1.0.0-SEC-010',
       tenant_id: activeTenant.id,
       tenant_name: activeTenant.name,
       export_timestamp: new Date().toISOString(),
-      merkle_root_sha256: '0x9f1a8c3e4b7d2f1056e890123456789abcdef0123456789abcdef0123456789a',
-      integrity_signature: 'ED25519:3b9487c6f082e4a1985d26a7e0c451b6e4d293f7c10b84a92c3d5e6f7a8b9c0d',
+      integrity_verification: 'SHA-256_CONTENT_HASH',
+      cryptographic_signatures: 'PENDING_BACKEND_KMS_SIGNING',
       events_count: filteredLogs.length,
       events: filteredLogs,
     };
@@ -193,7 +194,7 @@ export const AuditCenterPage: React.FC = () => {
               Audit Center & Compliance Ledger
             </h1>
             <p className="text-xs text-slate-400 mt-0.5">
-              Immutable cryptographic audit trail (Append-Only SEC-010) strictly partitioned for{' '}
+              Immutable audit trail (Append-Only SEC-010) strictly partitioned for{' '}
               <span className="text-blue-400 font-bold">{activeTenant.name}</span>
             </p>
           </div>
@@ -215,16 +216,16 @@ export const AuditCenterPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
             <span className="text-slate-300 font-bold flex items-center gap-1">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" /> Merkle Root Integrity Verified:
+              <ShieldCheck className="w-4 h-4 text-emerald-400" /> Audit Trail Integrity:
             </span>
             <span className="font-mono text-cyan-400 text-[11px] truncate max-w-xs">
-              0x9f1a...c7e2 (Chain Height: #{allLogs.length})
+              SHA-256 Content-Addressed (Log Height: #{allLogs.length})
             </span>
           </div>
 
           <div className="flex items-center gap-2 text-[11px] text-slate-400">
             <Lock className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Zero Tampering Detected • Ed25519 Chained Signatures</span>
+            <span>Immutable Append-Only SEC-010 • Tenant Partitioned</span>
           </div>
         </div>
 
@@ -322,10 +323,9 @@ export const AuditCenterPage: React.FC = () => {
         {/* Audit Table */}
         <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden shadow-md">
           {isLoading ? (
-            <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
-              <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-              Loading cryptographic audit logs...
-            </div>
+            <StateBanner type="loading" title="Loading Cryptographic Audit Ledger..." message="Reading immutable append-only events..." />
+          ) : filteredLogs.length === 0 ? (
+            <StateBanner type="empty" title="No Audit Events Located" message={`No audit entries match the current filter criteria in ${activeTenant.name}.`} />
           ) : (
             <table className="w-full text-left text-xs">
               <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
@@ -359,7 +359,7 @@ export const AuditCenterPage: React.FC = () => {
                             ...event,
                             ledger_index: event.id,
                             compliance_status: 'SOC2-COMPLIANT',
-                            merkle_proof: '0x3f... valid',
+                            content_hash_status: 'SHA-256 Verified',
                           },
                         })
                       }

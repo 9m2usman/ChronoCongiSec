@@ -38,7 +38,7 @@ export const KnowledgeGraphPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-xs text-slate-300 flex items-center gap-1.5">
               <Lock className="w-3.5 h-3.5 text-emerald-400" />
-              DAG Root: <span className="font-mono text-cyan-400">0x8f43...7aa4</span>
+              Integrity: <span className="font-mono text-cyan-400">SHA-256 Verified DAG</span>
             </span>
           </div>
         </div>
@@ -73,8 +73,8 @@ export const KnowledgeGraphPage: React.FC = () => {
             <div className="text-[10px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
               <ShieldCheck className="w-3 h-3 text-emerald-400" /> Lineage Authority
             </div>
-            <div className="text-lg font-bold text-emerald-400 mt-1">100% Signed</div>
-            <div className="text-[10px] text-slate-400 mt-0.5">Chained Merkle provenance</div>
+            <div className="text-lg font-bold text-emerald-400 mt-1">SHA-256 Hashed</div>
+            <div className="text-[10px] text-slate-400 mt-0.5">Content-addressed provenance</div>
           </div>
         </div>
 

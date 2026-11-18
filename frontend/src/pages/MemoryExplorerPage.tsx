@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useMemories, useIngestMemoryMutation } from '@/hooks';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   Database,
   ArrowUpRight,
@@ -12,12 +13,13 @@ import {
   CheckCircle2,
   Filter,
   FileText,
+  AlertCircle,
 } from 'lucide-react';
 
 export const MemoryExplorerPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const { activeTenant, openInspector } = useWorkstationStore();
-  const { data: memories, isLoading } = useMemories();
+  const { data: memories, isLoading, error } = useMemories();
   const ingestMutation = useIngestMemoryMutation();
 
   // Status Filter: URL query param sync
@@ -165,10 +167,22 @@ export const MemoryExplorerPage: React.FC = () => {
       {/* Memory Data Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
         {isLoading ? (
-          <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
-            <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-            Loading cryptographic memory catalog...
-          </div>
+          <StateBanner type="loading" title="Querying Tenant Knowledge Chunks..." message="Fetching cryptographic checksums and trust assertions..." />
+        ) : error ? (
+          <StateBanner
+            type="unauthorized"
+            title="Knowledge Retrieval Restrained"
+            statusCode={403}
+            message="Quarantined records are isolated under SEC-004. Standard agent queries cannot retrieve them."
+          />
+        ) : filteredMemories.length === 0 ? (
+          <StateBanner
+            type="empty"
+            title="No Knowledge Chunks Located"
+            message={`No records in ${activeTenant.name} match status '${statusFilter}' and search '${searchQuery}'.`}
+            actionText="+ Ingest First Record"
+            onAction={() => setIngestModalOpen(true)}
+          />
         ) : (
           <table className="w-full text-left text-xs">
             <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
@@ -329,6 +343,13 @@ export const MemoryExplorerPage: React.FC = () => {
                       className="w-full bg-slate-950 border border-slate-700 rounded p-2.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
                     />
                   </div>
+
+                  {ingestMutation.isError && (
+                    <div className="p-3 bg-red-950/60 border border-red-500/60 rounded text-xs text-red-300 flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                      <span>{ingestMutation.error?.message || 'Failed to ingest knowledge record.'}</span>
+                    </div>
+                  )}
 
                   <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-800">
                     <button

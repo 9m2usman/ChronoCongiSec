@@ -74,6 +74,14 @@ export const AgentRewindingPage: React.FC = () => {
             setActiveStep(4);
           }, 800);
         },
+        onError: (err: any) => {
+          setRollbackLogs((prev) => [
+            ...prev,
+            `[SERVER ERROR] Operation failed: ${err.message}`,
+            `[ABORTED] Rollback failed. Tainted state snapshot preserved; memory NOT restored.`,
+          ]);
+          setActiveStep(4);
+        },
       }
     );
   };

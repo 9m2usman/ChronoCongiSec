@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useDriftObservations, useQuarantineMutation } from '@/hooks';
 import { ForensicErrorBoundary } from '@/components/common/ForensicErrorBoundary';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   TrendingDown,
-  Loader2,
   AlertTriangle,
   ShieldAlert,
   CheckCircle2,
@@ -307,10 +307,9 @@ export const DriftMonitorPage: React.FC = () => {
         {/* Drift Table */}
         <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden shadow-md">
           {isLoading ? (
-            <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
-              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
-              Calculating semantic vector drift across memories...
-            </div>
+            <StateBanner type="loading" title="Calculating Semantic Vector Drift Across Memories..." message="Computing cosine distances against verified policy baselines..." />
+          ) : filteredEntries.length === 0 ? (
+            <StateBanner type="empty" title="No Drift Observations Found" message={`No records matching filter '${statusFilter}' for ${activeTenant.name}.`} />
           ) : (
             <table className="w-full text-left text-xs">
               <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">

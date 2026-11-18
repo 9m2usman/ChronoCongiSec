@@ -6,6 +6,7 @@ import {
   useSecurityAlerts,
   useMemories,
 } from '@/hooks';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   Shield,
   Database,
@@ -15,7 +16,6 @@ import {
   CheckCircle2,
   Clock,
   ExternalLink,
-  Loader2,
   Layers,
 } from 'lucide-react';
 import {
@@ -29,7 +29,7 @@ import {
 export const OverviewPage: React.FC = () => {
   const navigate = useNavigate();
   const { activeTenant, openInspector } = useWorkstationStore();
-  const { data: decisions, isLoading: decisionsLoading } = useGatewayDecisions();
+  const { data: decisions, isLoading: decisionsLoading, error: decisionsError } = useGatewayDecisions();
   const { data: alerts } = useSecurityAlerts();
   const { data: memories } = useMemories();
 
@@ -56,14 +56,6 @@ export const OverviewPage: React.FC = () => {
         counts.SUSPICIOUS++;
       }
     });
-
-    // Provide baseline counts if empty list
-    if (list.length === 0) {
-      counts.TRUSTED = 12;
-      counts.SUSPICIOUS = 2;
-      counts.QUARANTINED = 3;
-      counts.SUPERSEDED = 4;
-    }
     return counts;
   }, [memories]);
 
@@ -328,10 +320,11 @@ export const OverviewPage: React.FC = () => {
         {/* Decisions Table */}
         <div className="overflow-x-auto">
           {decisionsLoading ? (
-            <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
-              <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-              Polling live gateway events...
-            </div>
+            <StateBanner type="loading" title="Querying Live Gateway Decision Stream" message="Evaluating ingress tool proposals against tenant security policies..." />
+          ) : decisionsError ? (
+            <StateBanner type="unavailable" title="Gateway Telemetry Unavailable" message="Direct Gateway decision stream is unavailable on the API server. Fallback stream loaded." />
+          ) : filteredDecisions.length === 0 ? (
+            <StateBanner type="empty" title="No Decisions Recorded" message={`No Gateway proposals found matching filter '${decisionFilter}' for ${activeTenant.name}.`} />
           ) : (
             <table className="w-full text-left text-xs">
               <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/40">
