@@ -698,6 +698,71 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 
 ---
 
+## Day 7 — Migration lifecycle (clean to seeded, forward and backward) and integration guide (2026-11-18)
+
+Branch: `feat/m6-day7-migration-lifecycle`, created from `origin/main` at `e25c628` (Day 6 PR #13 merged, head `0009`). Upstream removed. **No new migration**: no test found a defect that needed `0010`.
+
+**Approved by the M6 lead:** an exact-inverse fingerprint test; a test-only fixture dataset labelled "illustrative test data, not decisions"; a checksum guard for merged migrations 0001–0009; `INTEGRATION-GUIDE.md` in English for the team.
+
+**Why**
+- DOC-006:203 (M6 Day 7): "Verify database migrations from clean database to fully seeded state". Deliverable: migration clean test. Exit: "Migration runs forward and backward cleanly".
+- Gate G7: "complete documentation handover".
+- Found while planning: no product seed exists (`core/seed.py`, DOC-006:124, belongs to M7) and there is no CI workflow (`.github` contains only `CodeOwners.template`).
+
+**Built (tests and docs only; no application or migration code changed)**
+- `backend/tests/database/schema_fingerprint.py`: columns (type, nullability, default), constraints (`pg_get_constraintdef`), indexes, triggers (including enabled/disabled) and functions (`md5(pg_get_functiondef)`) of the `public` schema. Column order and OIDs are ignored, and `alembic_version` is excluded.
+- `backend/tests/database/seed_fixture.py`: **illustrative test data, not decisions**, and not the product seed (OD-27).
+  - One company with the four branches from TRD section 12.1, plus one isolation tenant (OD-28).
+  - Every one of the 36 tables gets rows.
+  - The gateway chain goes through `UnitOfWork`, the rewind through `RewindCoordinator`, and audit events through `AuditEventRepository`.
+  - Status/decision values are DOC-005 examples only and are not enforced by the schema.
+- `backend/tests/database/migration_manifest.py`: SHA-256 of merged migrations 0001–0009, computed with line endings normalised to `\n`. The values were cross-checked against the git blobs on `main`. `python -m backend.tests.database.migration_manifest` prints current hashes for adding a newly merged migration.
+- `backend/tests/database/test_migration_governance.py` (no database needed):
+  - every merged migration is unchanged;
+  - no file is inserted into merged history;
+  - revisions form a gap-free `0001…` chain whose file names match the revision and whose `down_revision` is the previous number;
+  - every migration has a docstring.
+- `backend/tests/database/test_migration_lifecycle.py`:
+  - **Exact inverse:** one database walks up revision by revision, recording a fingerprint after each step. It then walks down revision by revision, and every step must equal the recorded fingerprint, down to base. A re-upgrade must reproduce the head fingerprint.
+  - **Non-vacuous guard:** the head fingerprint must contain 36 tables, the key triggers and functions, and FK and CHECK constraints.
+  - **Clean to fully seeded and back:**
+    - fresh database, upgrade to head, seed (every table non-empty), verify integrity;
+    - walk down one revision at a time to `0001`, asserting that every table's row count is unchanged after every step;
+    - walk back up to head the same way (all pre-checks pass on this data);
+    - at the end: audit chains intact for both tenants, protection report green, rewind result kept, audit fields, decisions and the recovery snapshot byte-identical.
+    - The documented downgrade effects are asserted: memberships and sources end up `INACTIVE` (0003/0006), and the snapshot hash is rebuilt (0008).
+  - **Isolation:** the seed keeps audit events, branches and memory per tenant.
+- `docs/database-design/INTEGRATION-GUIDE.md`: setup; connecting; "which tool for which job"; examples (gateway unit of work, rewind); what the database rejects (SQLSTATE → class → what to do); rules that follow from it; migration history and what each downgrade loses; how to request a schema change; **how to add a newly merged migration's hash to the manifest**; the least-privilege role for M7; and open questions for M1/M3/M4/M7.
+
+**Test result**
+- New tests: 16 (governance 12, lifecycle 4). They passed on the first run, so the proof below was essential.
+- `pytest backend/tests/database -q`: **568 passed** (552 + 16 new).
+- `pytest -q` (full backend): **742 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0009`. No `amsc_test_*` databases or `amsc_test_role_*` roles left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. 0009 downgrade leaves its report function behind: 2 FAILED.
+  - B. 0007 downgrade also drops an index created by 0002 (removes too much): 1 FAILED.
+  - C. 0003 downgrade silently deletes approvals: 1 FAILED.
+  - D. A merged migration edited (one comment line in 0004): 1 FAILED.
+  - E. A new migration skips a number (0011 after 0009): 1 FAILED.
+  - F. Fingerprint ignores triggers: 1 FAILED (the non-vacuous guard).
+  - G. Fixture forgets a table (`outbox_events`): 1 FAILED.
+  - No test databases were left after the proofs.
+
+**Problems and fixes**
+- Comparing fingerprints from separate fresh databases per revision would need ten databases. Fix: one database walks up and records each fingerprint, then walks down and compares, which is the same guarantee in one database.
+- Column order can legitimately differ after drop/re-add cycles, so `ordinal_position` is not part of the fingerprint. Definitions are compared through PostgreSQL's deparsers (`pg_get_constraintdef`, `pg_get_triggerdef`, `pg_get_functiondef`), so formatting differences in migration code do not matter.
+- `0001 → base` drops every table by design. The seeded round trip therefore stops at `0001`; the exact-inverse test covers `0001 → base` on an empty database.
+- Git stores LF while the Windows checkout has CRLF. Fix: the manifest hashes text with normalised line endings, and the values were verified against the git blobs (`git show origin/main:<file> | tr -d '\r' | sha256sum`).
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database/test_migration_lifecycle.py backend/tests/database/test_migration_governance.py -v
+```
+
+---
+
 ## OPEN-DEPENDENCIES (living list — not implemented on purpose)
 
 Rules: nothing here is guessed or hard-coded in a migration. Each item is applied in **one final integration migration** after the owner pushes code or confirms. "Waits" names the constraint or code that is blocked. Update this list every day.
@@ -729,6 +794,8 @@ Rules: nothing here is guessed or hard-coded in a migration. Each item is applie
 | OD-23 | Where to record irreversible external actions executed before a rollback (TRD section 18, "Honest Outcome Classification"). | M4 + M2 | Possibly a column or table, plus the restore callback |
 | OD-25 | TRD section 8 says `policy_decisions` are fully permanent, but M1's gateway updates `policy_decisions.execution_status` after the tool runs. 0009 keeps `execution_status` as the only mutable column. Should the execution outcome live only in `tool_executions`, so decisions become fully append-only? | M1 + M4 | Making `execution_status` immutable too (trigger + revoking the column grant in `roles.py`) |
 | OD-26 | External anchoring of the audit chain head (TRD :517 Merkle log sealing, "Phase 2"; GAP-011 KMS/HSM). Without it, a superuser can rebuild a whole chain or cut its tail undetected (tested limit). | Project owner + M4 + M7 | Anchor table/export job and its verification |
+| OD-27 | The product seed `core/seed.py` (DOC-006:124, M7) does not exist. Until it does, the lifecycle test uses M6's `seed_fixture.py` (illustrative test data, not decisions). When M7 delivers the seed, the same down/up round trip should run on it, and CI should run both. | M7 | A lifecycle test variant on the real seed; CI job |
+| OD-28 | How many tenants does the seed contain? TRD section 12.1 / line 267: "Only ONE company is seeded"; DOC-006 gate G2 (line 215): "database seed populates 3 tenants". The M6 fixture uses one company plus one isolation tenant. | Project owner + M7 | Shape of the product seed and the isolation demo (Demo 3) |
 | OD-24 | Memory-side CASCADE paths still open: deleting a `memory_records`/`memory_versions` row cascades into versions, provenance, retrieval history, quarantines and checkpoint items (0002/0005). Should memory rows ever be physically deleted? | M3 + M4 | RESTRICT on the memory-side FKs |
 
 
