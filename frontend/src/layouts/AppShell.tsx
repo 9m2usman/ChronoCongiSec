@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { useWorkstationStore, AVAILABLE_TENANTS } from '@/stores/useWorkstationStore';
+import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useHealthCheck } from '@/hooks';
 import { DualModeBadge } from '@/components/common/DualModeBadge';
 import { CommandPalette } from '@/components/common/CommandPalette';
@@ -31,6 +31,8 @@ export const AppShell: React.FC = () => {
   const {
     activeTenant,
     setActiveTenant,
+    availableTenants,
+    currentUser,
     sidebarCollapsed,
     toggleSidebar,
     setCommandPaletteOpen,
@@ -164,7 +166,7 @@ export const AppShell: React.FC = () => {
 
               {/* Tenant Dropdown */}
               <div className="absolute top-full left-0 mt-1 w-64 bg-slate-900 border border-slate-700 rounded shadow-2xl py-1 text-xs hidden group-hover:block z-50">
-                {AVAILABLE_TENANTS.map((t) => (
+                {availableTenants.map((t) => (
                   <button
                     key={t.id}
                     onClick={() => setActiveTenant(t)}
@@ -174,7 +176,7 @@ export const AppShell: React.FC = () => {
                   >
                     <span>{t.name}</span>
                     <span className="text-[10px] px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400">
-                      {t.badge}
+                      {t.badge || 'WORKSPACE'}
                     </span>
                   </button>
                 ))}
@@ -211,11 +213,11 @@ export const AppShell: React.FC = () => {
             {/* Operator Persona */}
             <div className="hidden lg:flex items-center gap-2 pl-2 border-l border-slate-800 text-xs">
               <div className="w-6 h-6 rounded-full bg-blue-900 border border-blue-500 flex items-center justify-center font-bold text-[10px] text-blue-200">
-                SA
+                {currentUser?.full_name ? currentUser.full_name.substring(0, 2).toUpperCase() : 'SA'}
               </div>
               <div className="flex flex-col text-[11px] leading-tight">
-                <span className="text-slate-200 font-semibold">Sarah (SecOps)</span>
-                <span className="text-[9px] text-emerald-400 font-mono">MEMBER_M5</span>
+                <span className="text-slate-200 font-semibold">{currentUser?.full_name || 'Sarah (SecOps)'}</span>
+                <span className="text-[9px] text-emerald-400 font-mono">{currentUser?.role || 'MEMBER_M5'}</span>
               </div>
             </div>
           </div>

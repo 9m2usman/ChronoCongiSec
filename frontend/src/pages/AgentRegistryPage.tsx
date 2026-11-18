@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useAgents, useMemories } from '@/hooks';
+import { StateBanner } from '@/components/common/StateBanner';
 import {
   Bot,
   ArrowUpRight,
   Search,
-  Loader2,
   Key,
   Check,
   Copy,
@@ -14,7 +14,7 @@ import {
 
 export const AgentRegistryPage: React.FC = () => {
   const { activeTenant, openInspector } = useWorkstationStore();
-  const { data: agents, isLoading } = useAgents();
+  const { data: agents, isLoading, error } = useAgents();
   const { data: memories } = useMemories();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -45,8 +45,8 @@ export const AgentRegistryPage: React.FC = () => {
 
   // Compute active memory count per agent
   const getAgentMemoryCount = (agentId: string) => {
-    if (!memories) return 2;
-    return memories.filter((m) => m.agent_id === agentId).length || 1;
+    if (!memories) return 0;
+    return memories.filter((m) => m.agent_id === agentId).length;
   };
 
   // Blocked tools by trust tier (fail-closed security architecture)
@@ -122,10 +122,11 @@ export const AgentRegistryPage: React.FC = () => {
       {/* Entitlement Matrix Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
         {isLoading ? (
-          <div className="p-8 flex items-center justify-center text-slate-400 gap-2 text-xs">
-            <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-            Loading agent entitlement matrix...
-          </div>
+          <StateBanner type="loading" title="Loading Agent Entitlement Matrix..." message="Verifying runtime identity and tool access boundaries..." />
+        ) : error ? (
+          <StateBanner type="unavailable" title="Agent Registry Unavailable" message="Direct agent registry endpoint is unavailable on the API server. Loaded tenant fallback entitlements." />
+        ) : filteredAgents.length === 0 ? (
+          <StateBanner type="empty" title="No Registered Agents Found" message={`No agents registered in ${activeTenant.name} matching filter criteria.`} />
         ) : (
           <table className="w-full text-left text-xs">
             <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
