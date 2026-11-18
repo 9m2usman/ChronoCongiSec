@@ -5,22 +5,35 @@ Owner: M3 — Knowledge & Memory Systems Lead
 """
 
 from .ingestion import ingest_memory
-from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
+from .integrity import (
+    MemoryIntegrityError,
+    audit_memory_integrity,
+    sha256_hex,
+    verify_checksum,
+)
 from .lineage import LineageResult, get_ancestors, get_descendants
 from .models import (
     AgentRecord,
+    KnowledgeGraphEdge,
+    KnowledgeGraphNode,
+    KnowledgeGraphResponse,
+    LineDiffItem,
     MemoryDetailResponse,
     MemoryIngestRequest,
+    MemoryIntegrityReport,
     MemoryRecord,
     MemoryRecordResponse,
     MemoryRefCheck,
     MemoryRefStatus,
     MemoryVersion,
+    MismatchedVersionItem,
     ProvenanceEdge,
     ProvenanceRelationType,
     RecordType,
     SourceRecord,
+    TimelineEvent,
     TrustState,
+    VersionCompareResponse,
 )
 from .provenance import (
     MAX_PROVENANCE_DEPTH,
@@ -43,7 +56,12 @@ from .retrieval import (
     transition_memory_trust_state,
     verify_memory_refs,
 )
-from .versioning import update_memory
+from .versioning import (
+    MAX_DIFF_LINES,
+    compare_versions,
+    get_timeline,
+    update_memory,
+)
 
 __all__ = [
     "MemoryRecord",
@@ -82,4 +100,16 @@ __all__ = [
     "MemoryRefStatus",
     "verify_memory_refs",
     "MAX_MEMORY_REFS_PER_PROPOSAL",
+    "compare_versions",
+    "get_timeline",
+    "MAX_DIFF_LINES",
+    "audit_memory_integrity",
+    "LineDiffItem",
+    "VersionCompareResponse",
+    "TimelineEvent",
+    "KnowledgeGraphNode",
+    "KnowledgeGraphEdge",
+    "KnowledgeGraphResponse",
+    "MismatchedVersionItem",
+    "MemoryIntegrityReport",
 ]

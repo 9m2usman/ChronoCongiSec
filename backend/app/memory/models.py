@@ -190,3 +190,90 @@ class MemoryDetailResponse(BaseModel):
     record: MemoryRecord
     versions: List[MemoryVersion] = []
     provenance: List[ProvenanceEdge] = []
+
+
+class LineDiffItem(BaseModel):
+    """Individual added or removed line with line number."""
+    line_number: int
+    text: str
+
+
+class VersionCompareResponse(BaseModel):
+    """Response payload for GET /chronimem/records/{id}/compare matching Document 05 Section 5.1."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    record_id: str
+    v_from: int
+    v_to: int
+    trust_state: str
+    checksum_from: str
+    checksum_to: str
+    unified_diff: str
+    added_lines: List[LineDiffItem] = Field(default_factory=list)
+    removed_lines: List[LineDiffItem] = Field(default_factory=list)
+    truncated: bool = False
+
+
+class TimelineEvent(BaseModel):
+    """Timeline entry for GET /chronimem/timeline matching Document 05 Section 5.1."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    record_id: str
+    version: int
+    checksum: str
+    created_at: Optional[datetime] = None
+    trust_state: str
+    record_type: str
+
+
+class KnowledgeGraphNode(BaseModel):
+    """Node in topological knowledge graph (MemoryRecord projection without content)."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    id: str
+    record_type: str
+    trust_state: str
+    current_version: int
+    agent_id: Optional[str] = None
+
+
+class KnowledgeGraphEdge(BaseModel):
+    """Edge in topological knowledge graph (ProvenanceEdge projection)."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    id: str
+    from_record_id: str
+    to_record_id: str
+    relation_type: str
+
+
+class KnowledgeGraphResponse(BaseModel):
+    """Response payload for GET /knowledge/graph matching Document 05 Section 5.1."""
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    nodes: List[KnowledgeGraphNode] = Field(default_factory=list)
+    edges: List[KnowledgeGraphEdge] = Field(default_factory=list)
+    complete: bool = True
+    truncated_reason: Optional[str] = None
+
+
+class MismatchedVersionItem(BaseModel):
+    """Item indicating a mismatched cryptographic checksum for a specific version."""
+    model_config = ConfigDict(from_attributes=True)
+
+    record_id: str
+    version: int
+
+
+class MemoryIntegrityReport(BaseModel):
+    """Comprehensive integrity report from audit_memory_integrity."""
+    model_config = ConfigDict(from_attributes=True)
+
+    total_records: int
+    total_versions: int
+    matched: int
+    mismatched: List[MismatchedVersionItem] = Field(default_factory=list)
+    missing_versions: List[str] = Field(default_factory=list)
+    match_percentage: float
+    started_at: datetime
+    finished_at: datetime
