@@ -6,6 +6,17 @@ a minimal valid row for any table: NOT NULL columns without defaults get a
 generated value, and required references get a freshly created parent row in
 the SAME tenant. Tests then override one column to forge a cross-tenant or
 missing-parent reference.
+
+Multi-column ("linked") foreign keys such as migration 0005's
+``checkpoint_items (tenant_id, record_id, version_id) -> memory_versions
+(tenant_id, record_id, id)`` tie several child columns to ONE parent row. The
+factory keeps those columns consistent:
+
+- nothing supplied: create the record first, then a version OF that record;
+- only the parent row supplied (``version_id``): copy ``record_id`` from it;
+- only the other columns supplied (``record_id``): create a version of that record;
+- everything supplied: use it unchanged, so negative tests can still forge a
+  mismatched or cross-tenant combination and assert that PostgreSQL rejects it.
 """
 
 import uuid
@@ -25,11 +36,23 @@ class _Column:
     required: bool  # NOT NULL and no server default
 
 
+@dataclass(frozen=True)
+class LinkedReference:
+    """A FK with more than one non-tenant column, e.g. (record_id, version_id) -> (record_id, id)."""
+
+    child: str
+    parent: str
+    anchor: str  # child column that references parent.id
+    derived: tuple[tuple[str, str], ...]  # (child column, parent column) pairs besides the anchor
+
+
 @dataclass
 class SchemaInfo:
     columns: dict[str, list[_Column]] = field(default_factory=dict)
     # (table, column) -> referenced table, for single-column refs and composite tenant refs
     references: dict[tuple[str, str], str] = field(default_factory=dict)
+    # table -> linked (multi-column) references
+    linked: dict[str, list[LinkedReference]] = field(default_factory=dict)
 
     @classmethod
     async def load(cls, conn: asyncpg.Connection) -> "SchemaInfo":
@@ -51,20 +74,36 @@ class SchemaInfo:
         fk_rows = await conn.fetch(
             """
             SELECT src.relname AS child, ref.relname AS parent,
-                   array_agg(sa.attname ORDER BY k.ord) AS cols
+                   array_agg(sa.attname::text ORDER BY k.ord) AS cols,
+                   array_agg(ra.attname::text ORDER BY k.ord) AS parent_cols
             FROM pg_constraint c
             JOIN pg_class src ON src.oid = c.conrelid
             JOIN pg_class ref ON ref.oid = c.confrelid
-            JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+            JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS k(attnum, ref_attnum, ord) ON TRUE
             JOIN pg_attribute sa ON sa.attrelid = c.conrelid AND sa.attnum = k.attnum
+            JOIN pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = k.ref_attnum
             WHERE c.contype = 'f' AND src.relnamespace = 'public'::regnamespace
             GROUP BY c.oid, src.relname, ref.relname
             """
         )
         for r in fk_rows:
-            ref_cols = [c for c in r["cols"] if c != "tenant_id"]
-            if len(ref_cols) == 1:
-                info.references[(r["child"], ref_cols[0])] = r["parent"]
+            pairs = [(c, p) for c, p in zip(r["cols"], r["parent_cols"]) if c != "tenant_id"]
+            if not pairs:
+                continue  # tenant_id -> tenants.id: filled from the tenant argument
+            if len(pairs) == 1:
+                info.references[(r["child"], pairs[0][0])] = r["parent"]
+                continue
+            anchors = [c for c, p in pairs if p == "id"]
+            if len(anchors) != 1:
+                raise NotImplementedError(f"Unsupported multi-column FK {r['child']}{r['cols']} -> {r['parent']}")
+            info.linked.setdefault(r["child"], []).append(
+                LinkedReference(
+                    child=r["child"],
+                    parent=r["parent"],
+                    anchor=anchors[0],
+                    derived=tuple((c, p) for c, p in pairs if p != "id"),
+                )
+            )
         return info
 
 
@@ -91,23 +130,21 @@ class RowFactory:
 
     async def create(self, table: str, tenant_id: str | None, **overrides: Any) -> str:
         """Insert a minimal valid row and return its id."""
+        resolved = dict(overrides)
+        for link in self.schema.linked.get(table, ()):
+            await self._resolve_linked(link, tenant_id, resolved)
+
         values: dict[str, Any] = {}
         for col in self.schema.columns[table]:
-            if col.name in overrides:
-                values[col.name] = overrides[col.name]
+            if col.name in resolved:
+                values[col.name] = resolved[col.name]
             elif col.name == "id":
                 values["id"] = str(uuid.uuid4())
             elif col.name == "tenant_id":
                 if tenant_id is not None:
                     values["tenant_id"] = tenant_id
-            elif not col.required:
-                continue
-            elif (table, col.name) in self.schema.references:
-                parent = self.schema.references[(table, col.name)]
-                parent_tenant = None if parent in GLOBAL_PARENT_VALUES else tenant_id
-                values[col.name] = await self.create(parent, parent_tenant)
-            else:
-                values[col.name] = _value_for(col)
+            elif col.required:
+                values[col.name] = await self._generate(table, col, tenant_id)
 
         names = list(values)
         placeholders = ", ".join(f"${i}" for i in range(1, len(names) + 1))
@@ -116,3 +153,36 @@ class RowFactory:
             *values.values(),
         )
         return values["id"]
+
+    async def _generate(self, table: str, col: _Column, tenant_id: str | None) -> Any:
+        """Value for a required column: a new same-tenant parent for references, else a dummy value."""
+        parent = self.schema.references.get((table, col.name))
+        if parent is None:
+            return _value_for(col)
+        parent_tenant = None if parent in GLOBAL_PARENT_VALUES else tenant_id
+        return await self.create(parent, parent_tenant)
+
+    async def _resolve_linked(self, link: LinkedReference, tenant_id: str | None, resolved: dict[str, Any]) -> None:
+        """Make the columns of one linked FK point at the SAME parent row (see module docstring)."""
+        derived_given = [c for c, _ in link.derived if c in resolved]
+        if link.anchor in resolved:
+            if len(derived_given) == len(link.derived):
+                return  # caller supplied everything: keep it, even if forged
+            cols = ", ".join(p for _, p in link.derived)
+            row = await self.conn.fetchrow(f"SELECT {cols} FROM {link.parent} WHERE id = $1", resolved[link.anchor])
+            if row is not None:
+                for child_col, parent_col in link.derived:
+                    resolved.setdefault(child_col, row[parent_col])
+            # Unknown parent: leave the rest to normal generation; the FK rejects the insert.
+            return
+
+        columns = {c.name: c for c in self.schema.columns[link.child]}
+        if not columns[link.anchor].required and not derived_given:
+            return  # optional link left empty
+        for child_col, _ in link.derived:
+            if child_col not in resolved:
+                resolved[child_col] = await self._generate(link.child, columns[child_col], tenant_id)
+        parent_tenant = None if link.parent in GLOBAL_PARENT_VALUES else tenant_id
+        resolved[link.anchor] = await self.create(
+            link.parent, parent_tenant, **{parent_col: resolved[child_col] for child_col, parent_col in link.derived}
+        )

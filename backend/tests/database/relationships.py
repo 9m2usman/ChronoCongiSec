@@ -63,6 +63,32 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("trace_spans", "trace_id", "traces", "CASCADE"),
 )
 
+class LinkedRel(NamedTuple):
+    """A tenant-consistent FK over more than one reference column (one parent row)."""
+
+    child: str
+    columns: tuple[str, ...]  # child columns, tenant_id first
+    parent: str
+    parent_columns: tuple[str, ...]  # referenced key, tenant_id first
+    on_delete: str
+
+    @property
+    def id(self) -> str:
+        return f"{self.child}({', '.join(self.columns[1:])})"
+
+
+# Migration 0005: a checkpoint item's version must belong to the SAME record
+# (the two-column FKs above only prove "same tenant").
+LINKED_RELATIONSHIPS: tuple[LinkedRel, ...] = (
+    LinkedRel(
+        "checkpoint_items",
+        ("tenant_id", "record_id", "version_id"),
+        "memory_versions",
+        ("tenant_id", "record_id", "id"),
+        "CASCADE",
+    ),
+)
+
 # ON DELETE rule of every tenant_id -> tenants.id FK (0003). Forensic evidence tables
 # are RESTRICT: a tenant that still owns them must be deactivated, not deleted.
 FORENSIC_TENANT_TABLES = frozenset({
