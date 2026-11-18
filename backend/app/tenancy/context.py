@@ -68,6 +68,7 @@ class MembershipRecord:
     tenant_id: str
     user_id: str
     role: str
+    status: str = "ACTIVE"
 
 
 # ============================================================================
@@ -141,12 +142,16 @@ class InMemoryAuthRepository:
         return self.memberships.get((user_id, tenant_id))
 
     async def list_user_tenants(self, user_id: str) -> List[TenantRecord]:
-        user_tenant_ids = [
-            t_id for (u_id, t_id) in self.memberships.keys() if u_id == user_id
+        user_active_tenant_ids = [
+            t_id
+            for (u_id, t_id), m in self.memberships.items()
+            if u_id == user_id
+            and getattr(m, "status", None) is not None
+            and str(getattr(m, "status", "")).strip().upper() == "ACTIVE"
         ]
         return [
             self.tenants[t_id]
-            for t_id in user_tenant_ids
+            for t_id in user_active_tenant_ids
             if t_id in self.tenants and self.tenants[t_id].status == "ACTIVE"
         ]
 
@@ -157,6 +162,14 @@ _default_auth_repo: Optional[AuthRepositoryProtocol] = None
 
 def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
     """Pre-seed canonical Company A, B, and C tenant and user records.
+
+    MVP ARCHITECTURAL NOTE:
+    The approved ChronoCogniSec MVP scope operates in a single company organization
+    with multiple geographically distributed branches (e.g., HQ, Regional Branches).
+    The synthetic multi-company fixtures below (Company A, Company B, Company C)
+    are retained strictly as multi-tenant isolation and security test fixtures to verify
+    tenant boundaries, header spoofing rejection, and cross-organization isolation.
+    They must not be confused with the single-company MVP demonstration topology.
 
     SECURITY REQUIREMENT:
     Allowed ONLY in development and testing environments.
@@ -231,8 +244,33 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
         full_name="Ian Inactive",
         status="INACTIVE",
     )
+    # Users for membership status testing (Active user, but varied membership status)
+    u_revoked_mem = UserRecord(
+        id="user-revoked-mem-006",
+        email="revoked-mem@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Rachel Revoked",
+        status="ACTIVE",
+    )
+    u_suspended_mem = UserRecord(
+        id="user-suspended-mem-007",
+        email="suspended-mem@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Sam Suspended",
+        status="ACTIVE",
+    )
+    u_inactive_mem = UserRecord(
+        id="user-inactive-mem-008",
+        email="inactive-mem@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Iris InactiveMembership",
+        status="ACTIVE",
+    )
 
-    for u in [u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive]:
+    for u in [
+        u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive,
+        u_revoked_mem, u_suspended_mem, u_inactive_mem,
+    ]:
         repo.add_user(u)
 
     # Pre-seed memberships
@@ -242,6 +280,7 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             tenant_id=t_a.id,
             user_id=u_analyst_a.id,
             role="SECURITY_ANALYST",
+            status="ACTIVE",
         )
     )
     repo.add_membership(
@@ -250,6 +289,7 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             tenant_id=t_a.id,
             user_id=u_admin_a.id,
             role="TENANT_ADMIN",
+            status="ACTIVE",
         )
     )
     repo.add_membership(
@@ -258,6 +298,7 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             tenant_id=t_b.id,
             user_id=u_analyst_b.id,
             role="SECURITY_ANALYST",
+            status="ACTIVE",
         )
     )
     repo.add_membership(
@@ -266,6 +307,7 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             tenant_id=t_c.id,
             user_id=u_analyst_c.id,
             role="SECURITY_ANALYST",
+            status="ACTIVE",
         )
     )
     repo.add_membership(
@@ -274,6 +316,34 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             tenant_id=t_a.id,
             user_id=u_inactive.id,
             role="SECURITY_ANALYST",
+            status="ACTIVE",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-006",
+            tenant_id=t_a.id,
+            user_id=u_revoked_mem.id,
+            role="SECURITY_ANALYST",
+            status="REVOKED",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-007",
+            tenant_id=t_a.id,
+            user_id=u_suspended_mem.id,
+            role="SECURITY_ANALYST",
+            status="SUSPENDED",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-008",
+            tenant_id=t_a.id,
+            user_id=u_inactive_mem.id,
+            role="SECURITY_ANALYST",
+            status="INACTIVE",
         )
     )
     return repo
@@ -405,6 +475,11 @@ async def resolve_tenant_context_from_request(
         raise SecurityDependencyError("Security verification database is unavailable.") from exc
 
     if not membership:
+        raise TenantAccessForbiddenError("User is not an active member of the requested tenant.")
+
+    # Membership status enforcement: active membership required (reject INACTIVE, REVOKED, SUSPENDED, and missing status)
+    mem_status = getattr(membership, "status", None)
+    if mem_status is None or str(mem_status).strip().upper() != "ACTIVE":
         raise TenantAccessForbiddenError("User is not an active member of the requested tenant.")
 
     # Return immutable request-scoped context

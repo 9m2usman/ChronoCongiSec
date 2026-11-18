@@ -92,8 +92,8 @@ In accordance with architectural directives, four core reference repositories we
 ### 6.1 Reference Repository Analysis
 | Repository | Stated Purpose | Architectural Lessons Learned | What AMSC Must NOT Copy | License & Compliance |
 |---|---|---|---|---|
-| **HafizShamaz/agent-security** | Agent tool execution control & security guardrails | Server-side policy validation pattern; concept of intercepting agent tool proposals before execution. | Do not copy hardcoded agent runtimes or naive string regex filters. AMSC requires formal multi-tenant DB persistence and memory trust checks. | MIT License. Respect attribution; build custom clean-room AMSC gateway. |
-| **9m2usman/KnowledgeLine** | Knowledge pipeline and document lineage tracking | Document chunking hierarchy, provenance edge concepts, parent-child document relationship modeling. | Do not copy static single-tenant schemas or unversioned memory stores. AMSC adds cryptographic hashing, temporal checkpoints, and quarantine flags. | MIT License. Verify copyright notices; adapt concepts into relational schemas. |
+| **HafizShamaz/agent-security** | Agent tool execution control & security guardrails | Server-side policy validation pattern; concept of intercepting agent tool proposals before execution. | Do not copy hardcoded agent runtimes or naive string regex filters. AMSC requires formal multi-tenant DB persistence and memory trust checks. | License not independently verified from a repository-root license file during this audit. No code is being copied; reuse only concepts/patterns unless the upstream license is confirmed and attribution obligations are satisfied. |
+| **9m2usman/KnowledgeLine** | Knowledge pipeline and document lineage tracking | Document chunking hierarchy, provenance edge concepts, parent-child document relationship modeling. | Do not copy static single-tenant schemas or unversioned memory stores. AMSC adds cryptographic hashing, temporal checkpoints, and quarantine flags. | License not independently verified from a repository-root license file during this audit. No code is being copied; reuse concepts only unless upstream license and attribution obligations are confirmed. |
 | **ropean/shadcn-admin-template** | Modern React admin dashboard starter | Structural foundation: collapsible sidebar, modular component organization, high-density table patterns, TanStack router structure. | Do not copy generic marketing cards or shallow CRUD forms. AMSC requires technical information density, monospace trace viewers, and dual-lane timelines. | MIT License. Utilize as structural guidance for custom AMSC workstation. |
 | **as32608/openinspector** | LLM observability proxy & trace inspection | High-signal trace visualization, synchronized span inspection, contextual inspector drawers, granular payload breakdown. | Do not copy local-only ephemeral storage or single-user desktop architecture. AMSC requires durable multi-tenant PostgreSQL backing and recovery workflows. | Apache 2.0 / MIT. Adopt visualization interaction paradigms cleanly. |
 
@@ -113,7 +113,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 ## 7. Product Scope: In-Scope vs. Out-of-Scope
 
 ### 7.1 In-Scope (7-Day Integrated MVP Baseline)
-- **Multi-Tenant Workspaces:** Server-side tenant resolution, JWT/API key authentication, tenant-scoped queries across Company A, Company B, and Company C.
+- **Single-Company Enterprise & Multi-Branch Governance:** Server-side company resolution, JWT authentication, branch-scoped role-based access control (Head Office, Branch Lahore, Branch Karachi, Branch Islamabad), with internal tenant abstraction preserved for future multi-organization expansion.
 - **Agent Registry:** Agent registration, versioned system prompts, runtime metadata, granular tool permission assigner.
 - **Memory Management & Provenance:** Ingestion API, canonical SHA-256 content hashing, version incrementing, provenance edge creation (`DERIVED_FROM`, `TRANSFORMED_INTO`, `SUPERSEDES`).
 - **Security Gateway & Fail-Closed Policy Engine:** Ingress action proposal protocol, schema validation, idempotency caching, memory trust evaluation, allow/block/requires_approval decisions, server-side tool execution adapters.
@@ -158,14 +158,14 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | **FR-008** | The system shall maintain an immutable version history for each memory record, incrementing version numbers on update. | P0 | TRD §2.2, DB §2.3 |
 | **FR-009** | The system shall record directional provenance graph edges (`DERIVED_FROM`, `TRANSFORMED_INTO`, `SUPERSEDES`) linking child memories to parent sources or records. | P0 | TRD §2.2, DB §2.3, UI Screen 03 |
 | **FR-010** | The system shall maintain dynamic memory trust states: `UNVERIFIED`, `TRUSTED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, `SUPERSEDED`. | P0 | TRD §2.2, DB §2.3 |
-| **FR-011** | The system shall provide a protected memory retrieval API that strictly filters out any record where `trust_state == 'QUARANTINED'`. | P0 | TRD §2.2, SEC-005, API §2.4 |
+| **FR-011** | Normal agent retrieval shall return only currently eligible `TRUSTED` records. `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, and `SUPERSEDED` records are excluded; forensic access requires a separate permissioned path. | P0 | TRD §15.3, SEC-005, API §2.4 |
 
 ### Category 4: Security Gateway & Action Authorization
 | ID | Requirement Description | Priority | Traceability Mapping |
 |---|---|---|---|
 | **FR-012** | All protected tool calls must pass through the AMSC Security Gateway. Agents must never possess direct credentials for external adapters. | P0 | TRD §2.3, SEC-001, API §2.5 |
 | **FR-013** | The Gateway shall validate proposal schema and enforce client-supplied `idempotency_key`, preventing duplicate tool executions. | P0 | TRD §2.3, DB §2.4, API §2.5 |
-| **FR-014** | The Gateway shall evaluate referenced memory records: if any referenced memory is `SUSPICIOUS` or `QUARANTINED`, the action must be `BLOCKED`. | P0 | TRD §2.3, SEC-002, UI Screen 04 |
+| **FR-014** | The Gateway shall require every memory reference used to justify a protected action to be currently eligible and `TRUSTED`; any `UNVERIFIED`, `SUSPICIOUS`, `QUARANTINED`, `REJECTED`, or `SUPERSEDED` reference must result in `BLOCKED`. | P0 | TRD §16, SEC-002, UI Screen 04 |
 | **FR-015** | The Gateway shall enforce parameter constraints: if an operation parameter exceeds allowed thresholds, the action must be `BLOCKED` or set to `REQUIRES_APPROVAL`. | P0 | TRD §2.3, DB §2.2 |
 | **FR-016** | The Gateway shall fail closed: if policy evaluation or database checks experience an unhandled failure, the default decision is `BLOCK`. | P0 | TRD §3.0, SEC-004 |
 | **FR-017** | Upon an `ALLOW` decision, the Gateway shall invoke the server-side tool adapter, record the execution outcome, and correlate execution latency. | P0 | TRD §2.3, DB §2.4 |
@@ -196,7 +196,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 |---|---|---|---|
 | **NFR-001** | Performance | Gateway policy evaluation latency for cached/local memory references must not exceed acceptable thresholds. | P95 < 50ms at 100 concurrent requests |
 | **NFR-002** | Reliability | The system must maintain continuous operation and handle graceful restarts with zero data corruption. | 99.9% uptime during operational testing |
-| **NFR-003** | Data Integrity | Checkpoint snapshot verification must detect any byte-level bit rot or manual database tampering. | 100% tamper detection via SHA-256 |
+| **NFR-003** | Data Integrity | Checkpoint verification must detect content mismatch and, where database-writer compromise is in scope, verify an independently protected signature/MAC over checkpoint roots. | 100% detection of tested modifications under the documented key-separation threat model; SHA-256 alone is not an authenticity guarantee |
 | **NFR-004** | Usability | Web interface must provide technical information density, responsive layouts, and visible focus states compliant with WCAG 2.1 AA. | 100% keyboard navigable; high-contrast |
 | **NFR-005** | Scalability | Database queries must enforce pagination and bounded depth limits on graph and trace endpoints. | Default page size 50; max graph depth 5 |
 
@@ -207,10 +207,10 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | ID | Requirement Specification | Verification Method |
 |---|---|---|
 | **SEC-001** | **Complete Mediation:** All protected tool actions must route through `/api/v1/gateway/actions/propose`. No backdoor or direct connection permitted. | Automated penetration test attempting direct adapter port access. |
-| **SEC-002** | **Memory Trust Gating:** Actions referencing `SUSPICIOUS` or `QUARANTINED` memory must return `decision = 'BLOCK'` and execution status `NOT_EXECUTED`. | Security integration test asserting blocked execution. |
+| **SEC-002** | **Memory Trust Gating:** Protected actions may be justified only by eligible `TRUSTED` memory. Any non-TRUSTED or superseded reference must return `decision = 'BLOCK'` and `execution_status = 'NOT_EXECUTED'`. | Security integration test asserting blocked execution for each non-eligible state. |
 | **SEC-003** | **Fail-Closed Default:** In the event of unhandled exceptions or timeout during policy checks, response must be `BLOCK`. | Chaos test injecting synthetic exceptions into policy engine. |
 | **SEC-004** | **Cross-Tenant Hard Isolation:** Queries for Tenant A must never return Tenant B records, even when Tenant B IDs are passed in request bodies. | Automated cross-tenant fuzzing suite running in CI. |
-| **SEC-005** | **Quarantine Invariant:** Ingested query pipelines must enforce `trust_state != 'QUARANTINED'`. Quarantined records must not leak to agents. | Retrieval filter integration test. |
+| **SEC-005** | **Trusted Retrieval Invariant:** Normal agent retrieval returns only eligible `TRUSTED` records. Non-trusted/superseded records require a separate authorized forensic path. | Retrieval integration tests for every trust state and forensic authorization. |
 | **SEC-006** | **Credential Concealment:** Adapter credentials (API keys, secret tokens) must remain strictly server-side. Zero credential leakage to clients. | Code audit and API response inspection. |
 | **SEC-007** | **Non-Destructive Rollback:** Pre-recovery state must be snapshotted before any rollback transaction commits. | Rollback regression test asserting pre-snapshot existence. |
 
@@ -278,12 +278,12 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
   5. Gateway rejects proposal immediately with reason: *"Amount exceeds ceiling of 500.0"*.
   6. Proves complete mediation and credential containment.
 
-### Demo Scenario 3: Three-Company Tenant Isolation
-- **Context:** Three independent organizations: Company A (AlphaCorp), Company B (BetaDynamics), Company C (CyberGlobal).
+### Demo Scenario 3: Single-Company Multi-Branch Governance & Boundary Enforcement
+- **Context:** One Company (ChronoCongiSec Enterprise) operating across Head Office, Branch Lahore, and Branch Karachi, with strict boundary enforcement against unauthorized branch or cross-organization access.
 - **Storyline:**
-  1. User A logs in under AlphaCorp; User B logs in under BetaDynamics.
-  2. User A queries memory, agents, and audit events -> Sees only AlphaCorp records.
-  3. User A attempts to forge request header `X-Tenant-ID: <BetaDynamics-UUID>` -> Gateway immediately returns `HTTP 403 Forbidden: Access denied`.
+  1. User A logs in as Lahore Branch Analyst; User B logs in as Karachi Branch Analyst.
+  2. User A queries memory, agents, and branch records -> Sees only authorized Lahore Branch records and global company knowledge.
+  3. User A attempts to forge request header `X-Tenant-ID: <External-UUID>` or access unauthorized branch data -> Gateway immediately returns `HTTP 403 Forbidden: Access denied`.
   4. Automated isolation test suite asserts zero data bleed across all query filters, graph traversals, and cache lookups.
 
 ---
@@ -295,7 +295,7 @@ AMSC architecture is informed by peer-reviewed literature and industrial securit
 | **FR-001** | §8 (Cat 1) | TRD §3.1 | Flow §1, §3 | Global Topbar | `tenants`, `memberships` | `/tenants` | M1, M6 | `test_three_company_tenant_isolation` |
 | **FR-004** | §8 (Cat 2) | TRD §2.2 | Flow §2 | Screen 02 | `agents`, `agent_versions` | `/agents` | M1, M2 | `test_agent_registration` |
 | **FR-007** | §8 (Cat 3) | TRD §4.1 | Flow §2 | Screen 03 | `memory_records`, `memory_versions` | `/memory` | M3 | `test_memory_ingestion_checksum` |
-| **FR-011** | §8 (Cat 3) | TRD §2.2 | Flow §2 | Screen 03 | `memory_records` | `/memory?exclude_quarantined=true` | M3, M4 | `test_quarantine_retrieval_exclusion` |
+| **FR-011** | §8 (Cat 3) | TRD §15.3 | Flow §4 | Screen 03 | `memory_records` | `/memory` (server-enforced eligible `TRUSTED` only) | M3, M4 | `test_trusted_retrieval_state_matrix` |
 | **FR-012** | §8 (Cat 4) | TRD §2.3 | Flow §2 | Screen 04 | `tool_proposals`, `tool_executions` | `/gateway/actions/propose` | M2, M4 | `test_security_gateway_allows_trusted_memory` |
 | **FR-014** | §8 (Cat 4) | TRD §2.3 | Flow §2 | Screen 04 | `policy_decisions` | `/gateway/actions/propose` | M4 | `test_security_gateway_blocks_untrusted_memory` |
 | **FR-018** | §8 (Cat 5) | TRD §2.4 | Flow §2 | Screen 04 | `memory_records` | `/memory/{id}/quarantine` | M4 | `test_quarantine_workflow` |

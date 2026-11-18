@@ -9,7 +9,19 @@
 
 ## 1. Executive Overview
 
-**Agent Memory Security Center (AMSC)** is an authoritative, multi-tenant security, governance, and recovery platform for autonomous AI agent ecosystems.
+**Agent Memory Security Center (AMSC)** is an authoritative security, governance, observability, and recovery platform for autonomous enterprise AI agent ecosystems.
+
+### Target Architecture: Single-Company Enterprise with Multi-Branch Governance
+The current MVP deployment targets **One Company / Organization** operating across geographical branch locations:
+```text
+ONE COMPANY (ChronoCongiSec Enterprise)
+  ├── Head Office (Central Governance & Executive Oversight)
+  ├── Branch Lahore (Operational AI Agents & Local Knowledge)
+  ├── Branch Karachi (Operational AI Agents & Local Knowledge)
+  ├── Branch Islamabad (Operational AI Agents & Local Knowledge)
+  └── Subordinate Regional Branches
+```
+All branches operate under central enterprise security policies, governance, and audit controls. While the internal system architecture preserves tenant abstraction for future multi-organization SaaS capability, the active operational deployment models a single organization with explicit branch-level authorization.
 
 In modern enterprise architectures, AI agents autonomously ingest persistent knowledge, synthesize state across operational sessions, and invoke external tool adapters with substantial financial, infrastructure, and data-handling impact. Current industry architectures suffer from a critical structural flaw: **an absolute disconnection between memory integrity and action authorization**.
 
@@ -30,13 +42,13 @@ AMSC answers five foundational operational questions for every agent interaction
 
 ---
 
-## 3. Current Project Stage: Clean Documentation Baseline
+## 3. Current Project Stage: Active Engineering & Security Remediation
 
 > [!IMPORTANT]
-> **Current Project Status: Documentation and Architecture Preparation.**  
-> Application implementation has **NOT** started. In accordance with architectural directives, this repository currently establishes the clean, authoritative, and internally consistent project specification that a future seven-person engineering team will execute.
+> **Current Project Status: Active Engineering & Security Hardening.**  
+> Platform foundation (M1 Day 1/Day 2) and Memory Provenance (M3 Day 1) have been merged to `main`. Current active milestone focuses on P0 security remediation (GAP-001 through GAP-004) and aligning the single-company multi-branch architecture baseline.
 
-No application code, frontend components, database migrations, or live backend services have been deployed. All specifications in this repository represent the binding engineering contract for future implementation.
+The documentation is the architecture and requirements baseline. Backend, frontend, database and infrastructure capabilities are delivered incrementally under the M1–M7 ownership plan.
 
 ---
 
@@ -46,12 +58,14 @@ The complete engineering specification is published in the `docs/` directory. Al
 
 | Reading Order | Document Title | File Path | Core Purpose |
 |---|---|---|---|
-| **01** | **Product Requirements Document (PRD)** | [docs/01-PRD.md](docs/01-PRD.md) | Defines **WHAT** the product must do and **WHY** it is needed. Covers problem statement, personas, functional requirements (`FR-001`..`FR-027`), non-functional requirements, security requirements, and demonstration scenarios. |
+| **01** | **Product Requirements Document (PRD)** | [docs/01-PRD.md](docs/01-PRD.md) | Defines **WHAT** the product must do and **WHY** it is needed. Covers problem statement, enterprise multi-branch topology, functional requirements (`FR-001`..`FR-027`), and security invariants. |
 | **02** | **Combined TRD & SRS** | [docs/02-TRD-SRS.md](docs/02-TRD-SRS.md) | Defines **HOW** the system is technically structured and **WHAT** technical behavior is required. Details system topology, fail-closed protocols, memory trust models, version freezing, and testing strategy. |
 | **03** | **Application Flow & System Workflows** | [docs/03-APPLICATION-FLOW.md](docs/03-APPLICATION-FLOW.md) | Defines **HOW** users and data move through the system. Contains Mermaid state and sequence diagrams for memory ingestion, gateway mediation, quarantine, Dual Trace, and agent rewinding. |
 | **04** | **UI/UX Design & Screen Specifications** | [docs/04-UI-UX-DESIGN.md](docs/04-UI-UX-DESIGN.md) | Defines the **WORKSTATION INTERFACE**. Contains complete specifications for all 11 core screens, layout shell, color tokens, contextual inspector drawer, and accessibility rules. |
-| **05** | **Backend Database Schema & API Contract** | [docs/05-DATABASE-API-SCHEMA.md](docs/05-DATABASE-API-SCHEMA.md) | Canonical **ENGINEERING CONTRACT**. Defines relational DDL for all 32+ entities, ER diagram, multi-tenant isolation rules, complete REST API route inventory (`/api/v1`), and error envelopes. |
-| **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols for future implementation. |
+| **05** | **Backend Database Schema & API Contract** | [docs/05-DATABASE-API-SCHEMA.md](docs/05-DATABASE-API-SCHEMA.md) | Canonical **ENGINEERING CONTRACT**. Defines relational DDL for all 32+ entities, ER diagram, company and branch scoping, complete REST API route inventory (`/api/v1`), and error envelopes. |
+| **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols. |
+| **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Authoritative **SECURITY & RESEARCH BASELINE**. Codifies OWASP Agentic Top 10 (2026), NIST SP 800-207 Zero Trust, RFC 8725 JWT BCP, cryptographic provenance, and non-regression invariants. |
+| **08** | **Current Implementation Security Gap Register** | [docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md](docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md) | Living **SECURITY AUDIT & GAP TRACKER**. Tracks P0, P1, and P2 findings, resolution status, verification evidence, and cross-team dependencies. |
 
 For full reference to the master prompt that governed this specification, see [MASTER-PROMPT.md](MASTER-PROMPT.md).
 
@@ -144,7 +158,9 @@ ChronoCongiSec/
     ├── 03-APPLICATION-FLOW.md         # Application Flow & System Workflows
     ├── 04-UI-UX-DESIGN.md             # UI/UX Design & Screen Specifications
     ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
-    └── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    ├── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
+    ├── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
+    └── 08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md # Current code audit and prioritized security gaps
 ```
 
 ---

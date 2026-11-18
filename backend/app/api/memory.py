@@ -129,16 +129,17 @@ async def api_query_memory(
     """Query memory records with mandatory quarantine filtering and bounded pagination.
 
     Matches Document 05 Section 5.1 Route Catalog and TRD §22 pagination rules.
-    Quarantined and rejected records are unconditionally excluded from normal agent retrieval.
+    Normal agent retrieval is strictly restricted to TRUSTED memory records.
+    UNVERIFIED, SUSPICIOUS, QUARANTINED, REJECTED, and SUPERSEDED records are unconditionally excluded.
     """
-    if trust_state and trust_state.upper() in ("QUARANTINED", "REJECTED"):
-        raise ForbiddenError("Access to quarantined or rejected memory states is restricted.")
+    if trust_state and trust_state.upper() != "TRUSTED":
+        raise ForbiddenError("Normal agent retrieval is strictly restricted to TRUSTED memory records.")
 
     records = retrieve_memory(
         tenant_id=tenant_id,
         agent_id=agent_id,
-        trust_state=trust_state,
-        exclude_quarantined=True,
+        trust_state="TRUSTED",
+        for_forensic=False,
         limit=limit,
         offset=offset,
         repository=repo,
@@ -178,11 +179,13 @@ async def api_get_memory_detail(
 ) -> MemoryDetailResponse:
     """Fetch complete memory detail including full revision history and provenance lineage.
 
-    Quarantined and rejected records are strictly hidden from standard agent access.
+    Normal agent access is strictly restricted to TRUSTED records (returns 404 for non-trusted).
+    Forensic access is reserved for authorized M4 investigation workflows.
     """
     record, versions, provenance = get_memory_detail(
         tenant_id=tenant_id,
         record_id=id,
+        for_forensic=False,
         allow_quarantined=False,
         repository=repo,
     )

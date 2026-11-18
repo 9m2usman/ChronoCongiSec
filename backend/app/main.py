@@ -121,6 +121,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
     yield
+    from backend.app.core.security import shutdown_auth_executor
+    shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 
@@ -210,5 +212,9 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
+    from backend.app.core.config import get_settings
 
-    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=True)
+    settings = get_settings()
+    # Reload behavior is explicitly development-only; production never runs with reload=True
+    is_dev = settings.APP_ENV == "development"
+    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=is_dev)

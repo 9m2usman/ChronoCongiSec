@@ -121,9 +121,9 @@
 | **M4** | Implement basic RBAC check (`TENANT_ADMIN`, `SECURITY_ANALYST`, `DEVELOPER`). | RBAC evaluator | M1 Auth context | Unauthorized roles rejected with 403. |
 | **M5** | Build responsive App Shell: collapsible sidebar, top navigation, tenant dropdown. | AppShell layout component | M1 Auth contract | Navigation renders all 11 screen links. |
 | **M6** | Add composite tenant unique constraints and indexes to relational tables. | Hardened DB migration | M1, M3 | Cross-tenant foreign key inserts fail in DB. |
-| **M7** | Implement seed database script with Company A, B, and C tenant fixtures. | `core/seed.py` | M1, M6 | Seed script populates 3 isolated tenants. |
+| **M7** | Implement seed database script with single-company enterprise fixtures (Head Office, Lahore, Karachi, Islamabad branches). | `core/seed.py` | M1, M6 | Seed script populates enterprise organization and branch fixtures. |
 
-**Exit Gate G2:** User can sign in, select a tenant workspace, and view tenant-isolated resources.
+**Exit Gate G2:** User can sign in, select an authorized company/branch workspace, and view scoped resources.
 
 ---
 
