@@ -27,6 +27,8 @@ import asyncpg
 
 GLOBAL_PARENT_VALUES = {"users"}
 
+DEFAULT_RECOVERY_SNAPSHOT = '{"factory": "captured pre-recovery snapshot"}'
+
 
 @dataclass
 class _Column:
@@ -131,6 +133,7 @@ class RowFactory:
     async def create(self, table: str, tenant_id: str | None, **overrides: Any) -> str:
         """Insert a minimal valid row and return its id."""
         resolved = dict(overrides)
+        await self._table_defaults(table, resolved)
         for link in self.schema.linked.get(table, ()):
             await self._resolve_linked(link, tenant_id, resolved)
 
@@ -153,6 +156,26 @@ class RowFactory:
             *values.values(),
         )
         return values["id"]
+
+    async def _table_defaults(self, table: str, resolved: dict[str, Any]) -> None:
+        """Table-specific defaults that a 'minimal valid row' needs beyond NOT NULL columns.
+
+        recovery_plans (migration 0008): a recovery action may only reference a plan whose
+        pre-recovery snapshot was captured, so factory plans are captured by default. The
+        hash is computed by PostgreSQL. Pass ``pre_recovery_snapshot_json="{}"`` for an
+        uncaptured plan.
+        """
+        if table != "recovery_plans" or "pre_recovery_snapshot_json" in resolved:
+            return
+        if not any(c.name == "pre_recovery_snapshot_sha256" for c in self.schema.columns[table]):
+            return  # schema older than 0008
+        resolved["pre_recovery_snapshot_json"] = DEFAULT_RECOVERY_SNAPSHOT
+        resolved.setdefault(
+            "pre_recovery_snapshot_sha256",
+            await self.conn.fetchval(
+                "SELECT encode(sha256(convert_to($1::jsonb::text, 'UTF8')), 'hex')", DEFAULT_RECOVERY_SNAPSHOT
+            ),
+        )
 
     async def _generate(self, table: str, col: _Column, tenant_id: str | None) -> Any:
         """Value for a required column: a new same-tenant parent for references, else a dummy value."""

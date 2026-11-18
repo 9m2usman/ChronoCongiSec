@@ -495,6 +495,90 @@ $env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:
 
 ---
 
+## Day 5 — Atomic agent rewind with pre-recovery snapshot (2026-11-18)
+
+Branch: `feat/m6-day5-atomic-rewind`, created from `origin/main` at `2e4d943` (Day 4 PR #10 merged, head `0007`). Upstream removed. Baseline: `pytest backend/tests/database`: 452 passed.
+
+**Approved by the M6 lead:** the two-transaction rewind with generic restore operations; RESTRICT on the recovery chain; UNIQUE on `checkpoint_items`; a separate `pre_recovery_snapshot_sha256` column.
+
+**Why**
+- DOC-006:171 (M6 Day 5): "Implement atomic Agent Rewind rollback with pre-recovery state preservation". Exit: "Pre-recovery snapshot committed before rollback".
+- TRD section 18: "capture a complete snapshot of the contaminated records before modifying any database state". SEC-007.
+- GAP-008: recovery must be atomic, with optimistic concurrency.
+
+**Built**
+- `backend/alembic/versions/0008_recovery_snapshot_and_chain_integrity.py` (revision `0008`, parent `0007`):
+  - `recovery_plans.pre_recovery_snapshot_sha256 VARCHAR(64)`, NULL until captured. The hash is computed by PostgreSQL as `sha256(snapshot::text)`, so application code never has to reproduce jsonb's text format.
+  - `ck_recovery_plans_snapshot_hash_consistent`: an empty snapshot means NULL hash; a captured snapshot must carry exactly the database-computed hash.
+  - `ck_recovery_plans_executed_requires_snapshot`: `executed_at` can only be set once a snapshot exists.
+  - Trigger `trg_protect_recovery_snapshot`: once captured, the snapshot and hash cannot change, and the plan cannot be deleted (SQLSTATE 55000).
+  - Trigger `trg_require_recovery_snapshot`: no `recovery_actions` row (insert, or a move to another plan) for a plan without a snapshot (55000).
+  - `uq_checkpoint_items_tenant_id_checkpoint_id_record_id`: a checkpoint holds each record at most once.
+  - CASCADE becomes RESTRICT on `checkpoint_items.checkpoint_id`, `recovery_plans.checkpoint_id`, `recovery_actions.plan_id` and `incident_evidence.incident_id`.
+  - Existing data: non-empty snapshots get their hash back-filled. The upgrade stops, listing ids and changing nothing, for a duplicated checkpoint record, an executed plan without a snapshot, or an action whose plan has no snapshot.
+  - Downgrade restores the exact 0007 state. The hash column is dropped; the snapshots are kept. No rows are deleted.
+- `backend/app/database/rewind.py`: `RewindCoordinator` (built on `UnitOfWork`):
+  - `capture_snapshot(tenant, plan, snapshot)` is transaction 1. It locks the plan, writes the snapshot and the database hash, and **commits**. A snapshot can be captured only once.
+  - `execute_rollback(tenant, plan, expected_snapshot_sha256=..., restore=...)` is transaction 2. It locks the plan, requires the committed snapshot, refuses an already executed plan, and requires the stored hash to equal both the caller's hash and a fresh recomputation. Then it runs the caller's `restore(rtx)` callback, sets `executed_at` and commits. Any failure rolls back transaction 2 only: the snapshot stays and the rewind can be retried.
+  - Generic restore operations on `rtx`:
+    - `checkpoint_item_for(record_id)`;
+    - `append_version(...)`: highest + 1, under a row lock;
+    - `compare_and_set_current_version(record_id, expected, new)`: optimistic concurrency; the target version must exist;
+    - `record_action(resource_id, action_taken, outcome)`.
+  - Typed refusals: `PlanNotFound`, `RecordNotFound`, `SnapshotAlreadyCaptured`, `SnapshotMissing`, `SnapshotMismatch`, `PlanAlreadyExecuted`, `ConcurrencyConflict`.
+  - It decides no business meaning. Snapshot content, target version, new-version vs pointer move, trust state and status values are left to M3/M4 (OD-17, OD-21).
+- Models (`models/recovery.py`) match the migration. `relationships.py` marks the four chain relations as RESTRICT.
+- Shared factory: recovery plans are created with a captured snapshot by default (the hash comes from PostgreSQL), because a recovery action now requires one. Pass `pre_recovery_snapshot_json="{}"` for an uncaptured plan.
+
+**Tests**
+- `test_rewind.py` (new, 23 tests, real commits, a fresh tenant per test):
+  - capture commits the snapshot and the database hash; capture only once; invalid snapshots refused; another tenant's plan not found;
+  - rollback without a snapshot, or with a wrong hash, is refused;
+  - a successful rollback is atomic; the snapshot is visible to an independent session while transaction 2 runs (ordering proof);
+  - a failure inside the rollback keeps the snapshot and changes nothing else, and a retry succeeds;
+  - a plan cannot be executed twice; two concurrent executions let exactly one win;
+  - compare-and-set conflict; missing target version; `append_version` numbering;
+  - restore operations are tenant-scoped; arguments are validated.
+- `test_recovery_rules.py` (new, raw SQL):
+  - no action for an uncaptured plan (insert or move);
+  - `executed_at` requires a snapshot;
+  - snapshot and hash must be consistent (3 cases); capturing later with the database hash is allowed;
+  - a captured snapshot cannot be replaced or erased; other plan columns can still change;
+  - a captured plan cannot be deleted; an uncaptured plan without actions can be deleted;
+  - a checkpoint cannot hold the same record twice; the same record in two checkpoints is allowed;
+  - RESTRICT on the checkpoint and incident chains.
+- `test_migrations.py`: 0008 back-fills hashes and keeps data; downgrade restores 0007 and keeps snapshots; the pre-check stops for all three violations; offline SQL now covers 0008 (head `0008`).
+- `test_cross_tenant_fks.py`: a recovery plan with a captured snapshot is refused by its own delete trigger (55000) before the RESTRICT FK is checked, so that case now expects the stronger error. Parent and child must still be intact. The FK rule itself is still asserted by the relationship list test.
+
+**Test result**
+- `pytest backend/tests/database -q`: **496 passed** (452 + 44 new).
+- `pytest -q` (full backend): **670 passed**. The 4 warnings are starlette/httpx deprecations, not M6.
+- Single head `0008`. No `amsc_test_*` databases left behind. The dev database `amsc` was not touched.
+- Proof (break it and see), run on a scratch copy; the repository was not modified:
+  - A. Hash CHECK without `IS NOT NULL`: 1 FAILED.
+  - B. Snapshot immutability removed: 2 FAILED.
+  - C. "Action requires snapshot" trigger removed: 4 FAILED.
+  - D. Coordinator skips the hash comparison: 1 FAILED.
+  - E. Compare-and-set ignores `expected`: 1 FAILED.
+  - F. `checkpoint_items.checkpoint_id` left as CASCADE: 2 FAILED.
+  - G. Checkpoint UNIQUE removed: 1 FAILED.
+  - H. Existing snapshots not back-filled: 2 FAILED.
+
+**Problems and fixes**
+- **Real defect found by a test:** the first version of the hash CHECK was `... OR (snapshot <> '{}' AND sha = <computed>)`. With `sha = NULL` that clause is NULL, and PostgreSQL accepts a CHECK that evaluates to NULL, so a snapshot without a hash was allowed. Fix: `sha IS NOT NULL AND sha = <computed>`. Proof A keeps it covered.
+  - Follow-up check: the CHECKs from 0003 (`memberships.status`) and 0006 (`sources.status`, `relation_type`, self-loop) only use NOT NULL columns, so they cannot be bypassed this way.
+- A recovery plan with a captured snapshot is refused by its delete trigger before the RESTRICT FK fires. The generic RESTRICT test now expects the stronger error for that one parent, and still asserts that nothing was deleted.
+- In two checkpoint tests the factory created a second version numbered 1 for the same record (`uq_record_version`). Fix: those tests create one version explicitly and reuse it.
+- In SQL `UPDATE ... SET a = x, b = f(a)`, `f(a)` sees the OLD value of `a`. So the coordinator computes the hash from the bound snapshot parameter, not from the column, in the same statement.
+
+**How to verify**
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+.venv\Scripts\python.exe -m pytest backend/tests/database -q      # expect "496 passed"
+```
+
+---
+
 ## OPEN-DEPENDENCIES (living list — not implemented on purpose)
 
 Rules: nothing here is guessed or hard-coded in a migration. Each item is applied in **one final integration migration** after the owner pushes code or confirms. "Waits" names the constraint or code that is blocked. Update this list every day.
@@ -517,9 +601,13 @@ Rules: nothing here is guessed or hard-coded in a migration. Each item is applie
 | OD-14 | Values for `statement_timeout` / `lock_timeout` in production. | M7 (+ M1) | `UnitOfWork(...)` configuration |
 | OD-15 | `sources.status` in the API (DOC-005:716 requires M1/M6/M5 approval of enums); whether ingestion rejects by `trust_state`. | M1 + M5; M4 | API exposure; no DB change needed |
 | OD-16 | `SourceRecord.status` default `"ACTIVE"` and missing `trust_state`; `MembershipRecord.status` default `"ACTIVE"` (fail-open mappings). | M3; M1 | Nothing in the DB; mapping code in their modules |
-| OD-17 | Rollback semantics (new version vs moving `current_version`) and the checkpoint `integrity_hash` method. | M3 + M4 | Day 5 recovery constraints |
+| OD-17 | Rollback semantics: append a new version or move `current_version` back? Day 5 provides both building blocks (`append_version`, `compare_and_set_current_version`). Also the checkpoint `integrity_hash` method (DOC-005: "Merkle or combined SHA-256"). | M3 + M4 | Which restore callback M4/M3 use; a CHECK/verification for `checkpoints.integrity_hash` |
 | OD-18 | Restricted app role, RLS, separate migration credential, TLS. | M7 (+ M1) | RLS policies, role grants |
 | OD-19 | Branch model (P2), RBAC source of truth (P7). | M1 + M3 + M4 | Branch/role migrations |
-| OD-20 | DOC-005 does not yet describe migrations 0003–0007. | Project owner | Documentation only |
+| OD-20 | DOC-005 does not yet describe migrations 0003–0008 (including the new `recovery_plans.pre_recovery_snapshot_sha256` column). | Project owner | Documentation only |
+| OD-21 | Recovery vocabulary: `recovery_plans.status` values and allowed transitions (DOC-005 `PENDING/PREVIEWED/EXECUTED/FAILED`), `recovery_actions.action_taken` / `outcome` values, and the trust state of restored records (TRD section 18: TRUSTED only after revalidation, else UNVERIFIED/quarantine). | M4 (+ M3) | CHECKs on plan status / action values; possibly a status-transition trigger |
+| OD-22 | Owner of `api/recovery.py`: DOC-006:171 names M6, `ownership.md` names M4. M6 delivered the DB layer (`RewindCoordinator`) only. | Project owner + M4 | API route wiring |
+| OD-23 | Where to record irreversible external actions executed before a rollback (TRD section 18, "Honest Outcome Classification"). | M4 + M2 | Possibly a column or table, plus the restore callback |
+| OD-24 | Memory-side CASCADE paths still open: deleting a `memory_records`/`memory_versions` row cascades into versions, provenance, retrieval history, quarantines and checkpoint items (0002/0005). Should memory rows ever be physically deleted? | M3 + M4 | RESTRICT on the memory-side FKs |
 
 

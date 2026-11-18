@@ -116,13 +116,25 @@ async def test_set_null_delete_keeps_child_and_tenant(factory: RowFactory, tx_co
     assert row["tenant_id"] == tenant_a
 
 
+# A recovery plan whose pre-recovery snapshot was captured is refused by its own delete
+# trigger (migration 0008, SQLSTATE 55000) before the RESTRICT FK is checked. The FK rule
+# itself is still asserted by test_relationships_match_expected_list_exactly.
+DELETE_TRIGGER_GUARDED_PARENTS = {"recovery_plans"}
+
+
+def _expected_restrict_error(parent: str):
+    if parent in DELETE_TRIGGER_GUARDED_PARENTS:
+        return pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="cannot be deleted")
+    return pytest.raises(asyncpg.ForeignKeyViolationError)
+
+
 @pytest.mark.parametrize("rel", RESTRICT_RELS, ids=_ids(RESTRICT_RELS))
 async def test_restrict_delete_keeps_parent_and_child(factory: RowFactory, tx_conn, rel: Rel) -> None:
     tenant_a = await factory.tenant()
     parent_id, parent_key = await _parent(factory, rel, tenant_a)
     child_id = await factory.create(rel.child, tenant_a, **{rel.column: parent_key})
 
-    with pytest.raises(asyncpg.ForeignKeyViolationError):
+    with _expected_restrict_error(rel.parent):
         async with tx_conn.transaction():
             await tx_conn.execute(f"DELETE FROM {rel.parent} WHERE id = $1", parent_id)
 
