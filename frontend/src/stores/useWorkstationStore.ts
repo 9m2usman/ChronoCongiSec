@@ -40,6 +40,22 @@ interface WorkstationState {
   activeTenant: TenantInfo;
   setActiveTenant: (tenant: TenantInfo) => void;
 
+  // Selected Entity / Memory & Trace State (Purged on tenant switch)
+  selectedEntity: any | null;
+  setSelectedEntity: (entity: any | null) => void;
+  selectedMemory: any | null;
+  setSelectedMemory: (memory: any | null) => void;
+  activeTraceId: string | null;
+  setActiveTraceId: (traceId: string | null) => void;
+
+  // Table & Graph Filters (Purged on tenant switch)
+  activeFilter: string | null;
+  setActiveFilter: (filter: string | null) => void;
+  tableFilters: Record<string, any>;
+  setTableFilters: (filters: Record<string, any>) => void;
+  graphFilters: Record<string, any>;
+  setGraphFilters: (filters: Record<string, any>) => void;
+
   // Sidebar
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -61,6 +77,9 @@ interface WorkstationState {
   // API Mode
   apiMode: ApiMode;
   setApiMode: (mode: ApiMode) => void;
+
+  // Full State Purge Helper
+  purgeTenantState: () => void;
 }
 
 const INITIAL_TOKEN = typeof window !== 'undefined' ? sessionStorage.getItem('amsc_auth_token') : null;
@@ -86,6 +105,14 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
       authToken: null,
       currentUser: null,
       apiMode: 'SCHEMA_FALLBACK',
+      selectedEntity: null,
+      selectedMemory: null,
+      inspectorOpen: false,
+      inspectorPayload: null,
+      activeTraceId: null,
+      activeFilter: null,
+      tableFilters: {},
+      graphFilters: {},
     });
   },
 
@@ -93,7 +120,37 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
   setAvailableTenants: (tenants) => set({ availableTenants: tenants }),
 
   activeTenant: DEFAULT_AVAILABLE_TENANTS[0],
-  setActiveTenant: (tenant) => set({ activeTenant: tenant }),
+  setActiveTenant: (tenant) =>
+    set({
+      activeTenant: tenant,
+      // Full state purge on tenant switch (finding SEC-004 / tenant isolation)
+      selectedEntity: null,
+      selectedMemory: null,
+      inspectorOpen: false,
+      inspectorPayload: null,
+      activeTraceId: null,
+      activeFilter: null,
+      tableFilters: {},
+      graphFilters: {},
+    }),
+
+  selectedEntity: null,
+  setSelectedEntity: (entity) => set({ selectedEntity: entity }),
+
+  selectedMemory: null,
+  setSelectedMemory: (memory) => set({ selectedMemory: memory }),
+
+  activeTraceId: null,
+  setActiveTraceId: (traceId) => set({ activeTraceId: traceId }),
+
+  activeFilter: null,
+  setActiveFilter: (filter) => set({ activeFilter: filter }),
+
+  tableFilters: {},
+  setTableFilters: (filters) => set({ tableFilters: filters }),
+
+  graphFilters: {},
+  setGraphFilters: (filters) => set({ graphFilters: filters }),
 
   sidebarCollapsed: false,
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
@@ -111,6 +168,18 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
 
   apiMode: 'SCHEMA_FALLBACK',
   setApiMode: (mode) => set({ apiMode: mode }),
+
+  purgeTenantState: () =>
+    set({
+      selectedEntity: null,
+      selectedMemory: null,
+      inspectorOpen: false,
+      inspectorPayload: null,
+      activeTraceId: null,
+      activeFilter: null,
+      tableFilters: {},
+      graphFilters: {},
+    }),
 }));
 
 // Backwards compatibility alias
