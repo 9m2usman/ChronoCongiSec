@@ -224,10 +224,29 @@ class ApiClient {
   }
 
   // --- 4. Memory Endpoints ---
-  async listMemories(tenantId?: string, trustState?: string): Promise<MemoryRecordResponse[]> {
-    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
-    let url = `${API_BASE_URL}/memory`;
-    if (trustState) url += `?trust_state=${encodeURIComponent(trustState)}`;
+  async listMemories(tenantId?: string, trustState?: string, forForensic?: boolean): Promise<MemoryRecordResponse[]> {
+    const store = useWorkstationStore.getState();
+    const effectiveTenant = tenantId || store.activeTenant.id;
+    const userRole = (store.currentUser?.role || '').toUpperCase();
+
+    // Check if user has SecOps or Admin privileges
+    const isSecOps =
+      userRole === 'SECURITY_ANALYST' ||
+      userRole === 'TENANT_ADMIN' ||
+      userRole === 'SECURITY_ADMIN' ||
+      userRole === 'ADMIN';
+
+    // Auto-enable for_forensic if filtering for QUARANTINED or SUSPICIOUS records and user has SecOps role,
+    // or if explicitly passed as true
+    const isNonTrustedFilter = trustState && (trustState.toUpperCase() === 'QUARANTINED' || trustState.toUpperCase() === 'SUSPICIOUS');
+    const shouldAppendForensic = forForensic ?? (isSecOps && isNonTrustedFilter);
+
+    const queryParams = new URLSearchParams();
+    if (trustState) queryParams.set('trust_state', trustState);
+    if (shouldAppendForensic) queryParams.set('for_forensic', 'true');
+
+    const queryString = queryParams.toString() ? `?${queryParams.toString()}` : '';
+    const url = `${API_BASE_URL}/memory${queryString}`;
 
     try {
       const res = await this.fetchWithTimeout(url, {
@@ -253,10 +272,27 @@ class ApiClient {
     }
   }
 
-  async getMemoryDetail(recordId: string, tenantId?: string): Promise<MemoryDetailResponse> {
-    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+  /**
+   * Alias for listMemories matching Section 4 audit recommendation.
+   */
+  async fetchMemories(tenantId?: string, trustState?: string, forForensic?: boolean): Promise<MemoryRecordResponse[]> {
+    return this.listMemories(tenantId, trustState, forForensic);
+  }
+
+  async getMemoryDetail(recordId: string, tenantId?: string, forForensic?: boolean): Promise<MemoryDetailResponse> {
+    const store = useWorkstationStore.getState();
+    const effectiveTenant = tenantId || store.activeTenant.id;
+    const userRole = (store.currentUser?.role || '').toUpperCase();
+    const isSecOps =
+      userRole === 'SECURITY_ANALYST' ||
+      userRole === 'TENANT_ADMIN' ||
+      userRole === 'SECURITY_ADMIN' ||
+      userRole === 'ADMIN';
+    const shouldAppendForensic = forForensic ?? isSecOps;
+    const query = shouldAppendForensic ? '?for_forensic=true' : '';
+
     try {
-      const res = await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}`, {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}${query}`, {
         headers: this.getHeaders(effectiveTenant),
       });
       if (res.ok) {
