@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { apiClient, AuthorizationError, ApiError } from '../services/apiClient';
 
 describe('Mutation Failure & Honest Error Propagation (P1 Finding B)', () => {

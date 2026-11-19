@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { apiClient, AuthenticationError, AuthorizationError, ApiError } from '../services/apiClient';
 import { useWorkstationStore } from '../stores/useWorkstationStore';
 

@@ -1,4 +1,3 @@
-import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { StateBanner } from '../components/common/StateBanner';
 import { DualModeBadge } from '../components/common/DualModeBadge';
