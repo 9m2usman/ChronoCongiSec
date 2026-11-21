@@ -1,5 +1,10 @@
 # M4 integration contracts
 
+> **Update 2026-11-21 (branch `feat/integration-verification`):**
+> - **Now connected:** the M1 gateway uses M4's `PolicyEngine` and `ProtectedExecutionGuard`; M1 quarantine routes run `QuarantineWorkflow` (no fallback); forensic reads use the audited `POST /memory/{id}/forensic-access`; the M3 trust primitive is restrict-only. Wiring lives in `backend/app/security/runtime.py`.
+> - **Still pending:** M2 controller; database session factory at startup (M1/M6); durable trust store, plan store, checkpoint reader and external-action reader (M6/M3).
+> - The gateway-specific statements in §3 below describe the contract for M2, whose controller does not exist yet.
+
 **Owner:** M4, Security Engine & Incident Response
 **For:** M1, M2, M3, M6 and M7, who connect their side of each contract below.
 **State:** `feat/m4-security-ml` working tree on 2026-11-19 (`main` @ `cdbb4b9`, which already contains PR #16).
