@@ -138,7 +138,7 @@ During future implementation, the engineering team will operate under strict own
 | Day 3 | Knowledge Ingestion, Lineage, Agent Registry & Explorer (Gate G3)                  |
 | Day 4 | Protected Tool Gateway & Fail-Closed Enforcement Vertical Slice (Gate G4 - P0)     |
 | Day 5 | Forensics, Quarantine, ChroniMem Diffing & Rollback Engine (Gate G5)               |
-| Day 6 | Observability, Dual Trace, Knowledge Graph & 3 Demos (Gate G6)                     |
+| Day 6 | Observability, Dual Trace, Knowledge Graph & Single-Company Multi-Branch Demo (Gate G6) |
 | Day 7 | Hardening, Security Validation, End-to-End Test Suite & Handover (Gate G7)         |
 +-------+------------------------------------------------------------------------------------+
 ```
