@@ -22,6 +22,7 @@ import pytest_asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
+from backend.app.database.models.identity import Tenant
 
 from backend.app.database.repositories.base import TenantScopeError
 from backend.app.memory.adapters import (
@@ -83,6 +84,17 @@ async def contract_repo(request):
                 async with AsyncSession(
                     bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
                 ) as session:
+                    # The memory tables enforce tenant_id -> tenants.id. Seed the
+                    # parent tenant in this isolated database before exercising the
+                    # tenant-scoped repository contract.
+                    session.add(
+                        Tenant(
+                            id=tenant_id,
+                            name="Memory Repository Contract Tenant",
+                            slug="memory-repository-contract",
+                        )
+                    )
+                    await session.flush()
                     repo = SqlAlchemyMemoryRepository(session=session, tenant_id=tenant_id)
                     yield repo, tenant_id
                 await outer.rollback()
