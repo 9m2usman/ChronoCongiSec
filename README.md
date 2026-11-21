@@ -66,6 +66,7 @@ The complete engineering specification is published in the `docs/` directory. Al
 | **06** | **Seven-Person, Seven-Day Implementation Plan** | [docs/06-TEAM-IMPLEMENTATION-PLAN.md](docs/06-TEAM-IMPLEMENTATION-PLAN.md) | Defines the **DEVELOPMENT PLAN**. Assigns exact ownership boundaries (M1-M7), day-by-day deliverables, integration gates (G1-G7), and risk mitigation protocols. |
 | **07** | **Research-Backed Agent Memory Security & Engineering Standard** | [docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md](docs/07-RESEARCH-AND-ENGINEERING-STANDARDS.md) | Authoritative **SECURITY & RESEARCH BASELINE**. Codifies OWASP Agentic Top 10 (2026), NIST SP 800-207 Zero Trust, RFC 8725 JWT BCP, cryptographic provenance, and non-regression invariants. |
 | **08** | **Current Implementation Security Gap Register** | [docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md](docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md) | Living **SECURITY AUDIT & GAP TRACKER**. Tracks P0, P1, and P2 findings, resolution status, verification evidence, and cross-team dependencies. |
+| **09** | **Simulated Company Integration & Member Execution Briefs** | [docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md](docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md) | Defines the runnable single-company/multi-branch demo, cross-member ownership, integration contracts, acceptance gates and implementation prompts for M1, M3–M7. |
 
 For full reference to the master prompt that governed this specification, see [MASTER-PROMPT.md](MASTER-PROMPT.md).
 
@@ -160,7 +161,8 @@ ChronoCongiSec/
     ├── 05-DATABASE-API-SCHEMA.md      # Backend Database Schema & API Contract
     ├── 06-TEAM-IMPLEMENTATION-PLAN.md # Seven-Person, Seven-Day Implementation Plan
     ├── 07-RESEARCH-AND-ENGINEERING-STANDARDS.md # Research-backed security and engineering standard
-    └── 08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md # Current code audit and prioritized security gaps
+    ├── 08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md # Current code audit and prioritized security gaps
+    └── 09-SIMULATED-COMPANY-INTEGRATION-PLAN.md # Simulated company scope, member prompts and integration gates
 ```
 
 ---
