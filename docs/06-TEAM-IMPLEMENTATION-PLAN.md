@@ -270,3 +270,20 @@ If delivery constraints or unforeseen complexities arise during the 7-day sprint
 - **M6 (Database Architecture & Governance):** Days 1–7 finalized via PR #8–#14. Migrations 0001–0009, hash-chained audit, composite foreign keys, and app role permissions active.
 - **M7 (DevOps & Test Infrastructure):** Existing test suites and CI configurations verified; 1,493 backend unit and security tests passing.
 
+
+
+---
+
+## 8. Simulated Company Integration Addendum (DOC-009)
+
+The detailed implementation scope and copy-ready prompts for M1, M3, M4, M5, M6 and M7 are normative in [DOC-009](09-SIMULATED-COMPANY-INTEGRATION-PLAN.md). This addendum resolves older demo wording in this plan:
+
+1. **Primary demo topology:** one fictional company with Head Office, Lahore, Karachi and Islamabad branches, consistent with DOC-001 and README. Branches are not separate tenants.
+2. **Three-company wording:** any earlier reference to a three-company demo applies only to dedicated multi-tenant isolation/security tests. It is not the simulated-company business workflow.
+3. **M7 seed scope:** seed one fictional company, its branches, synthetic users/roles, agent registrations, policies and company knowledge through the approved seed interfaces. Keep reset restricted to explicitly marked demo data.
+4. **M7 isolation tests:** retain separate synthetic tenants/organizations only as adversarial fixtures to prove tenant isolation. Do not display them as the branches of the simulated company.
+5. **Runtime integration:** M2 remains owner of the existing agent runtime, proposal protocol, Gateway and protected adapters. DOC-009 assigns no new work to M2; other members integrate through M2's published contracts.
+6. **M5 frontend:** integrate the demo into the existing workstation and established React 19/TypeScript/Vite/Tailwind/TanStack Query/Zustand stack. Do not create a second dashboard or replace existing UI foundations.
+7. **Cross-member implementation:** use DOC-009's contract order, ownership constraints, demo scenarios, acceptance gates and token-efficient reporting requirements. No member may implement another owner's subsystem without explicit coordination.
+
+Where an older row in the original seven-day schedule conflicts with this addendum, the single-company/multi-branch topology and DOC-009 integration rules take precedence. Existing completed work must be verified and reused rather than re-created.
