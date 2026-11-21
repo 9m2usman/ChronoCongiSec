@@ -19,7 +19,14 @@ from .models import (
     ProvenanceEdge,
     TrustState,
 )
-from .repository import MemoryRepository, get_default_repository
+from .repository import AwaitableList, MemoryRepository, get_default_repository
+
+
+class AwaitableTuple(tuple):
+    def __await__(self):
+        async def _coro():
+            return self
+        return _coro().__await__()
 
 
 class MemoryNotFoundError(NotFoundError):
@@ -94,7 +101,7 @@ def retrieve_memory(
                 )
         verified_records.append(record)
 
-    return verified_records
+    return AwaitableList(verified_records)
 
 
 def get_memory_detail(
@@ -144,7 +151,7 @@ def get_memory_detail(
             )
 
     edges = repo.get_edges_for_record(record_id, tenant_id)
-    return record, versions, edges
+    return AwaitableTuple((record, versions, edges))
 
 
 # Allowed trust state transitions according to TRD §15.3 and 19-rule transition matrix

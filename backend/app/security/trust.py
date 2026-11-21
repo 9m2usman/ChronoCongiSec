@@ -526,7 +526,7 @@ class TrustEvaluator:
         Raises on repository/store failure so callers fail closed.
         """
         record = self._repo.get_record(record_id, tenant_id)
-        if record is None or getattr(record, "tenant_id", None) != tenant_id:
+        if record is None or not record or getattr(record, "tenant_id", None) != tenant_id:
             return None
         stored = _state_value(record.trust_state)
         if stored is None:
@@ -557,7 +557,7 @@ class TrustEvaluator:
         Raises on repository/store failure so callers fail closed.
         """
         record = self._repo.get_record(record_id, tenant_id)
-        if record is None or getattr(record, "tenant_id", None) != tenant_id:
+        if record is None or not record or getattr(record, "tenant_id", None) != tenant_id:
             return ActionMemoryAssessment(record_id=record_id, found=False, eligible=False,
                                           reason_codes=("MEMORY_REFERENCE_NOT_FOUND",))
         stored = _state_value(getattr(record, "trust_state", None))
@@ -707,7 +707,7 @@ class TrustEvaluator:
         except Exception as exc:  # noqa: BLE001
             raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
         # Cross-tenant and nonexistent records are indistinguishable to the caller.
-        if record is None or getattr(record, "tenant_id", None) != ctx.tenant_id:
+        if record is None or not record or getattr(record, "tenant_id", None) != ctx.tenant_id:
             raise _Deny(TrustReason.RECORD_NOT_FOUND)
         return record
 
@@ -904,7 +904,7 @@ class TrustEvaluator:
                         return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
                     visited.add(parent_id)
                     parent = self._repo.get_record(parent_id, ctx.tenant_id)
-                    if parent is None or getattr(parent, "tenant_id", None) != ctx.tenant_id:
+                    if parent is None or not parent or getattr(parent, "tenant_id", None) != ctx.tenant_id:
                         return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
                     parent_stored = _state_value(parent.trust_state)
                     if parent_stored is None:
@@ -932,7 +932,7 @@ class TrustEvaluator:
             raise _Deny(TrustReason.SUCCESSOR_INVALID)
         try:
             successor = self._repo.get_record(successor_id, ctx.tenant_id)
-            if successor is None or getattr(successor, "tenant_id", None) != ctx.tenant_id:
+            if successor is None or not successor or getattr(successor, "tenant_id", None) != ctx.tenant_id:
                 raise _Deny(TrustReason.SUCCESSOR_INVALID)
             succ_state = _state_value(successor.trust_state)
             if succ_state is None:

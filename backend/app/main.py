@@ -21,12 +21,14 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from backend.app.api.agents import router as agents_router
 from backend.app.api.audit import router as audit_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.drift import router as drift_router
 from backend.app.api.gateway import router as gateway_router
 from backend.app.api.incident_management import (
     memory_quarantine_router,
     router as incident_router,
 )
+from backend.app.api.knowledge import router as knowledge_router
 from backend.app.api.memory import router as memory_router
 from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
@@ -546,6 +548,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(drift_router)
     api_router.include_router(recovery_router)
     api_router.include_router(audit_router)
+    api_router.include_router(chronimem_router)
+    api_router.include_router(knowledge_router)
 
     app.include_router(api_router)
 

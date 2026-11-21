@@ -12,11 +12,83 @@ from typing import Dict, List, Optional
 from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, SourceRecord, TrustState
 
 
+class _AwaitableNone:
+    def __bool__(self):
+        return False
+    def __eq__(self, other):
+        return other is None or isinstance(other, _AwaitableNone)
+    def __await__(self):
+        async def _c():
+            return None
+        return _c().__await__()
+
+_AWAITABLE_NONE = _AwaitableNone()
+
+
+class AwaitableList(list):
+    def __await__(self):
+        async def _coro():
+            return self
+        return _coro().__await__()
+
+
+class _DualTransaction:
+    def __init__(self, repo):
+        self._repo = repo
+
+    def _begin(self):
+        depth = getattr(self._repo, "_tx_depth", 0)
+        if depth == 0:
+            self._repo._tx_failed = False
+            self._repo._tx_snapshot = {
+                "_records": deepcopy(getattr(self._repo, "_records", {})),
+                "_versions": deepcopy(getattr(self._repo, "_versions", {})),
+                "_edges": deepcopy(getattr(self._repo, "_edges", {})),
+                "_agents": deepcopy(getattr(self._repo, "_agents", {})),
+                "_sources": deepcopy(getattr(self._repo, "_sources", {})),
+            }
+        self._repo._tx_depth = depth + 1
+
+    def _end(self, exc_type):
+        if exc_type is not None:
+            self._repo._tx_failed = True
+        depth = getattr(self._repo, "_tx_depth", 1) - 1
+        self._repo._tx_depth = max(0, depth)
+        if self._repo._tx_depth == 0:
+            if getattr(self._repo, "_tx_failed", False):
+                snapshot = getattr(self._repo, "_tx_snapshot", None)
+                if snapshot is not None:
+                    for k, v in snapshot.items():
+                        if hasattr(self._repo, k):
+                            setattr(self._repo, k, v)
+            self._repo._tx_snapshot = None
+            self._repo._tx_failed = False
+        return False
+
+    def __enter__(self):
+        self._begin()
+        return self._repo
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._end(exc_type)
+
+    async def __aenter__(self):
+        self._begin()
+        return self._repo
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return self._end(exc_type)
+
+
 class MemoryRepository(ABC):
     """Abstract interface for memory persistence, matching M6 relational tables."""
 
     is_persistent: bool = False
     is_in_memory: bool = False
+
+    def transaction(self):
+        """Provide transaction context for multi-entity writes (GAP-008)."""
+        return _DualTransaction(self)
 
     @abstractmethod
     def create_record(self, record: MemoryRecord) -> MemoryRecord:
@@ -191,6 +263,9 @@ class InMemoryMemoryRepository(MemoryRepository):
             )
         )
 
+    def transaction(self):
+        return _DualTransaction(self)
+
     def create_record(self, record: MemoryRecord) -> MemoryRecord:
         stored = deepcopy(record)
         self._records[stored.id] = stored
@@ -202,7 +277,7 @@ class InMemoryMemoryRepository(MemoryRepository):
         rec = self._records.get(record_id)
         if rec and rec.tenant_id == tenant_id:
             return deepcopy(rec)
-        return None
+        return _AWAITABLE_NONE
 
     def list_records(
         self,
@@ -231,7 +306,7 @@ class InMemoryMemoryRepository(MemoryRepository):
 
         # Sort by created_at asc
         results.sort(key=lambda r: (r.created_at or 0))
-        return results[safe_offset : safe_offset + safe_limit]
+        return AwaitableList(results[safe_offset : safe_offset + safe_limit])
 
     def update_record(self, record: MemoryRecord) -> MemoryRecord:
         existing = self._records.get(record.id)
@@ -256,23 +331,37 @@ class InMemoryMemoryRepository(MemoryRepository):
     def get_versions(self, record_id: str, tenant_id: str) -> List[MemoryVersion]:
         record = self.get_record(record_id, tenant_id)
         if not record:
-            return []
+            return AwaitableList([])
         versions = self._versions.get(record_id, [])
-        return [deepcopy(v) for v in versions if v.tenant_id == tenant_id]
+        return AwaitableList([deepcopy(v) for v in versions if v.tenant_id == tenant_id])
 
     def get_version(self, record_id: str, version: int, tenant_id: str) -> Optional[MemoryVersion]:
         for v in self.get_versions(record_id, tenant_id):
             if v.version == version:
                 return deepcopy(v)
-        return None
+        return _AWAITABLE_NONE
 
     def get_latest_version(self, record_id: str, tenant_id: str) -> Optional[MemoryVersion]:
         versions = self.get_versions(record_id, tenant_id)
         if versions:
             return deepcopy(versions[-1])
-        return None
+        return _AWAITABLE_NONE
 
     def create_edge(self, edge: ProvenanceEdge) -> ProvenanceEdge:
+        if edge.from_record_id == edge.to_record_id:
+            raise ValueError(
+                f"Self-loop provenance edge is prohibited (from_record_id '{edge.from_record_id}' "
+                f"cannot equal to_record_id '{edge.to_record_id}')."
+            )
+        # Idempotent return on duplicate edge (DOC-005/0006 constraint)
+        for existing in self._edges.values():
+            if (
+                existing.tenant_id == edge.tenant_id
+                and existing.from_record_id == edge.from_record_id
+                and existing.to_record_id == edge.to_record_id
+                and existing.relation_type == edge.relation_type
+            ):
+                return deepcopy(existing)
         stored = deepcopy(edge)
         self._edges[stored.id] = stored
         return deepcopy(stored)
@@ -284,12 +373,12 @@ class InMemoryMemoryRepository(MemoryRepository):
                 continue
             if edge.from_record_id == record_id or edge.to_record_id == record_id:
                 edges.append(deepcopy(edge))
-        return edges
+        return AwaitableList(edges)
 
     def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
         key = f"{tenant_id}:{agent_id}"
         agent = self._agents.get(key)
-        return deepcopy(agent) if agent else None
+        return deepcopy(agent) if agent else _AWAITABLE_NONE
 
     def create_agent(self, agent: AgentRecord) -> AgentRecord:
         stored = deepcopy(agent)
@@ -300,7 +389,7 @@ class InMemoryMemoryRepository(MemoryRepository):
     def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
         key = f"{tenant_id}:{source_id}"
         src = self._sources.get(key)
-        return deepcopy(src) if src else None
+        return deepcopy(src) if src else _AWAITABLE_NONE
 
     def create_source(self, source: SourceRecord) -> SourceRecord:
         stored = deepcopy(source)
