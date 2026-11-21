@@ -12,7 +12,7 @@ Follows:
 import json
 import secrets
 from functools import lru_cache
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -65,6 +65,18 @@ class Settings(BaseSettings):
     OPENAPI_URL: str | None = Field(
         default="/openapi.json",
         description="OpenAPI specification endpoint",
+    )
+    ENABLE_DOCS_IN_PRODUCTION: bool = Field(
+        default=False,
+        description="Explicit flag permitting Swagger UI and ReDoc in production (disabled by default)",
+    )
+    PROTECT_DOCS_IN_PRODUCTION: bool = Field(
+        default=False,
+        description="When ENABLE_DOCS_IN_PRODUCTION is True, require Bearer authentication to access /docs and /redoc",
+    )
+    ALLOW_LOCALHOST_CORS_IN_PRODUCTION: bool = Field(
+        default=False,
+        description="Explicit override permitting localhost origins in production (strictly disabled by default)",
     )
 
     # --- 3. CORS Configuration ---
@@ -153,6 +165,10 @@ class Settings(BaseSettings):
         default=5,
         description="Max login attempts allowed per target account per window in production/dev",
     )
+    LOGIN_RATE_LIMIT_GLOBAL_ACCOUNT_MAX_REQUESTS: Optional[int] = Field(
+        default=None,
+        description="Global rate limit for an account across all source IPs (DoS mitigation tier).",
+    )
     LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = Field(
         default=60,
         description="Sliding window duration for login rate limiting in seconds",
@@ -164,6 +180,18 @@ class Settings(BaseSettings):
     AUTH_MAX_CONCURRENT_VERIFICATIONS: int = Field(
         default=8,
         description="Maximum concurrent Argon2 password verification operations to bound CPU and memory usage",
+    )
+    RATE_LIMIT_HMAC_SECRET: str = Field(
+        default="",
+        description="Keyed HMAC secret for privacy-preserving rate limit keys (GAP-009 / Finding C)",
+    )
+    JWT_ACTIVE_KID: str = Field(
+        default="k-current",
+        description="Active cryptographic key identifier for JWT signing (GAP-014 / Finding D)",
+    )
+    JWT_KEYRING_CONFIG: Optional[str] = Field(
+        default=None,
+        description="Optional JSON configuration string for keyring rotation and retirement (GAP-014 / Finding D)",
     )
 
     # --- 6. Persistence & Cache Connection Placeholders (M6/M7 Alignment) ---
@@ -276,6 +304,12 @@ class Settings(BaseSettings):
                 "Security violation: JWT_SECRET must be at least 32 characters (256 bits)."
             )
 
+        # Rate Limit HMAC Secret Handling in non-production:
+        if not self.RATE_LIMIT_HMAC_SECRET:
+            self.RATE_LIMIT_HMAC_SECRET = self.JWT_SECRET
+        elif len(self.RATE_LIMIT_HMAC_SECRET) < 32 and self.APP_ENV != "production":
+            self.RATE_LIMIT_HMAC_SECRET = self.JWT_SECRET
+
         # Strict Production Guardrails
         if self.APP_ENV == "production":
             # 1. Debug mode must not be active in production
@@ -296,14 +330,44 @@ class Settings(BaseSettings):
                     "Security violation: JWT_SECRET must be at least 32 characters in production."
                 )
 
-            # 3. CORS wildcard restriction
+            # 3. CORS wildcard and localhost restriction
             if "*" in self.CORS_ORIGINS:
                 raise ValueError(
                     "Security violation: Wildcard ('*') CORS origins are prohibited in production."
                 )
-            if not self.CORS_ORIGINS:
+            default_dev_origins = {
+                "http://localhost:5173",
+                "http://localhost:3000",
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:3000",
+            }
+            if set(self.CORS_ORIGINS).issubset(default_dev_origins) and not self.ALLOW_LOCALHOST_CORS_IN_PRODUCTION:
+                self.CORS_ORIGINS = ["https://amsc.prod.internal"]
+            elif not self.CORS_ORIGINS:
                 raise ValueError(
                     "Security configuration error: At least one explicit origin must be defined in production."
+                )
+            elif not self.ALLOW_LOCALHOST_CORS_IN_PRODUCTION:
+                localhost_markers = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+                for origin in self.CORS_ORIGINS:
+                    lower_orig = origin.lower()
+                    if any(marker in lower_orig for marker in localhost_markers):
+                        raise ValueError(
+                            f"Security violation: Development localhost origin '{origin}' is prohibited in production."
+                        )
+
+            # 3b. Keyed HMAC secret for login rate limiting in production
+            if not self.RATE_LIMIT_HMAC_SECRET:
+                raise ValueError(
+                    "Security violation: RATE_LIMIT_HMAC_SECRET must be explicitly configured in the runtime environment for production."
+                )
+            if len(self.RATE_LIMIT_HMAC_SECRET) < 32:
+                raise ValueError(
+                    "Security violation: RATE_LIMIT_HMAC_SECRET must be at least 32 characters in production."
+                )
+            if any(marker in self.RATE_LIMIT_HMAC_SECRET.lower() for marker in insecure_markers):
+                raise ValueError(
+                    "Security violation: Default, placeholder, or development RATE_LIMIT_HMAC_SECRET cannot be used in production."
                 )
 
             # 4. In-memory demo authentication strictly forbidden in production

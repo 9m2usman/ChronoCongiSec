@@ -102,6 +102,7 @@ def get_memory_detail(
     record_id: str,
     for_forensic: bool = False,
     repository: Optional[MemoryRepository] = None,
+    allow_quarantined: bool = False,
 ) -> Tuple[MemoryRecord, List[MemoryVersion], List[ProvenanceEdge]]:
     """Fetch complete memory detail including full version history and provenance edges.
 
@@ -126,7 +127,7 @@ def get_memory_detail(
         )
 
     # Enforce GAP-004: Normal detail access requires TRUSTED state
-    if not for_forensic and record.trust_state != TrustState.TRUSTED.value:
+    if not (for_forensic or allow_quarantined) and record.trust_state != TrustState.TRUSTED.value:
         raise MemoryNotFoundError(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )
@@ -146,6 +147,17 @@ def get_memory_detail(
     return record, versions, edges
 
 
+# Allowed trust state transitions according to TRD §15.3 and 19-rule transition matrix
+ALLOWED_TRUST_TRANSITIONS: dict[str, set[str]] = {
+    TrustState.UNVERIFIED.value: {TrustState.TRUSTED.value, TrustState.SUSPICIOUS.value, TrustState.QUARANTINED.value, TrustState.REJECTED.value},
+    TrustState.TRUSTED.value: {TrustState.SUSPICIOUS.value, TrustState.QUARANTINED.value, TrustState.UNVERIFIED.value, TrustState.SUPERSEDED.value},
+    TrustState.SUSPICIOUS.value: {TrustState.QUARANTINED.value, TrustState.UNVERIFIED.value, TrustState.REJECTED.value},
+    TrustState.QUARANTINED.value: {TrustState.REJECTED.value, TrustState.UNVERIFIED.value},
+    TrustState.SUPERSEDED.value: {TrustState.QUARANTINED.value, TrustState.REJECTED.value, TrustState.UNVERIFIED.value},
+    TrustState.REJECTED.value: set(),  # Terminal state: REJECTED has no exits
+}
+
+
 def transition_memory_trust_state(
     tenant_id: str,
     record_id: str,
@@ -157,7 +169,9 @@ def transition_memory_trust_state(
     """Transition a memory record's trust state according to M4 Security Engine lifecycle rules.
 
     M4 owns trust decisions. This function allows authorized M4 workflows (and test harnesses)
-    to transition a record from UNVERIFIED -> TRUSTED, or SUSPICIOUS, or QUARANTINED.
+    to transition a record according to the 19-rule transition matrix (TRD §15.3).
+    Enforces F-2: REJECTED has no exits, and direct jumps to TRUSTED are prohibited
+    unless transitioning from UNVERIFIED via authorized validation.
     """
     valid_states = {s.value for s in TrustState}
     target_state = new_trust_state.upper()
@@ -168,6 +182,16 @@ def transition_memory_trust_state(
     record = repo.get_record(record_id, tenant_id)
     if not record:
         raise MemoryNotFoundError(f"Memory record '{record_id}' not found for tenant '{tenant_id}'.")
+
+    current_state = record.trust_state.value if hasattr(record.trust_state, "value") else str(record.trust_state)
+    if current_state == target_state:
+        return record
+
+    # Enforce F-2: REJECTED has no exits (terminal state)
+    if current_state == TrustState.REJECTED.value:
+        raise ValidationError(
+            f"Illegal trust transition for record '{record_id}': record is in terminal state 'REJECTED' with no exits."
+        )
 
     record.trust_state = target_state
     record.updated_at = datetime.now(timezone.utc)

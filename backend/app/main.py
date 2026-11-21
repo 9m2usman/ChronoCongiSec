@@ -12,18 +12,28 @@ Follows:
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
-from fastapi import APIRouter, FastAPI, Request, Response
+from typing import AsyncGenerator, Dict, Tuple
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from backend.app.api.agents import router as agents_router
+from backend.app.api.audit import router as audit_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.drift import router as drift_router
+from backend.app.api.gateway import router as gateway_router
+from backend.app.api.incident_management import (
+    memory_quarantine_router,
+    router as incident_router,
+)
 from backend.app.api.memory import router as memory_router
+from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
+from backend.app.api.traces import router as traces_router
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import InMemoryRateLimiter
-from backend.app.core.exceptions import register_exception_handlers
+from backend.app.core.exceptions import API_ERROR_RESPONSES, register_exception_handlers
 from backend.app.core.logging import setup_logging
 
 
@@ -34,6 +44,14 @@ class HealthResponse(BaseModel):
 
     status: str = Field(default="healthy", description="Application service status")
     service: str = Field(default="amsc-api", description="Service identifier")
+
+
+class ReadinessResponse(BaseModel):
+    """Canonical service readiness probe response model (GAP-006 / Finding N)."""
+
+    status: str = Field(default="ready", description="Application readiness status")
+    service: str = Field(default="amsc-api", description="Service identifier")
+    dependencies: dict[str, str] = Field(default_factory=dict, description="Component dependency status")
 
 
 # Safe correlation ID pattern: alphanumeric, hyphen, underscore, period (max 128 chars)
@@ -82,6 +100,22 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Standard baseline HTTP security headers for all API responses."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+
+        path = request.url.path
+        if path.startswith("/api/") or path.startswith("/auth"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+
 # --- Application Lifecycle ---
 
 @asynccontextmanager
@@ -103,11 +137,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
         rate_limiter = getattr(app.state, "rate_limiter", None)
-        if rate_limiter is None or getattr(rate_limiter, "is_in_memory", False):
+        if (
+            rate_limiter is None
+            or getattr(rate_limiter, "is_in_memory", False)
+            or (hasattr(rate_limiter, "backend") and rate_limiter.backend != "redis")
+            or not getattr(rate_limiter, "is_persistent", True)
+        ):
             raise RuntimeError(
                 "Production startup failure: Redis-backed rate limiter is not configured. "
-                "In-memory rate limiting is strictly forbidden in production."
+                "In-memory rate limiting and unapproved rate limiters are strictly forbidden in production."
             )
+
+        if hasattr(rate_limiter, "ping"):
+            try:
+                ping_res = rate_limiter.ping()
+                import inspect
+                if inspect.isawaitable(ping_res):
+                    is_ready = await ping_res
+                else:
+                    is_ready = bool(ping_res)
+                if not is_ready:
+                    raise RuntimeError("Redis rate limiter readiness ping returned false.")
+            except Exception:
+                raise RuntimeError(
+                    "Production startup failure: Redis-backed rate limiter is unreachable or not ready."
+                )
 
         memory_repo = getattr(app.state, "memory_repo", None)
         if (
@@ -118,6 +172,46 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError(
                 "Production startup failure: Persistent database memory repository from M6 is not configured. "
                 "In-memory memory repository is strictly forbidden in production."
+            )
+
+        agent_repo = getattr(app.state, "agent_repo", None)
+        if agent_repo is not None and (
+            getattr(agent_repo, "is_in_memory", True)
+            or not getattr(agent_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database agent repository from M6 is not configured. "
+                "In-memory agent repository is strictly forbidden in production."
+            )
+
+        gateway_repo = getattr(app.state, "gateway_repo", None)
+        if gateway_repo is not None and (
+            getattr(gateway_repo, "is_in_memory", True)
+            or not getattr(gateway_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database gateway repository from M6 is not configured. "
+                "In-memory gateway repository is strictly forbidden in production."
+            )
+
+        incident_repo = getattr(app.state, "incident_repo", None)
+        if incident_repo is not None and (
+            getattr(incident_repo, "is_in_memory", True)
+            or not getattr(incident_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database incident repository from M6 is not configured. "
+                "In-memory incident repository is strictly forbidden in production."
+            )
+
+        trace_repo = getattr(app.state, "trace_repo", None)
+        if trace_repo is not None and (
+            getattr(trace_repo, "is_in_memory", True)
+            or not getattr(trace_repo, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Persistent database trace repository from M6 is not configured. "
+                "In-memory trace repository is strictly forbidden in production."
             )
 
     yield
@@ -133,16 +227,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = get_settings()
 
+    # Production Documentation Policy:
+    # Disable interactive Swagger UI and ReDoc in production by default unless explicitly enabled
+    protect_docs = (
+        settings.APP_ENV == "production"
+        and getattr(settings, "ENABLE_DOCS_IN_PRODUCTION", False)
+        and getattr(settings, "PROTECT_DOCS_IN_PRODUCTION", False)
+    )
+    docs_url = settings.DOCS_URL if (settings.APP_ENV != "production" or (getattr(settings, "ENABLE_DOCS_IN_PRODUCTION", False) and not protect_docs)) else None
+    redoc_url = settings.REDOC_URL if (settings.APP_ENV != "production" or (getattr(settings, "ENABLE_DOCS_IN_PRODUCTION", False) and not protect_docs)) else None
+
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
         description=settings.APP_DESCRIPTION,
         openapi_url=settings.OPENAPI_URL,
-        docs_url=settings.DOCS_URL,
-        redoc_url=settings.REDOC_URL,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        responses=API_ERROR_RESPONSES,
         lifespan=lifespan,
     )
     app.state.settings = settings
+
+    # Revocation store initialization (GAP-007)
+    if settings.APP_ENV != "production":
+        from backend.app.core.security import get_default_revocation_store
+        app.state.revocation_store = get_default_revocation_store()
+    else:
+        app.state.revocation_store = getattr(app.state, "revocation_store", None)
 
     # In development and test, initialize safe in-memory rate limiter if permitted
     if settings.APP_ENV != "production" and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
@@ -157,6 +269,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.memory_repo = None
 
+    # Agent repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.agents import get_default_agent_repository
+        app.state.agent_repo = get_default_agent_repository()
+    else:
+        app.state.agent_repo = None
+
+    # Gateway repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.gateway import get_default_gateway_repository
+        app.state.gateway_repo = get_default_gateway_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.gateway import SqlAlchemyGatewayRepository
+            app.state.gateway_repo = SqlAlchemyGatewayRepository(session_factory)
+        else:
+            app.state.gateway_repo = None
+
+    # Incident repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.incident_management import get_default_incident_repository
+        app.state.incident_repo = get_default_incident_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.incident_management import SqlAlchemyIncidentRepository
+            app.state.incident_repo = SqlAlchemyIncidentRepository(session_factory)
+        else:
+            app.state.incident_repo = None
+
+    # Traces repository initialization: auto-attach in-memory repository for dev/test only
+    if settings.APP_ENV != "production":
+        from backend.app.api.traces import get_default_trace_repository
+        app.state.trace_repo = get_default_trace_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.api.traces import SqlAlchemyTraceRepository
+            app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
+        else:
+            app.state.trace_repo = None
+
+    # Quarantine service initialization
+    from backend.app.security.quarantine import get_default_quarantine_service
+    app.state.quarantine_service = get_default_quarantine_service()
+
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
 
@@ -170,10 +329,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expose_headers=settings.CORS_EXPOSE_HEADERS,
     )
 
-    # 3. Register Standard Exception Handlers
+    # 3. Register Baseline HTTP Security Headers Middleware (outermost to protect all responses including CORS preflight)
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # 4. Register Standard Exception Handlers
     register_exception_handlers(app)
 
-    # 4. Core System Endpoints: Health Check
+    # 5. Core System Endpoints: Health & Readiness Probes
     @app.get(
         "/health",
         response_model=HealthResponse,
@@ -185,8 +347,169 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Process liveness probe."""
         return HealthResponse(status="healthy", service="amsc-api")
 
-    # 5. Versioned API Router Base
-    api_router = APIRouter(prefix=settings.API_PREFIX)
+    async def evaluate_readiness(app_instance: FastAPI) -> Tuple[bool, Dict[str, str]]:
+        cfg = getattr(app_instance.state, "settings", None) or get_settings()
+        deps: Dict[str, str] = {}
+        all_ready = True
+
+        # Auth Repo Check
+        auth_repo = getattr(app_instance.state, "auth_repo", None)
+        if auth_repo is None:
+            if cfg.APP_ENV == "production" or not cfg.ALLOW_IN_MEMORY_AUTH:
+                deps["auth_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["auth_repo"] = "ready (dev/test)"
+        else:
+            deps["auth_repo"] = "ready"
+
+        # Rate Limiter Check (GAP-006)
+        limiter = getattr(app_instance.state, "rate_limiter", None)
+        if limiter is None:
+            if cfg.APP_ENV == "production":
+                deps["rate_limiter"] = "unavailable"
+                all_ready = False
+            else:
+                deps["rate_limiter"] = "ready (dev/test in-memory)"
+        else:
+            if hasattr(limiter, "ping"):
+                try:
+                    res = limiter.ping()
+                    import asyncio
+                    is_ready = await res if asyncio.iscoroutine(res) else bool(res)
+                    if not is_ready:
+                        deps["rate_limiter"] = "unreachable"
+                        all_ready = False
+                    else:
+                        deps["rate_limiter"] = "ready"
+                except Exception:
+                    deps["rate_limiter"] = "unreachable"
+                    all_ready = False
+            else:
+                deps["rate_limiter"] = "ready"
+
+        # Memory Repo Check
+        mem_repo = getattr(app_instance.state, "memory_repo", None)
+        if mem_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["memory_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["memory_repo"] = "ready (dev/test)"
+        else:
+            if cfg.APP_ENV == "production" and (
+                getattr(mem_repo, "is_in_memory", True) or not getattr(mem_repo, "is_persistent", False)
+            ):
+                deps["memory_repo"] = "rejected (in-memory in production)"
+                all_ready = False
+            else:
+                deps["memory_repo"] = "ready"
+
+        # Agent Repo Check (Finding F & N)
+        agent_repo = getattr(app_instance.state, "agent_repo", None)
+        if agent_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["agent_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["agent_repo"] = "ready (dev/test)"
+        else:
+            if cfg.APP_ENV == "production" and (
+                getattr(agent_repo, "is_in_memory", True) or not getattr(agent_repo, "is_persistent", False)
+            ):
+                deps["agent_repo"] = "rejected (in-memory in production)"
+                all_ready = False
+            else:
+                deps["agent_repo"] = "ready"
+
+        # Trace Repo Check (Finding H & N)
+        trace_repo = getattr(app_instance.state, "trace_repo", None)
+        if trace_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["trace_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["trace_repo"] = "ready (dev/test)"
+        else:
+            if cfg.APP_ENV == "production" and (
+                getattr(trace_repo, "is_in_memory", True) or not getattr(trace_repo, "is_persistent", False)
+            ):
+                deps["trace_repo"] = "rejected (in-memory in production)"
+                all_ready = False
+            else:
+                deps["trace_repo"] = "ready"
+
+        # Incident Repo Check (Finding I & N)
+        incident_repo = getattr(app_instance.state, "incident_repo", None)
+        if incident_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["incident_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["incident_repo"] = "ready (dev/test)"
+        else:
+            if cfg.APP_ENV == "production" and (
+                getattr(incident_repo, "is_in_memory", True) or not getattr(incident_repo, "is_persistent", False)
+            ):
+                deps["incident_repo"] = "rejected (in-memory in production)"
+                all_ready = False
+            else:
+                deps["incident_repo"] = "ready"
+
+        # Revocation Store Check (GAP-007 / Finding B & N)
+        rev_store = getattr(app_instance.state, "revocation_store", None)
+        if rev_store is None:
+            if cfg.APP_ENV == "production":
+                deps["revocation_store"] = "unavailable"
+                all_ready = False
+            else:
+                deps["revocation_store"] = "ready (dev/test in-memory)"
+        else:
+            deps["revocation_store"] = "ready"
+
+        return all_ready, deps
+
+    @app.get(
+        "/ready",
+        response_model=ReadinessResponse,
+        summary="Service Readiness Probe",
+        description="Verify service readiness and dependency health (database, Redis, memory).",
+        tags=["Health"],
+    )
+    async def readiness_probe(request: Request) -> ReadinessResponse:
+        """Process readiness probe asserting dependencies are available."""
+        is_ready, deps = await evaluate_readiness(request.app)
+        if not is_ready:
+            from backend.app.core.exceptions import SecurityDependencyError
+            raise SecurityDependencyError("Service dependencies are not ready.")
+        return ReadinessResponse(status="ready", service="amsc-api", dependencies=deps)
+
+    # Protected interactive documentation (Finding K / GAP-040)
+    if protect_docs:
+        from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+        from backend.app.core.dependencies import get_tenant_context
+        from backend.app.tenancy.context import TenantContext
+
+        @app.get("/docs", include_in_schema=False)
+        async def protected_swagger_ui(
+            context: TenantContext = Depends(get_tenant_context),
+        ):
+            return get_swagger_ui_html(
+                openapi_url=settings.OPENAPI_URL,
+                title=f"{settings.APP_NAME} - Swagger UI (Protected)",
+            )
+
+        @app.get("/redoc", include_in_schema=False)
+        async def protected_redoc_ui(
+            context: TenantContext = Depends(get_tenant_context),
+        ):
+            return get_redoc_html(
+                openapi_url=settings.OPENAPI_URL,
+                title=f"{settings.APP_NAME} - ReDoc (Protected)",
+            )
+
+    # 6. Versioned API Router Base with Standard Error Responses
+    api_router = APIRouter(prefix=settings.API_PREFIX, responses=API_ERROR_RESPONSES)
 
     @api_router.get(
         "/health",
@@ -198,9 +521,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Versioned route for health inspection."""
         return HealthResponse(status="healthy", service="amsc-api")
 
+    @api_router.get(
+        "/ready",
+        response_model=ReadinessResponse,
+        summary="Versioned Readiness Health Check",
+        tags=["Health"],
+    )
+    async def versioned_readiness_check(request: Request) -> ReadinessResponse:
+        """Versioned route for readiness inspection."""
+        is_ready, deps = await evaluate_readiness(request.app)
+        if not is_ready:
+            from backend.app.core.exceptions import SecurityDependencyError
+            raise SecurityDependencyError("Service dependencies are not ready.")
+        return ReadinessResponse(status="ready", service="amsc-api", dependencies=deps)
+
     api_router.include_router(auth_router)
     api_router.include_router(tenants_router)
+    api_router.include_router(agents_router)
+    api_router.include_router(gateway_router)
     api_router.include_router(memory_router)
+    api_router.include_router(incident_router)
+    api_router.include_router(memory_quarantine_router)
+    api_router.include_router(traces_router)
+    api_router.include_router(drift_router)
+    api_router.include_router(recovery_router)
+    api_router.include_router(audit_router)
 
     app.include_router(api_router)
 

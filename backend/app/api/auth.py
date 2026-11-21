@@ -10,7 +10,9 @@ Follows:
 """
 
 import hashlib
+import hmac
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, Field, field_validator
@@ -30,6 +32,7 @@ from backend.app.core.exceptions import (
 )
 from backend.app.core.security import (
     create_access_token,
+    decode_access_token,
     dummy_verify_password_async,
     verify_password_async,
 )
@@ -162,6 +165,14 @@ class UserProfileResponse(BaseModel):
     role: str = Field(description="Membership role in current tenant")
 
 
+class LogoutResponse(BaseModel):
+    """Contract for POST /auth/logout session revocation (GAP-007)."""
+    message: str = Field(
+        default="Successfully logged out. Session has been revoked.",
+        description="Confirmation message",
+    )
+
+
 # ============================================================================
 # 2. Authentication Route Handlers
 # ============================================================================
@@ -214,27 +225,54 @@ async def login(
             retry_after=ip_check.retry_after,
         )
 
-    # Rate Limiting: 2. Target account throttling
-    # Uses hashed identifier scoped to the client IP to prevent an attacker from exhausting
-    # another user's login allowance (DoS mitigation) while protecting against credential guessing
-    # and preventing raw PII leakage in Redis keys. Uses full SHA-256 hex digest to eliminate collisions.
-    account_hash = hashlib.sha256(f"{normalized_email}:{normalized_slug}".encode("utf-8")).hexdigest()
-    account_key = f"login:account:{client_ip}:{account_hash}"
+    # Rate Limiting: 2. Target account throttling using keyed HMAC (GAP-009 / Finding C)
+    # Uses keyed HMAC-SHA256 to prevent rainbow tables and offline guessing if keys are exposed,
+    # and combines account-plus-IP throttling with a tiered global account limit to protect against
+    # distributed brute-force attacks without allowing attackers to deny service to legitimate users.
+    hmac_key = getattr(settings, "RATE_LIMIT_HMAC_SECRET", None) or settings.JWT_SECRET
+    account_raw = f"{normalized_email}:{normalized_slug}".encode("utf-8")
+    account_hmac = hmac.new(hmac_key.encode("utf-8"), account_raw, hashlib.sha256).hexdigest()
+
+    # 2a. Global account-wide rate limit across all source IPs (DoS mitigation tier)
+    global_account_max = getattr(settings, "LOGIN_RATE_LIMIT_GLOBAL_ACCOUNT_MAX_REQUESTS", None)
+    if global_account_max is None:
+        global_account_max = max(settings.LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS * 3, 10)
+
+    global_account_key = f"login:account:global:{account_hmac}"
     try:
-        acct_check = await rate_limiter.check_rate_limit(
-            key=account_key,
+        global_check = await rate_limiter.check_rate_limit(
+            key=global_account_key,
+            max_requests=global_account_max,
+            window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+        )
+    except SecurityDependencyError:
+        if settings.RATE_LIMIT_REDIS_FAILURE_POLICY == "fail_closed":
+            raise
+        global_check = None
+
+    if global_check is not None and not global_check.allowed:
+        raise RateLimitExceededError(
+            message="Too many login attempts for this account. Please try again later.",
+            retry_after=global_check.retry_after,
+        )
+
+    # 2b. Account-plus-IP throttling: enforces per-account limit for this client IP
+    acct_ip_key = f"login:account:{client_ip}:{account_hmac}"
+    try:
+        acct_ip_check = await rate_limiter.check_rate_limit(
+            key=acct_ip_key,
             max_requests=settings.LOGIN_RATE_LIMIT_ACCOUNT_MAX_REQUESTS,
             window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
         )
     except SecurityDependencyError:
         if settings.RATE_LIMIT_REDIS_FAILURE_POLICY == "fail_closed":
             raise
-        acct_check = None
+        acct_ip_check = None
 
-    if acct_check is not None and not acct_check.allowed:
+    if acct_ip_check is not None and not acct_ip_check.allowed:
         raise RateLimitExceededError(
             message="Too many login attempts for this account. Please try again later.",
-            retry_after=acct_check.retry_after,
+            retry_after=acct_ip_check.retry_after,
         )
 
     # Step 1: User retrieval
@@ -292,6 +330,13 @@ async def login(
         settings=settings,
     )
 
+    # Step 7: Reset account-plus-IP counter on successful login so legitimate users are not penalized
+    try:
+        if hasattr(rate_limiter, "reset"):
+            await rate_limiter.reset(acct_ip_key)
+    except Exception:
+        pass
+
     expires_in_seconds = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     return LoginResponse(
@@ -331,3 +376,29 @@ async def get_me(
         ),
         role=tenant_context.role,
     )
+
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke Current User Session & Invalidate Token",
+    description="Revokes the authenticated JWT jti in the persistent revocation store (GAP-007 / Finding B).",
+)
+async def logout(
+    request: Request,
+    tenant_context: TenantContextDep,
+    settings: SettingsDep,
+) -> LogoutResponse:
+    """Revoke authenticated session token (GAP-007)."""
+    auth_header = request.headers.get("Authorization", "")
+    parts = auth_header.strip().split(" ", 1)
+    token = parts[1].strip() if len(parts) == 2 else ""
+    if token:
+        payload = decode_access_token(token, settings=settings)
+        jti = payload.get("jti")
+        exp = payload.get("exp", int((datetime.now(timezone.utc) + timedelta(minutes=60)).timestamp()))
+        revocation_store = getattr(request.app.state, "revocation_store", None)
+        if revocation_store is not None and jti:
+            await revocation_store.revoke_token(jti=jti, expires_at=exp, reason="User logout")
+    return LogoutResponse()
