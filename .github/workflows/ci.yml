@@ -1,0 +1,93 @@
+name: AMSC Continuous Integration & Security Assurance
+
+on:
+  push:
+    branches: [ main, "feat/**", "fix/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-lint-and-test:
+    name: Backend Unit & Security Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: amsc_user
+          POSTGRES_PASSWORD: amsc_password
+          POSTGRES_DB: amsc_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Backend Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install ruff
+
+      - name: Run Backend Static Linting (Ruff)
+        run: |
+          ruff check backend/app
+
+      - name: Run Backend Unit & Security Test Suites
+        env:
+          APP_ENV: test
+          SECRET_KEY: test-ci-secret-key-at-least-32-bytes-long-now
+          RATE_LIMIT_HMAC_SECRET: test-hmac-secret-at-least-32-bytes
+          DATABASE_URL: postgresql+asyncpg://amsc_user:amsc_password@localhost:5432/amsc_db
+          TEST_DATABASE_URL: postgresql+asyncpg://amsc_user:amsc_password@localhost:5432/amsc_db
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          pytest backend/tests/security backend/tests/unit backend/app/memory/tests -v --durations=10
+
+  frontend-check:
+    name: Frontend Lint & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: |
+          npm ci || npm install
+
+      - name: Run Frontend Type Check & Production Build
+        working-directory: ./frontend
+        run: |
+          npm run build
