@@ -409,7 +409,7 @@ The following boundaries are mandatory:
 
 ---
 
-## 11. Simulated Company Integration Ownership Addendum
+## 15. Simulated Company Integration Ownership Addendum
 
 The implementation scope, cross-member handoffs and detailed prompts are defined in [docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md](docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md). That document supplements this ownership map; it does not transfer core ownership.
 
