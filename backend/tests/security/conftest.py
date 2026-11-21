@@ -37,7 +37,7 @@ VENDOR = "ACC-VENDOR-VALID"
 ATTACKER = "ACC-ATTACKER-999"
 
 
-def make_ctx(role="DEVELOPER", tenant=T_A, user="dev-1", active=True) -> TenantContext:
+def make_ctx(role="AI_DEVELOPER", tenant=T_A, user="dev-1", active=True) -> TenantContext:
     return TenantContext(tenant_id=tenant, tenant_slug="s", tenant_name="n", user_id=user, role=role, is_active=active)
 
 

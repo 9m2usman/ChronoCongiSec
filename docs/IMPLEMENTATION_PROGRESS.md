@@ -1,6 +1,20 @@
 # Implementation Progress
 
-Last updated: 2026-11-15
+Last updated: 2026-11-21
+
+## Integration verification (2026-11-21, branch `feat/integration-verification`)
+
+Details, evidence and remaining gaps: `docs/08-IMPLEMENTATION-SECURITY-GAP-REGISTER.md` §10.
+
+- [x] Gateway decides through M4 PolicyEngine and dispatches only via ProtectedExecutionGuard (competing evaluator removed).
+- [x] Quarantine runs M4 QuarantineWorkflow; direct trust-mutation fallback removed.
+- [x] M3 trust primitive is restrict-only (F-2 actually closed).
+- [x] Recovery endpoint replaced by the M4 orchestrator (no hardcoded id, snapshot first, never TRUSTED).
+- [x] Audited forensic access route; audit API without fabricated events; drift service wiring.
+- [x] Frontend: recovery and incident contracts, honest rewind UI, build and Vitest pass.
+- [x] Backend lint gate configured and clean; two import bugs fixed (Python 3.12 startup NameError, seed import).
+- [ ] Not verified: PostgreSQL (RLS, migrations, durable audit/recovery), Redis, Python 3.12, M2 runtime.
+- [ ] Open: database session factory at startup, durable trust store, persistent agent registry, ChroniMem contract, recovery ports.
 
 ## Repository audit
 

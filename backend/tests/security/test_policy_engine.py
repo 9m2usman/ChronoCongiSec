@@ -49,6 +49,7 @@ from backend.tests.security.conftest import (
     make_ctx,
     proposal,
 )
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 ALL_STATES = ["UNVERIFIED", "TRUSTED", "SUSPICIOUS", "QUARANTINED", "REJECTED", "SUPERSEDED"]
 
@@ -205,7 +206,7 @@ def test_grant_for_different_tool_is_rejected(world):
     assert_block(evaluate(world, proposal([world.trusted_memory()])), "POLICY_CONFIG_INVALID")
 
 
-@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN", "AI_DEVELOPER", "AUDITOR", ""])
+@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN", "DEVELOPER", "AUDITOR", "ai_developer", ""])
 def test_principal_role_not_permitted_to_propose(world, role):
     d = evaluate(world, proposal([world.trusted_memory()]), make_ctx(role=role, user="u-x"))
     assert_block(d, "PRINCIPAL_ROLE_NOT_AUTHORIZED")
@@ -301,7 +302,7 @@ def test_integrity_failure_blocked(world):
 
 def test_memory_trusted_outside_m4_cannot_justify_action(world):
     rid = world.memory()
-    transition_memory_trust_state(T_A, rid, "TRUSTED", repository=world.repo)  # M3 unguarded path (F-2)
+    force_trust_state(T_A, rid, "TRUSTED", repository=world.repo)  # out-of-band stored-state write (M3 F-2 path now restrict-only)
     d = evaluate(world, proposal([rid]))
     assert_block(d, "MEMORY_TRUST_EVIDENCE_MISSING")
     assert d.memory_evidence[0].effective_state == "TRUSTED" and d.memory_trust == "INELIGIBLE"
@@ -314,7 +315,7 @@ def test_quarantine_laundered_by_update_still_blocked(world):
     with pytest.raises(ValidationError):
         update_memory(T_A, rid, "rewrite", repository=world.repo)
     assert len(world.repo.get_versions(rid, T_A)) == 1
-    transition_memory_trust_state(T_A, rid, "TRUSTED", repository=world.repo)
+    force_trust_state(T_A, rid, "TRUSTED", repository=world.repo)
     d = evaluate(world, proposal([rid]))
     assert_block(d, "MEMORY_QUARANTINED", "MEMORY_STATE_HISTORY_MISMATCH")
 
@@ -465,7 +466,7 @@ def test_non_proposal_inputs_blocked(world, p):
 
 @pytest.mark.parametrize("cfg", [
     PolicyConfig(proposer_roles=()),
-    PolicyConfig(proposer_roles=("AI_DEVELOPER",)),
+    PolicyConfig(proposer_roles=("DEVELOPER",)),
     PolicyConfig(timeout_seconds=0),
     PolicyConfig(timeout_seconds=float("inf")),
     PolicyConfig(tool_policies={("t", "o"): ToolPolicy(mandatory_constraints=("ceiling",))}),
@@ -521,6 +522,7 @@ def test_valid_approval_satisfies_threshold(world):
     (dict(consumed=True), "APPROVAL_ALREADY_CONSUMED"),
     (dict(approver_user_id="dev-1"), "APPROVAL_SELF_APPROVAL"),
     (dict(approver_role="DEVELOPER"), "APPROVAL_INVALID"),
+    (dict(approver_role="AI_DEVELOPER"), "APPROVAL_INVALID"),
     (dict(approver_role="AUDITOR"), "APPROVAL_INVALID"),
 ])
 def test_invalid_approvals_block(world, overrides, code):

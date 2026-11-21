@@ -1,232 +1,137 @@
-"""M4/M6 Recovery & Checkpoint Management API.
+"""Recovery API (Doc 05 §6.3, Doc 03 §10).
 
 Module: backend.app.api.recovery
-Owner: M4 (Security/Recovery Logic) + M6 (Database Snapshots)
+Owner: M4 — Security Engine & Incident Response Lead (``backend/owner.md``: ``api/recovery.py``)
 
-Implements Canonical Architecture:
-- AMSC-DOC-002 (TRD/SRS) Section 5: Checkpointed Blast-Radius Analysis & Recovery
-- AMSC-DOC-005 (Database & API Schema) Section 3.5: Table 24 (checkpoints) & Table 26 (recovery_plans)
-- AMSC-DOC-007 (Research Standards): AgentRewind & ChronoMem Validated Restoration
+Routes:
+
+    POST /recovery/plans/preview      SECURITY_ANALYST or TENANT_ADMIN   (records a PREVIEWED plan)
+    POST /recovery/plans/execute      SECURITY_ANALYST or TENANT_ADMIN   body: {"plan_id": ...}
+    GET  /recovery/plans/{plan_id}    any canonical role (incl. read-only AUDITOR)
+
+Status codes never report success unless every post-condition held:
+
+    200  EXECUTED                     rollback committed, restored records UNVERIFIED, audited
+    409  plan stale / already executed / not executable (nothing changed; preview again)
+    500  RECONCILIATION_REQUIRED      rollback committed but a later step failed (records restricted)
+    503  FAILED                       nothing rolled back (snapshot, containment, rollback or store failure)
+
+Wiring (M1, ``main.py``) once the ports exist (see docs/security-design/m4-integration-contracts.md)::
+
+    from backend.app.api.recovery import router as recovery_router
+    app.state.recovery_service = RecoveryService(trust=..., memory=..., checkpoints=..., plans=...,
+                                                 rewind=RewindCoordinator(session_factory), ...)
+    api_router.include_router(recovery_router)
+
+Without ``app.state.recovery_service`` every route returns 503 (fail closed).
 """
 
-from copy import deepcopy
-from datetime import datetime, timezone
-from enum import Enum
-import logging
 from typing import Any, Dict, List, Optional
-import uuid
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Path, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.core.dependencies import (
-    CurrentUserDep,
-    TenantContextDep,
-    get_tenant_context,
-    require_roles,
-)
-from backend.app.core.exceptions import (
-    ForbiddenError,
-    NotFoundError,
-    ValidationError,
-)
-
-logger = logging.getLogger("amsc.api.recovery")
+from backend.app.core.exceptions import SecurityDependencyError, ValidationError
+from backend.app.recovery.orchestrator import RecoveryPreviewRequest, RecoveryReason, RecoveryService, RecoveryStatus
+from backend.app.security.authorization import READER_ROLES, SECURITY_OPERATOR_ROLES, require_role_access
+from backend.app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/recovery", tags=["recovery"])
 
+_MESSAGES = {
+    RecoveryStatus.EXECUTED: "Rollback committed. Restored records are UNVERIFIED and must be re-validated before use.",
+    RecoveryStatus.RECONCILIATION_REQUIRED: "Rollback committed but a follow-up step failed; records remain restricted. "
+                                            "Reconciliation is required.",
+    RecoveryStatus.FAILED: "Recovery was not executed. No memory content was changed.",
+}
 
-class AffectedRecord(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    record_id: str
-    action: str
-    checkpoint_version: int
-    target_checksum: str
-
-
-class RecoveryPlanPreview(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    checkpoint_id: str
-    checkpoint_name: str
-    affected_records_count: int
-    affected_records: List[AffectedRecord]
-    irreversible_external_actions: int
-    risk_level: str  # 'LOW' | 'MEDIUM' | 'HIGH'
-
-
-class RecoveryPlanPreviewResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    plan_id: str
-    status: str
-    preview: RecoveryPlanPreview
-
-
-class RecoveryPlanPreviewRequest(BaseModel):
-    checkpoint_id: str
-    target_record_id: Optional[str] = None
+_PLAN_STATE_REASONS = {RecoveryReason.PLAN_STALE.value, RecoveryReason.PLAN_ALREADY_EXECUTED.value,
+                       RecoveryReason.PLAN_NOT_EXECUTABLE.value}
 
 
 class RecoveryExecuteRequest(BaseModel):
-    plan_id: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    plan_id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
+    # Doc 05 client flag. The pre-recovery snapshot is always captured; an explicit false is refused
+    # rather than silently ignored.
     pre_recovery_snapshot_confirmed: bool = True
 
 
-class RecoveryExecuteResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class RecoveryPlanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     plan_id: str
     status: str
-    executed_at: str
-    restored_records: List[str]
-    audit_event_id: str
-    message: str
+    checkpoint_id: str
+    target_record_id: str
+    incident_id: Optional[str]
+    snapshot_captured: bool
+    impact_preview: Dict[str, Any]
 
 
-class CheckpointResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    id: str
-    tenant_id: str
-    name: str
-    agent_id: Optional[str] = None
-    checksum: str
-    created_at: str
+def _service(request: Request) -> RecoveryService:
+    service = getattr(request.app.state, "recovery_service", None)
+    if not isinstance(service, RecoveryService):
+        raise SecurityDependencyError("Recovery service is not configured.")
+    return service
 
 
-class InMemoryRecoveryRepository:
-    def __init__(self) -> None:
-        self._checkpoints: Dict[str, Dict[str, Any]] = {}
-        self._plans: Dict[str, Dict[str, Any]] = {}
-        self._seed_defaults()
-
-    def _seed_defaults(self) -> None:
-        t_a = "tenant-a-uuid-001"
-        self._checkpoints["chk-v1-golden"] = {
-            "id": "chk-v1-golden",
-            "tenant_id": t_a,
-            "name": "Golden Baseline Checkpoint v1.0",
-            "agent_id": "agent-001",
-            "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-    def list_checkpoints(self, tenant_id: str) -> List[Dict[str, Any]]:
-        return [
-            deepcopy(c) for c in self._checkpoints.values()
-            if c["tenant_id"] == tenant_id
-        ]
-
-    def get_checkpoint(self, tenant_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
-        chk = self._checkpoints.get(checkpoint_id)
-        if chk and chk["tenant_id"] == tenant_id:
-            return deepcopy(chk)
-        return None
-
-    def store_plan(self, plan: Dict[str, Any]) -> None:
-        self._plans[plan["plan_id"]] = deepcopy(plan)
-
-    def get_plan(self, plan_id: str) -> Optional[Dict[str, Any]]:
-        return deepcopy(self._plans.get(plan_id))
-
-
-_default_recovery_repo = InMemoryRecoveryRepository()
-
-
-def get_default_recovery_repository() -> InMemoryRecoveryRepository:
-    return _default_recovery_repo
-
-
-@router.get(
-    "/checkpoints",
-    response_model=List[CheckpointResponse],
-    status_code=status.HTTP_200_OK,
-    summary="List Checkpoints",
-)
-async def list_checkpoints(
-    context: TenantContextDep,
-) -> List[CheckpointResponse]:
-    records = _default_recovery_repo.list_checkpoints(context.tenant_id)
-    return [CheckpointResponse(**r) for r in records]
-
-
-@router.post(
-    "/plans/preview",
-    response_model=RecoveryPlanPreviewResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Preview Blast-Radius Recovery Plan",
-    description="Compute blast-radius impact and preview restoration steps without mutating data.",
-)
-async def preview_recovery_plan(
-    payload: RecoveryPlanPreviewRequest,
-    context: TenantContextDep,
-) -> RecoveryPlanPreviewResponse:
-    plan_id = f"plan-{uuid.uuid4().hex[:12]}"
-    checkpoint = _default_recovery_repo.get_checkpoint(context.tenant_id, payload.checkpoint_id)
-    checkpoint_name = checkpoint["name"] if checkpoint else "Target Checkpoint"
-
-    target_rec = payload.target_record_id or "rec-8812-441a"
-    affected = [
-        AffectedRecord(
-            record_id=target_rec,
-            action="ROLLBACK_TO_VERSION_1",
-            checkpoint_version=1,
-            target_checksum="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-        )
-    ]
-
-    preview = RecoveryPlanPreview(
-        checkpoint_id=payload.checkpoint_id,
-        checkpoint_name=checkpoint_name,
-        affected_records_count=len(affected),
-        affected_records=affected,
-        irreversible_external_actions=0,
-        risk_level="LOW",
-    )
-
-    resp = RecoveryPlanPreviewResponse(
-        plan_id=plan_id,
-        status="PREPARED",
-        preview=preview,
-    )
-    _default_recovery_repo.store_plan({"plan_id": plan_id, "tenant_id": context.tenant_id, "preview": preview})
-    return resp
-
-
-@router.post(
-    "/plans/execute",
-    response_model=RecoveryExecuteResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Execute Atomic Recovery Rollback",
-    description="Execute validated checkpoint restoration under strict dual-custody authorization.",
-)
-async def execute_recovery_plan(
-    payload: RecoveryExecuteRequest,
-    context: TenantContextDep,
-    current_user: CurrentUserDep,
+@router.post("/plans/preview", status_code=status.HTTP_200_OK,
+             summary="Preview a checkpoint rollback (blast radius, irreversible actions); records a PREVIEWED plan")
+async def preview_recovery(
     request: Request,
-) -> RecoveryExecuteResponse:
-    if context.role not in ("SECURITY_ANALYST", "TENANT_ADMIN"):
-        raise ForbiddenError(f"Role '{context.role}' is not authorized to execute recovery plans.")
+    payload: RecoveryPreviewRequest,
+    context: TenantContext = Depends(require_role_access(*SECURITY_OPERATOR_ROLES)),
+) -> Dict[str, Any]:
+    preview = await _service(request).preview(context, payload)
+    return preview.to_dict()
 
-    if not payload.pre_recovery_snapshot_confirmed:
-        raise ValidationError("Pre-recovery forensic snapshot confirmation is mandatory.")
 
-    now = datetime.now(timezone.utc)
-    audit_id = f"aud-rewind-{uuid.uuid4().hex[:12]}"
-    restored_records = ["rec-8812-441a"]
+@router.post("/plans/execute", summary="Execute a previewed recovery plan (snapshot, contain, roll back, audit)")
+async def execute_recovery(
+    request: Request,
+    payload: RecoveryExecuteRequest,
+    context: TenantContext = Depends(require_role_access(*SECURITY_OPERATOR_ROLES)),
+) -> JSONResponse:
+    if payload.pre_recovery_snapshot_confirmed is not True:
+        raise ValidationError("The pre-recovery snapshot is mandatory and cannot be declined.")
+    outcome = await _service(request).execute(context, payload.plan_id)
+    if outcome.status is RecoveryStatus.EXECUTED:
+        code = status.HTTP_200_OK
+    elif outcome.status is RecoveryStatus.RECONCILIATION_REQUIRED:
+        code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    elif set(outcome.reason_codes) & _PLAN_STATE_REASONS:
+        code = status.HTTP_409_CONFLICT
+    else:
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+    body: Dict[str, Any] = {
+        "plan_id": outcome.plan_id, "status": outcome.status.value, "success": outcome.success,
+        "reason_codes": list(outcome.reason_codes),
+        "executed_at": outcome.executed_at,
+        "restored_records": list(outcome.restored_record_ids),
+        "restored_records_count": len(outcome.restored_record_ids),
+        "quarantined_intermediary_ids": list(outcome.quarantined_intermediary_ids),
+        "irreversible_external_actions": outcome.irreversible_external_actions,
+        "audit_event_id": outcome.audit_event_id,
+        "restored_records_trust_state": "UNVERIFIED" if outcome.success else None,
+        "message": _MESSAGES.get(outcome.status, "Recovery did not complete."),
+    }
+    return JSONResponse(status_code=code, content=body)
 
-    # If memory repository exists in state, restore record trust & version
-    mem_repo = getattr(request.app.state, "memory_repo", None)
-    if mem_repo:
-        rec = mem_repo.get_record("rec-8812-441a", context.tenant_id)
-        if rec:
-            rec.trust_state = "TRUSTED"
-            rec.current_version = 1
-            mem_repo.update_record(rec)
 
-    return RecoveryExecuteResponse(
-        plan_id=payload.plan_id,
-        status="EXECUTED",
-        executed_at=now.isoformat(),
-        restored_records=restored_records,
-        audit_event_id=audit_id,
-        message="Atomic rollback completed. Pre-recovery state snapshot preserved.",
-    )
+@router.get("/plans/{plan_id}", response_model=RecoveryPlanResponse, summary="Read a recovery plan")
+async def get_recovery_plan(
+    request: Request,
+    plan_id: str = Path(..., pattern=r"^[A-Za-z0-9_.:\-]{1,128}$"),
+    context: TenantContext = Depends(require_role_access(*READER_ROLES)),
+) -> RecoveryPlanResponse:
+    plan = await _service(request).get_plan(context, plan_id)
+    return RecoveryPlanResponse(plan_id=plan.id, status=plan.status, checkpoint_id=plan.checkpoint_id,
+                                target_record_id=plan.target_record_id, incident_id=plan.incident_id,
+                                snapshot_captured=plan.snapshot_sha256 is not None,
+                                impact_preview=dict(plan.impact_preview))
+
+
+__all__: List[str] = ["router"]

@@ -3,9 +3,11 @@
 Module: backend.app.security.authorization
 Owner: M4 — Security Engine & Incident Response Lead
 
-Implements the M4 Day 2 deliverable from ``docs/06-TEAM-IMPLEMENTATION-PLAN.md``
-("Implement basic RBAC check (TENANT_ADMIN, SECURITY_ANALYST, DEVELOPER)"; exit
-criterion: unauthorized roles rejected with HTTP 403).
+Implements the M4 Day 2 deliverable from ``docs/06-TEAM-IMPLEMENTATION-PLAN.md`` (basic RBAC
+check; exit criterion: unauthorized roles rejected with HTTP 403), aligned on 2026-11-19 to the
+canonical project role vocabulary (PRD FR-003, TRD §11, Doc 04, Doc 05): TENANT_ADMIN,
+SECURITY_ANALYST, AI_DEVELOPER, AUDITOR. Doc 06's "DEVELOPER" was shorthand for AI_DEVELOPER;
+it is not an alias and is denied as an unknown role (finding M4-F2).
 
 Design (see ``docs/security-design/rbac-design.md``):
 
@@ -14,7 +16,7 @@ Design (see ``docs/security-design/rbac-design.md``):
   repository, never from JWT claims, headers, query parameters or bodies).
 * **Default deny.** ``evaluate_role_access`` starts from DENY and returns ALLOW only
   when every check passes. Any unexpected error yields DENY (fail closed).
-* **Closed role vocabulary.** Only the three Day 2 roles are recognized. Unknown,
+* **Closed role vocabulary.** Only the four canonical roles are recognized. Unknown,
   unsupported, malformed or missing roles are denied. Matching is exact: no case
   folding, trimming, aliasing or role hierarchy (TENANT_ADMIN does not implicitly
   satisfy other roles' requirements).
@@ -37,7 +39,7 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, FrozenSet, Iterable, Optional, Union
+from typing import Callable, FrozenSet, Iterable, Optional, Tuple, Union
 
 from fastapi import Depends
 
@@ -49,20 +51,29 @@ logger = logging.getLogger("amsc.security.authorization")
 
 
 class Role(str, Enum):
-    """Roles recognized by the Day 2 RBAC evaluator.
+    """The canonical project roles (PRD FR-003, TRD §11). Recognition grants nothing by itself:
+    every protected operation names its own allow-list.
 
-    Scope is exactly the three roles named in Doc 06 Day 2. ``AI_DEVELOPER`` and
-    ``AUDITOR`` (Doc 01/02/05) are intentionally NOT recognized and therefore denied
-    until the role-vocabulary conflict is resolved by the owners
-    (see ``docs/security-design/rbac-design.md`` §3).
+    - ``TENANT_ADMIN``: tenant governance; may also act as a security operator.
+    - ``SECURITY_ANALYST``: triage, review, quarantine, forensic access, recovery.
+    - ``AI_DEVELOPER``: agent configuration and action-proposal submission; no security
+      operations, no approvals, no forensic access.
+    - ``AUDITOR``: read-only (audit evidence and security read views); never mutates state,
+      never approves, never proposes.
     """
 
     TENANT_ADMIN = "TENANT_ADMIN"
     SECURITY_ANALYST = "SECURITY_ANALYST"
-    DEVELOPER = "DEVELOPER"
+    AI_DEVELOPER = "AI_DEVELOPER"
+    AUDITOR = "AUDITOR"
 
 
 RECOGNIZED_ROLES: FrozenSet[str] = frozenset(role.value for role in Role)
+
+# Shared allow-lists (least privilege). Kept here so every M4 module uses the same sets.
+SECURITY_OPERATOR_ROLES: Tuple[Role, ...] = (Role.SECURITY_ANALYST, Role.TENANT_ADMIN)
+READER_ROLES: Tuple[Role, ...] = (Role.TENANT_ADMIN, Role.SECURITY_ANALYST, Role.AI_DEVELOPER, Role.AUDITOR)
+PROPOSER_ROLES: Tuple[Role, ...] = (Role.AI_DEVELOPER,)
 
 # memberships.role is VARCHAR(64) (Doc 05 §3.1); canonical role names are upper snake case.
 MAX_ROLE_LENGTH = 64

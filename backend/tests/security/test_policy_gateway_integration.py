@@ -41,7 +41,7 @@ def auth_repo() -> InMemoryAuthRepository:
     repo = InMemoryAuthRepository()
     repo.add_tenant(TenantRecord(id=T_A, name="A", slug="a"))
     repo.add_tenant(TenantRecord(id=T_B, name="B", slug="b"))
-    for uid, tid, role in [("dev-1", T_A, "DEVELOPER"), ("dev-b", T_B, "DEVELOPER"), ("aud-1", T_A, "AUDITOR")]:
+    for uid, tid, role in [("dev-1", T_A, "AI_DEVELOPER"), ("dev-b", T_B, "AI_DEVELOPER"), ("aud-1", T_A, "AUDITOR")]:
         repo.add_user(UserRecord(id=uid, email=f"{uid}@x.test", hashed_password="x", full_name=uid))
         repo.add_membership(MembershipRecord(id=f"m-{uid}", tenant_id=tid, user_id=uid, role=role, status="ACTIVE"))
     return repo

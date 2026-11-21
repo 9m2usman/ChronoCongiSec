@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
 from backend.app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
-from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
+from .integrity import MemoryIntegrityError, sha256_hex
 from .models import (
     MemoryRecord,
     MemoryRefCheck,
@@ -165,6 +165,23 @@ ALLOWED_TRUST_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+# Restriction order used by M4 (backend.app.security.trust): higher = more restrictive.
+_RESTRICTION_RANK = {
+    TrustState.TRUSTED.value: 0,
+    TrustState.UNVERIFIED.value: 1,
+    TrustState.SUPERSEDED.value: 2,
+    TrustState.SUSPICIOUS.value: 3,
+    TrustState.QUARANTINED.value: 4,
+    TrustState.REJECTED.value: 5,
+}
+# Targets this M3 primitive may set on its own: reversible restrictions only. TRUSTED (validation
+# evidence), REJECTED (authorised actor, terminal), SUPERSEDED (successor evidence) and every
+# relaxation require M4's TrustEvaluator, which writes through MemoryRepository.update_record.
+_RESTRICT_ONLY_TARGETS = frozenset({
+    TrustState.UNVERIFIED.value, TrustState.SUSPICIOUS.value, TrustState.QUARANTINED.value,
+})
+
+
 def transition_memory_trust_state(
     tenant_id: str,
     record_id: str,
@@ -173,31 +190,46 @@ def transition_memory_trust_state(
     analyst_id: Optional[str] = None,
     repository: Optional[MemoryRepository] = None,
 ) -> MemoryRecord:
-    """Transition a memory record's trust state according to M4 Security Engine lifecycle rules.
+    """Restrict-only trust-state primitive (finding F-2).
 
-    M4 owns trust decisions. This function allows authorized M4 workflows (and test harnesses)
-    to transition a record according to the 19-rule transition matrix (TRD §15.3).
-    Enforces F-2: REJECTED has no exits, and direct jumps to TRUSTED are prohibited
-    unless transitioning from UNVERIFIED via authorized validation.
+    M4 owns trust decisions (TRD §15.3). This M3 function cannot see the transition matrix's
+    evidence, actor or history, so it may only move a record to a MORE restrictive, reversible
+    state: TRUSTED -> UNVERIFIED (invalidate), or to SUSPICIOUS / QUARANTINED from a less
+    restrictive state. Everything else raises ``ValidationError``:
+
+    - promotion to TRUSTED, and any relaxation (e.g. QUARANTINED -> UNVERIFIED);
+    - REJECTED and SUPERSEDED targets (M4 requires an authorised actor / successor evidence);
+    - exits from REJECTED (terminal) and unknown stored or requested states (fail closed).
+
+    Promotions, releases and recovery go through ``backend.app.security.trust.TrustEvaluator``.
+    Setting the current state again is an idempotent no-op.
     """
-    valid_states = {s.value for s in TrustState}
-    target_state = new_trust_state.upper()
-    if target_state not in valid_states:
-        raise ValidationError(f"Invalid trust state '{new_trust_state}'. Must be one of {valid_states}.")
+    if not isinstance(new_trust_state, str):
+        raise ValidationError("Invalid trust state.")
+    target_state = new_trust_state.strip().upper()
+    if target_state not in _RESTRICTION_RANK:
+        raise ValidationError(f"Invalid trust state '{new_trust_state}'.")
 
     repo = repository or get_default_repository()
     record = repo.get_record(record_id, tenant_id)
-    if not record:
+    if not record or getattr(record, "tenant_id", None) != tenant_id:
         raise MemoryNotFoundError(f"Memory record '{record_id}' not found for tenant '{tenant_id}'.")
 
     current_state = record.trust_state.value if hasattr(record.trust_state, "value") else str(record.trust_state)
+    if current_state not in _RESTRICTION_RANK:
+        raise ValidationError(
+            f"Illegal trust transition for record '{record_id}': stored trust state is unknown (fail closed)."
+        )
     if current_state == target_state:
         return record
-
-    # Enforce F-2: REJECTED has no exits (terminal state)
     if current_state == TrustState.REJECTED.value:
         raise ValidationError(
             f"Illegal trust transition for record '{record_id}': record is in terminal state 'REJECTED' with no exits."
+        )
+    if target_state not in _RESTRICT_ONLY_TARGETS or _RESTRICTION_RANK[target_state] <= _RESTRICTION_RANK[current_state]:
+        raise ValidationError(
+            f"Illegal trust transition for record '{record_id}': {current_state} -> {target_state} must be decided "
+            "by the M4 TrustEvaluator (this primitive only applies reversible restrictions)."
         )
 
     record.trust_state = target_state

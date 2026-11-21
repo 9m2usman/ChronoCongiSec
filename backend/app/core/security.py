@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
 
 import argon2
 from argon2 import PasswordHasher

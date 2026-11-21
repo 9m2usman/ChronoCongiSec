@@ -12,10 +12,6 @@ once; and a recovery plan's pre-recovery snapshot is fingerprinted, immutable on
 captured, and required before any recovery action or execution is recorded.
 """
 
-# SHA-256 of the snapshot as PostgreSQL renders it (jsonb::text, UTF-8). Computed by the
-# database, so application code never has to reproduce jsonb's text format.
-SNAPSHOT_SHA256_SQL = "encode(sha256(convert_to(pre_recovery_snapshot_json::text, 'UTF8')), 'hex')"
-
 from datetime import datetime
 from typing import Any, Optional
 
@@ -42,6 +38,11 @@ from backend.app.database.base import (
     tenant_id_column,
     tenant_parent_key,
 )
+
+
+# SHA-256 of the snapshot as PostgreSQL renders it (jsonb::text, UTF-8). Computed by the
+# database, so application code never has to reproduce jsonb's text format.
+SNAPSHOT_SHA256_SQL = "encode(sha256(convert_to(pre_recovery_snapshot_json::text, 'UTF8')), 'hex')"
 
 
 class Incident(Base):

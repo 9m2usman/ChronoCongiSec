@@ -44,6 +44,7 @@ from backend.app.security.quarantine import (
 from backend.app.security.trust import TrustOperation, UserActor
 from backend.app.tenancy.context import InMemoryAuthRepository, MembershipRecord, TenantRecord, UserRecord
 from backend.tests.security.conftest import AGENT, DEV, T_A, T_B, World, make_ctx, proposal
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 ANALYST = make_ctx(role="SECURITY_ANALYST", user="analyst-1")
 ANALYST_2 = make_ctx(role="SECURITY_ANALYST", user="analyst-2")
@@ -332,7 +333,7 @@ def _http_app(env):
     repo = InMemoryAuthRepository()
     repo.add_tenant(TenantRecord(id=T_A, name="A", slug="a"))
     repo.add_user(UserRecord(id="dev-1", email="d@x.test", hashed_password="x", full_name="d"))
-    repo.add_membership(MembershipRecord(id="m1", tenant_id=T_A, user_id="dev-1", role="DEVELOPER", status="ACTIVE"))
+    repo.add_membership(MembershipRecord(id="m1", tenant_id=T_A, user_id="dev-1", role="AI_DEVELOPER", status="ACTIVE"))
     app.state.auth_repo = repo
     app.state.memory_repo = env.w.repo
     app.include_router(memory_router, prefix="/api/v1")
@@ -340,7 +341,7 @@ def _http_app(env):
 
 
 def _get(app, path):
-    token = create_access_token(user_id="dev-1", tenant_id=T_A, role="DEVELOPER", settings=SETTINGS)
+    token = create_access_token(user_id="dev-1", tenant_id=T_A, role="AI_DEVELOPER", settings=SETTINGS)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
@@ -381,7 +382,7 @@ def test_analyst_forensic_read_is_audited_before_read_and_non_actionable(env, mo
     assert view.actionable is False and view.record.id == rid and view.record.trust_state == "QUARANTINED"
     assert view.versions and view.trust_history and view.trust_history[-1].resulting_state == "QUARANTINED"
     ev = env.audit[0]
-    assert ev["event_type"] == "FORENSIC_MEMORY_ACCESSED" and ev["actor_id"] == "analyst-1"
+    assert ev["event_type"] == "FORENSIC_MEMORY_ACCESSED" and ev["actor_id"] == "user:analyst-1"
     assert ev["details_json"]["reason"] == "INC-1 root cause analysis"
     assert ev["details_json"]["trust_state_at_access"] == "QUARANTINED"
 
@@ -552,7 +553,7 @@ def test_retry_after_timeout_is_idempotent(env):
 def test_out_of_band_trust_restoration_is_reconciled(env):
     rid = env.w.memory_in_state("TRUSTED")
     env.quarantine(rid)
-    transition_memory_trust_state(T_A, rid, "TRUSTED", repository=env.w.repo)  # M3 bypass (F-2)
+    force_trust_state(T_A, rid, "TRUSTED", repository=env.w.repo)  # out-of-band stored-state write
     assert rid in env.retrievable()  # demonstrates the open M3 risk
     out = env.quarantine(rid, ANALYST_2)
     assert out.status is QuarantineStatus.ALREADY_QUARANTINED and out.reconciled_stored_state
@@ -564,7 +565,7 @@ def test_update_laundering_is_reconciled(env):
     rid = env.w.memory_in_state("QUARANTINED")
     with pytest.raises(ValidationError):  # M3 now refuses updates on QUARANTINED (F-1 fixed)
         update_memory(T_A, rid, "benign rewrite", repository=env.w.repo)
-    transition_memory_trust_state(T_A, rid, "UNVERIFIED", repository=env.w.repo)  # remaining bypass (F-2)
+    force_trust_state(T_A, rid, "UNVERIFIED", repository=env.w.repo)  # out-of-band stored-state write
     out = env.quarantine(rid)
     assert out.status is QuarantineStatus.ALREADY_QUARANTINED and out.reconciled_stored_state
     assert env.state(rid) == "QUARANTINED"

@@ -15,16 +15,15 @@ Integrates:
 
 import logging
 import re
-from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.app.core.config import Settings, get_settings
+from backend.app.core.config import get_settings
 from backend.app.core.dependencies import (
     RateLimitResult,
     RateLimiterProtocol,
@@ -41,7 +40,6 @@ from backend.app.database.models.agents import Agent
 from backend.app.database.models.gateway import Approval, PolicyDecision, ToolExecution, ToolProposal
 from backend.app.database.models.memory import MemoryRecord, MemoryVersion, RetrievalEvent, Source
 from backend.app.database.models.observability import Trace, TraceSpan
-from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.traces")
 

@@ -12,7 +12,7 @@ Follows:
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Annotated, Callable, Dict, List, Optional, Protocol
+from typing import Annotated, Any, Callable, Dict, List, Optional, Protocol
 from fastapi import Depends, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 

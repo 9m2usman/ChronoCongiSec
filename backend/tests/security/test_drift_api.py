@@ -184,9 +184,42 @@ def test_list_returns_tenant_observations_with_assessment(app):
     assert body[1]["assessment"]["priority"] == "LOW"
 
 
-@pytest.mark.parametrize("user", ["dev-a", "aud-a", "admin-a"])
-def test_any_tenant_member_may_list(app, user):
+@pytest.mark.parametrize("user", ["aidev-a", "aud-a", "admin-a", "analyst-a"])
+def test_any_canonical_role_may_list(app, user):
     assert call(app, "GET", "/api/v1/drift/observations", user).status_code == 200
+
+
+def test_unknown_role_cannot_list(app):
+    """M4-F3: listing required only authentication; an unrecognized role ("DEVELOPER", the old
+    Doc 06 shorthand) must be denied like any other unknown role."""
+    res = call(app, "GET", "/api/v1/drift/observations", "dev-a")
+    assert res.status_code == 403 and "obs-a1" not in res.text
+
+
+def test_route_denies_unknown_role_before_reaching_service(store):
+    """The route dependency alone rejects an unknown role: a permissive service stub is never called."""
+    class PermissiveService(DriftReviewService):   # a real service type, with its role check removed
+        calls = []
+
+        async def list_observations(self, *a, **k):
+            self.calls.append((a, k))
+            return []
+
+    app = build_app(store)
+    app.state.drift_service = PermissiveService(store)
+    res = call(app, "GET", "/api/v1/drift/observations", "dev-a")
+    assert res.status_code == 403 and PermissiveService.calls == []
+    assert call(app, "GET", "/api/v1/drift/observations", "aud-a").status_code == 200
+    assert len(PermissiveService.calls) == 1
+
+
+@pytest.mark.parametrize("role", ["DEVELOPER", "PLATFORM_ADMIN", "auditor", ""])
+def test_service_denies_list_to_unknown_roles_without_http_layer(store, role):
+    from backend.app.core.exceptions import ForbiddenError
+    from backend.tests.security.conftest import make_ctx
+    with pytest.raises(ForbiddenError):
+        asyncio.run(DriftReviewService(store).list_observations(make_ctx(role=role, user="u-x")))
+    assert store.calls == []
 
 
 def test_list_pagination_and_filters(app):
@@ -241,7 +274,7 @@ def test_authorized_review_persists_and_audits(app, store, user, role, decision)
     assert len(store.audit) == 1
     ev = store.audit[0]
     assert ev["id"] == body["audit_event_id"] and ev["event_type"] == "DRIFT_OBSERVATION_REVIEWED"
-    assert ev["actor_id"] == user and ev["tenant_id"] == T_A and ev["trace_id"] == "tr-drift-01"
+    assert ev["actor_id"] == f"user:{user}" and ev["tenant_id"] == T_A and ev["trace_id"] == "tr-drift-01"
     d = ev["details_json"]
     assert (d["previous_status"], d["new_status"]) == ("PENDING", decision)
     assert d["actor_role"] == role and d["memory_trust_changed"] is False and d["reviewed_at"]
@@ -396,7 +429,7 @@ def test_service_validates_list_arguments_without_http_layer(store, kwargs):
     from backend.tests.security.conftest import make_ctx
     svc = DriftReviewService(store)
     with pytest.raises(ValidationError):
-        asyncio.run(svc.list_observations(make_ctx(role="DEVELOPER", user="d"), **kwargs))
+        asyncio.run(svc.list_observations(make_ctx(role="AI_DEVELOPER", user="d"), **kwargs))
     assert store.calls == []
 
 
@@ -476,3 +509,22 @@ def test_audit_chain_sequence_is_per_tenant(app, store):
     review(app, "obs-a2", "REJECTED")
     review(app, "obs-b1", "REJECTED", "analyst-b")
     assert [(e["tenant_id"], e["chain_seq"]) for e in store.audit] == [(T_A, 1), (T_A, 2), (T_B, 1)]
+
+
+def test_service_is_built_from_m6_session_factory_when_not_configured(store):
+    """main.py does not set drift_service; the router builds it over M6's UnitOfWork if a session
+    factory exists, and otherwise fails closed (no in-memory fallback)."""
+    from backend.app.api.drift import _service
+    from backend.app.security.drift import SqlDriftReviewStore
+    from types import SimpleNamespace
+
+    class _Req:
+        def __init__(self, state):
+            self.app = SimpleNamespace(state=state)
+
+    state = SimpleNamespace(drift_service=None, db_session_factory=object())
+    svc = _service(_Req(state))
+    assert isinstance(svc._store, SqlDriftReviewStore) and state.drift_service is svc
+    from backend.app.core.exceptions import SecurityDependencyError
+    with pytest.raises(SecurityDependencyError):
+        _service(_Req(SimpleNamespace(drift_service=None, db_session_factory=None)))

@@ -1,5 +1,10 @@
 # M4 Day 2 — Basic RBAC Evaluator: Design
 
+> **Update 2026-11-19 (finding M4-F2):** the role vocabulary is now the canonical project set: `TENANT_ADMIN`, `SECURITY_ANALYST`, `AI_DEVELOPER`, `AUDITOR` (PRD FR-003, TRD §11, Doc 04/05, M1 seeds).
+> - `DEVELOPER` (Doc 06 Day 2 shorthand) is **not** an alias and is denied as an unknown role.
+> - `AUDITOR` is read-only. Shared allow-lists live in `authorization.py`: `SECURITY_OPERATOR_ROLES` (analyst, admin), `READER_ROLES` (all four), `PROPOSER_ROLES` (`AI_DEVELOPER`).
+> - Statements below that name three roles describe the Day 2 state. See [m4-security-assessment.md](m4-security-assessment.md).
+
 **Document ID:** AMSC-SEC-002
 **Owner:** M4 — Security Engine & Incident Response Lead
 **Status:** Implemented and tested in M4-owned code. Integration into M1's `require_roles()` is **pending M1 approval** (§12).

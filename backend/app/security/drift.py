@@ -44,13 +44,16 @@ from backend.app.core.exceptions import (
     SecurityDependencyError,
     ValidationError,
 )
-from backend.app.security.authorization import Role, evaluate_role_access
+from backend.app.security.audit_identity import user_actor
+from backend.app.security.authorization import READER_ROLES, SECURITY_OPERATOR_ROLES, Role, evaluate_role_access
 from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.security.drift")
 
 DRIFT_REVIEW_POLICY_VERSION = "amsc-drift-review/1.0.0"
-REVIEWER_ROLES: Tuple[Role, ...] = (Role.SECURITY_ANALYST, Role.TENANT_ADMIN)
+REVIEWER_ROLES: Tuple[Role, ...] = SECURITY_OPERATOR_ROLES
+# Listing is a read view: any canonical role (incl. read-only AUDITOR); unknown roles are denied (M4-F3).
+LIST_ROLES: Tuple[Role, ...] = READER_ROLES
 AUDIT_EVENT_TYPE = "DRIFT_OBSERVATION_REVIEWED"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:\-]{1,128}$")
 # Stored as VARCHAR(32) (Doc 05 / M6 model). Accept only a plain decimal in [0, 1] with
@@ -339,6 +342,8 @@ class DriftReviewService:
                                 classification: Optional[str] = None, reviewer_status: Optional[str] = None,
                                 ) -> List[Tuple[DriftObservationView, DriftAssessment]]:
         tenant_id = _require_context(context)
+        if not evaluate_role_access(context, LIST_ROLES).allowed:
+            raise ForbiddenError("Listing drift observations requires a recognized tenant role.")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_PAGE:
             raise ValidationError("limit must be an integer between 1 and 100.")
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -374,6 +379,10 @@ class DriftReviewService:
         rbac = evaluate_role_access(context, REVIEWER_ROLES)
         if not rbac.allowed:
             raise ForbiddenError("Drift review requires SECURITY_ANALYST or TENANT_ADMIN.")
+        try:
+            actor = user_actor(context.user_id)   # OD-9 audit identity, from trusted context only
+        except ValueError as exc:
+            raise ForbiddenError("A verified tenant context is required.") from exc
         if type(observation_id) is not str or not _SAFE_ID.fullmatch(observation_id):
             raise ValidationError("Invalid observation identifier.")
         if type(requested_status) is not str or requested_status not in _ALLOWED_REVIEW_TARGETS:
@@ -386,7 +395,7 @@ class DriftReviewService:
 
         def audit(plan: ReviewPlan, before: DriftObservationView) -> AuditDraft:
             assessment = self.assess(before)
-            return AuditDraft(actor_id=context.user_id, trace_id=trace, details={
+            return AuditDraft(actor_id=actor, trace_id=trace, details={
                 "observation_id": before.id,
                 "record_id": before.record_id,
                 "previous_status": before.reviewer_status,

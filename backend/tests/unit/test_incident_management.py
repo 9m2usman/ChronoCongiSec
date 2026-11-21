@@ -768,30 +768,76 @@ async def test_quarantine_with_associated_incident_updates_status(
 
 
 @pytest.mark.asyncio
-async def test_quarantine_persistence_failure_rolls_back_memory_trust_state(
+async def test_quarantine_persistence_failure_fails_request_and_keeps_record_restricted(
     client: httpx.AsyncClient,
     test_settings: Settings,
     isolated_memory_repo: InMemoryMemoryRepository,
     isolated_incident_repo: InMemoryIncidentRepository,
 ):
+    """Evidence persistence fails after M4 applied the transition.
+
+    Previously the route rolled the record back to its prior state (SUSPICIOUS). M4's rule is to
+    fail toward restriction: the record stays QUARANTINED (and M4's ledger agrees), and the request
+    is NOT reported as success (503, reconciliation required). Relaxing a quarantine because a
+    database write failed would be fail-open.
+    """
     token = create_token_for(USER_A_ANALYST, EMAIL_A_ANALYST, TENANT_A_ID, "SECURITY_ANALYST", test_settings)
-
-    # Arm failure hook
     isolated_incident_repo.fail_quarantine_persistence = True
-
-    rec_before = isolated_memory_repo.get_record(MEM_A_SUSPICIOUS, TENANT_A_ID)
-    prev_state = rec_before.trust_state
 
     resp = await client.post(
         f"/api/v1/memory/{MEM_A_SUSPICIOUS}/quarantine",
         headers={"Authorization": f"Bearer {token}"},
-        json={"reason": "Should rollback on db failure"},
+        json={"reason": "Evidence write fails"},
     )
-    assert resp.status_code == 500
-
-    # Verify state rolled back to SUSPICIOUS
+    assert resp.status_code == 503
+    assert "successfully quarantined" not in resp.text.lower()
     rec_after = isolated_memory_repo.get_record(MEM_A_SUSPICIOUS, TENANT_A_ID)
-    assert rec_after.trust_state == prev_state
+    assert rec_after.trust_state in (TrustState.QUARANTINED, "QUARANTINED")
+
+
+@pytest.mark.asyncio
+async def test_quarantine_has_no_direct_trust_mutation_fallback(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+    isolated_memory_repo: InMemoryMemoryRepository,
+    monkeypatch,
+):
+    """Regression: the route used to catch M4's refusal and call M3's transition_memory_trust_state
+    directly. If M4's workflow cannot run, the request must fail and the record must not change."""
+    import backend.app.api.incident_management as im
+    from backend.app.core.exceptions import SecurityDependencyError
+
+    def unavailable(*_a, **_k):
+        raise SecurityDependencyError("M4 unavailable")
+
+    monkeypatch.setattr(im, "get_quarantine_workflow", unavailable)
+    token = create_token_for(USER_A_ANALYST, EMAIL_A_ANALYST, TENANT_A_ID, "SECURITY_ANALYST", test_settings)
+    resp = await client.post(
+        f"/api/v1/memory/{MEM_A_SUSPICIOUS}/quarantine",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "M4 down"},
+    )
+    assert resp.status_code == 503
+    rec = isolated_memory_repo.get_record(MEM_A_SUSPICIOUS, TENANT_A_ID)
+    assert rec.trust_state in (TrustState.SUSPICIOUS, "SUSPICIOUS")
+
+
+@pytest.mark.asyncio
+async def test_quarantine_goes_through_m4_ledger(
+    client: httpx.AsyncClient,
+    test_settings: Settings,
+):
+    """The quarantine is recorded in M4's trust decision history (not a bare state write)."""
+    token = create_token_for(USER_A_ANALYST, EMAIL_A_ANALYST, TENANT_A_ID, "SECURITY_ANALYST", test_settings)
+    resp = await client.post(
+        f"/api/v1/memory/{MEM_A_SUSPICIOUS}/quarantine",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "Ledger check"},
+    )
+    assert resp.status_code == 200
+    store = client._transport.app.state.trust_decision_store
+    history = store.list_for_record(TENANT_A_ID, MEM_A_SUSPICIOUS)
+    assert [d.resulting_state for d in history if d.applied] == ["QUARANTINED"]
 
 
 @pytest.mark.asyncio

@@ -13,6 +13,7 @@ import {
   Agent,
   PolicyDecision,
   SecurityIncident,
+  IncidentSummary,
   SecurityAlertsSummary,
   DualTraceData,
   ChroniMemRecordTimeline,
@@ -24,6 +25,24 @@ import {
 
 const API_BASE_URL = '/api/v1';
 const REQUEST_TIMEOUT_MS = 2500;
+
+/** Map the backend IncidentSummaryResponse to the UI SecurityIncident shape without inventing data. */
+export function toSecurityIncident(item: IncidentSummary): SecurityIncident {
+  return {
+    id: item.id,
+    tenant_id: item.tenant_id,
+    title: item.title,
+    classification: item.classification,
+    threat_type: item.classification,
+    severity: item.severity,
+    status: item.status,
+    tainted_chunk_id: item.affected_record_id ?? undefined,
+    target_agent_id: item.agent_id ?? undefined,
+    gateway_status: 'NOT_REPORTED',
+    evidence_summary: `${item.evidence_count} evidence item(s)`,
+    created_at: item.created_at,
+  };
+}
 
 export class ApiError extends Error {
   public status: number;
@@ -279,7 +298,18 @@ class ApiClient {
     return this.listMemories(tenantId, trustState, forForensic);
   }
 
-  async getMemoryDetail(recordId: string, tenantId?: string, forForensic?: boolean): Promise<MemoryDetailResponse> {
+  /**
+   * Memory detail. Forensic access is a request, not an authorization: the backend serves it only
+   * through M4 ForensicAccess (analyst/admin role from the verified session, an investigation
+   * reason, audit written before the read). Server errors (403/404/503) are surfaced, never
+   * replaced with fixture data; fixtures are used only when the server is unreachable.
+   */
+  async getMemoryDetail(
+    recordId: string,
+    tenantId?: string,
+    forForensic?: boolean,
+    forensicReason?: string,
+  ): Promise<MemoryDetailResponse> {
     const store = useWorkstationStore.getState();
     const effectiveTenant = tenantId || store.activeTenant.id;
     const userRole = (store.currentUser?.role || '').toUpperCase();
@@ -288,19 +318,27 @@ class ApiClient {
       userRole === 'TENANT_ADMIN' ||
       userRole === 'SECURITY_ADMIN' ||
       userRole === 'ADMIN';
-    const shouldAppendForensic = forForensic ?? isSecOps;
-    const query = shouldAppendForensic ? '?for_forensic=true' : '';
+    const shouldRequestForensic = forForensic ?? isSecOps;
 
     try {
-      const res = await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}${query}`, {
-        headers: this.getHeaders(effectiveTenant),
-      });
+      // GAP-012: no forensic flag on the normal route; forensic reads use the dedicated audited route.
+      const res = shouldRequestForensic
+        ? await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}/forensic-access`, {
+            method: 'POST',
+            headers: { ...this.getHeaders(effectiveTenant), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: forensicReason || `Security Center inspection of ${recordId}` }),
+          })
+        : await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}`, {
+            headers: this.getHeaders(effectiveTenant),
+          });
       if (res.ok) {
         this.setApiStatus(true);
         return await res.json();
       }
+      if (res.status === 403) throw new AuthorizationError(`GET /memory/${recordId} forbidden`, res.status);
       throw new ApiError(`GET /memory/${recordId} returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError) throw err;   // a real server answer is never masked by fixtures
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       const match = fixtures.memoryDetails[recordId];
@@ -424,22 +462,34 @@ class ApiClient {
   }
 
   // --- 7. Security Center Endpoints ---
+  /**
+   * Incidents. The backend returns the canonical paginated envelope (TRD §22):
+   * { items: IncidentSummary[], limit, offset, has_more, total }. Items are mapped to the UI's
+   * SecurityIncident shape; fields the backend does not provide are marked NOT_REPORTED rather
+   * than invented. A shape mismatch is an error, not a reason to show fixtures.
+   */
   async listIncidents(tenantId?: string): Promise<SecurityIncident[]> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    let res: Response;
     try {
-      const res = await this.fetchWithTimeout(`${API_BASE_URL}/security/incidents`, {
+      res = await this.fetchWithTimeout(`${API_BASE_URL}/security/incidents`, {
         headers: this.getHeaders(effectiveTenant),
       });
-      if (res.ok) {
-        this.setApiStatus(true);
-        return await res.json();
-      }
-      throw new ApiError(`GET /security/incidents returned ${res.status}`, res.status);
     } catch {
+      // Server unreachable: labelled fixture fallback (DualModeBadge shows CONTRACT FALLBACK).
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.incidents;
+      return getTenantFixtures(effectiveTenant).incidents;
     }
+    if (!res.ok) {
+      if (res.status === 403) throw new AuthorizationError('GET /security/incidents forbidden', res.status);
+      throw new ApiError(`GET /security/incidents returned ${res.status}`, res.status);
+    }
+    this.setApiStatus(true);
+    const body = await res.json();
+    if (!body || !Array.isArray(body.items)) {
+      throw new ApiError('GET /security/incidents returned an unexpected shape (expected { items: [...] })', 502);
+    }
+    return body.items.map(toSecurityIncident);
   }
 
   async getSecurityAlerts(tenantId?: string): Promise<SecurityAlertsSummary> {
@@ -553,28 +603,20 @@ class ApiClient {
         this.setApiStatus(true);
         return await res.json();
       }
-      throw new ApiError(`POST /recovery/plans/preview returned ${res.status}`, res.status);
-    } catch {
+      let message = `POST /recovery/plans/preview failed (HTTP ${res.status})`;
+      try {
+        const body = await res.json();
+        message = body?.error?.message || body?.detail || body?.message || message;
+      } catch {
+        // keep the generic message
+      }
+      if (res.status === 403) throw new AuthorizationError(message, res.status);
+      throw new ApiError(message, res.status);
+    } catch (err) {
+      // Never fabricate a recovery plan: a preview that the server did not produce cannot be executed.
+      if (err instanceof ApiError || err instanceof AuthorizationError) throw err;
       this.setApiStatus(false);
-      return {
-        plan_id: `plan-${targetRecordId}-${Date.now()}`,
-        status: 'READY_FOR_EXECUTION',
-        preview: {
-          checkpoint_id: checkpointId,
-          checkpoint_name: 'Verified Baseline (SEC-007)',
-          affected_records_count: 2,
-          affected_records: [
-            {
-              record_id: targetRecordId,
-              action: 'RESTORE_BASELINE_CHECKSUM',
-              checkpoint_version: 1,
-              target_checksum: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
-            },
-          ],
-          irreversible_external_actions: 0,
-          risk_level: 'LOW',
-        },
-      };
+      throw new ApiError('Recovery preview unavailable: the server could not be reached.', 0);
     }
   }
 
@@ -582,12 +624,13 @@ class ApiClient {
    * Execute atomic memory rewind with strict error propagation.
    * NEVER returns a fake success object on failure or 404.
    */
-  async executeAtomicRewind(planId: string, targetRecordId = 'rec-8812-441a', tenantId?: string): Promise<RecoveryExecuteResponse> {
+  async executeAtomicRewind(planId: string, tenantId?: string): Promise<RecoveryExecuteResponse> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    // The previewed plan fixes the target records; the client sends only the plan id.
     const res = await this.fetchWithTimeout(`${API_BASE_URL}/recovery/plans/execute`, {
       method: 'POST',
       headers: this.getHeaders(effectiveTenant),
-      body: JSON.stringify({ plan_id: planId, target_record_id: targetRecordId }),
+      body: JSON.stringify({ plan_id: planId }),
     });
 
     if (res.ok) {
@@ -596,11 +639,23 @@ class ApiClient {
     }
 
     let errMsg = `POST /recovery/plans/execute failed (HTTP ${res.status})`;
+    let outcome: Partial<RecoveryExecuteResponse> | undefined;
     try {
       const errJson = await res.json();
-      if (errJson?.detail) errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      if (errJson?.status && Array.isArray(errJson?.reason_codes)) {
+        // Honest server outcome (FAILED / RECONCILIATION_REQUIRED): surface it, never treat it as success.
+        outcome = errJson;
+        errMsg = `${errJson.status}: ${errJson.message ?? ''} [${errJson.reason_codes.join(', ')}]`;
+      } else if (errJson?.error?.message) {
+        errMsg = errJson.error.message;
+      } else if (errJson?.detail) {
+        errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
     } catch {
       // Ignore
+    }
+    if (outcome) {
+      throw new ApiError(errMsg, res.status, outcome);
     }
 
     if (res.status === 403) {
