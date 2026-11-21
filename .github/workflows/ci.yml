@@ -65,7 +65,7 @@ jobs:
           if [[ -z "${changed_files}" ]]; then
             echo "No backend application files changed; skipping backend Ruff for this documentation-only change."
           else
-            printf '%s\n' "${changed_files}" | grep -E '\.py
+            printf '%s\n' "${changed_files}" | awk 'index($0, ".py") == length($0)-2' | xargs -r ruff check
 
       - name: Run Backend Unit & Security Test Suites
         env:
@@ -86,7 +86,7 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22.22.2
         uses: actions/setup-node@v4
         with:
           node-version: "22.22.2"
@@ -124,7 +124,7 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Set up Node.js 22.22.2
         uses: actions/setup-node@v4
         with:
           node-version: "22.22.2"
