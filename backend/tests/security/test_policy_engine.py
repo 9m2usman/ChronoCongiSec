@@ -49,6 +49,7 @@ from backend.tests.security.conftest import (
     make_ctx,
     proposal,
 )
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 ALL_STATES = ["UNVERIFIED", "TRUSTED", "SUSPICIOUS", "QUARANTINED", "REJECTED", "SUPERSEDED"]
 
@@ -301,7 +302,7 @@ def test_integrity_failure_blocked(world):
 
 def test_memory_trusted_outside_m4_cannot_justify_action(world):
     rid = world.memory()
-    transition_memory_trust_state(T_A, rid, "TRUSTED", repository=world.repo)  # M3 unguarded path (F-2)
+    force_trust_state(T_A, rid, "TRUSTED", repository=world.repo)  # out-of-band stored-state write (M3 F-2 path now restrict-only)
     d = evaluate(world, proposal([rid]))
     assert_block(d, "MEMORY_TRUST_EVIDENCE_MISSING")
     assert d.memory_evidence[0].effective_state == "TRUSTED" and d.memory_trust == "INELIGIBLE"
@@ -314,7 +315,7 @@ def test_quarantine_laundered_by_update_still_blocked(world):
     with pytest.raises(ValidationError):
         update_memory(T_A, rid, "rewrite", repository=world.repo)
     assert len(world.repo.get_versions(rid, T_A)) == 1
-    transition_memory_trust_state(T_A, rid, "TRUSTED", repository=world.repo)
+    force_trust_state(T_A, rid, "TRUSTED", repository=world.repo)
     d = evaluate(world, proposal([rid]))
     assert_block(d, "MEMORY_QUARANTINED", "MEMORY_STATE_HISTORY_MISMATCH")
 

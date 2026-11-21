@@ -34,6 +34,7 @@ from backend.app.memory.retrieval import (
     transition_memory_trust_state,
     verify_memory_refs,
 )
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ def seeded_repo(repo):
         source_id="src-01",
         repository=repo,
     )
-    transition_memory_trust_state(
+    force_trust_state(
         tenant_id=t_a,
         record_id=rec_trusted.id,
         new_trust_state="TRUSTED",
@@ -112,7 +113,7 @@ def seeded_repo(repo):
         source_id="src-01",
         repository=repo,
     )
-    transition_memory_trust_state(
+    force_trust_state(
         tenant_id=t_a,
         record_id=rec_rejected.id,
         new_trust_state="REJECTED",
@@ -126,7 +127,7 @@ def seeded_repo(repo):
         source_id="src-01",
         repository=repo,
     )
-    transition_memory_trust_state(
+    force_trust_state(
         tenant_id=t_a,
         record_id=rec_superseded.id,
         new_trust_state="SUPERSEDED",
@@ -141,7 +142,7 @@ def seeded_repo(repo):
         source_id="src-02",
         repository=repo,
     )
-    transition_memory_trust_state(
+    force_trust_state(
         tenant_id=t_b,
         record_id=rec_tenant_b.id,
         new_trust_state="TRUSTED",

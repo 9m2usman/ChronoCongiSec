@@ -321,3 +321,58 @@ def test_quarantine_retries_when_a_new_version_lands_mid_transition():
     assert fired == [True]
     assert out.status is QuarantineStatus.QUARANTINED and out.success and out.retries == 1
     assert h.state(rid) == "QUARANTINED" and h.rec(rid).current_version == 2 and len(evidence) == 1
+
+
+# =============================================================================
+# F-2 — M3's trust primitive is restrict-only (main claimed "fixed" after testing only REJECTED)
+# =============================================================================
+
+from backend.app.core.exceptions import ValidationError as _ValidationError  # noqa: E402
+from backend.app.memory import transition_memory_trust_state  # noqa: E402
+from backend.app.memory.tests.trust_helpers import force_trust_state  # noqa: E402
+
+
+@pytest.mark.parametrize("start,target", [
+    ("REJECTED", "TRUSTED"), ("QUARANTINED", "TRUSTED"), ("SUPERSEDED", "TRUSTED"), ("SUSPICIOUS", "TRUSTED"),
+    ("UNVERIFIED", "TRUSTED"), ("QUARANTINED", "UNVERIFIED"), ("SUSPICIOUS", "UNVERIFIED"),
+    ("QUARANTINED", "SUSPICIOUS"), ("UNVERIFIED", "REJECTED"), ("TRUSTED", "SUPERSEDED"),
+    ("REJECTED", "QUARANTINED"),
+])
+def test_m3_primitive_refuses_promotions_relaxations_and_m4_only_targets(start, target):
+    w = World()
+    rid = w.memory()
+    force_trust_state(T_A, rid, start, repository=w.repo)
+    with pytest.raises(_ValidationError):
+        transition_memory_trust_state(T_A, rid, target, repository=w.repo)
+    assert w.repo.get_record(rid, T_A).trust_state == start
+
+
+@pytest.mark.parametrize("start,target", [
+    ("TRUSTED", "UNVERIFIED"), ("UNVERIFIED", "SUSPICIOUS"), ("UNVERIFIED", "QUARANTINED"),
+    ("SUSPICIOUS", "QUARANTINED"), ("TRUSTED", "QUARANTINED"), ("SUPERSEDED", "QUARANTINED"),
+])
+def test_m3_primitive_allows_reversible_restrictions(start, target):
+    w = World()
+    rid = w.memory()
+    force_trust_state(T_A, rid, start, repository=w.repo)
+    transition_memory_trust_state(T_A, rid, target, repository=w.repo)
+    assert w.repo.get_record(rid, T_A).trust_state == target
+
+
+@pytest.mark.parametrize("bad", ["MOSTLY_TRUSTED", "", None, 7])
+def test_m3_primitive_fails_closed_on_unknown_states(bad):
+    w = World()
+    rid = w.memory()
+    with pytest.raises(_ValidationError):
+        transition_memory_trust_state(T_A, rid, bad, repository=w.repo)
+    force_trust_state(T_A, rid, "MOSTLY_TRUSTED", repository=w.repo)
+    with pytest.raises(_ValidationError):
+        transition_memory_trust_state(T_A, rid, "QUARANTINED", repository=w.repo)
+
+
+def test_m3_primitive_cross_tenant_is_not_found():
+    from backend.app.memory import MemoryNotFoundError
+    w = World()
+    rid = w.memory()
+    with pytest.raises(MemoryNotFoundError):
+        transition_memory_trust_state(T_B, rid, "QUARANTINED", repository=w.repo)

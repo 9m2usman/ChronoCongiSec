@@ -42,7 +42,6 @@ from backend.app.core.dependencies import (
 )
 from backend.app.core.exceptions import (
     AMSCException,
-    ForbiddenError,
     NotFoundError,
     SecurityDependencyError,
     ValidationError,
@@ -50,10 +49,10 @@ from backend.app.core.exceptions import (
 from backend.app.memory.models import MemoryDetailResponse, TrustState
 from backend.app.memory.repository import MemoryRepository
 from backend.app.memory.service import get_memory_detail
+from backend.app.security.runtime import get_quarantine_workflow
 from backend.app.security.quarantine import (
-    M4QuarantineService,
+    raise_for_outcome,
     QuarantineServiceProtocol,
-    QuarantineTransitionResult,
     get_default_quarantine_service,
 )
 from backend.app.tenancy.context import TenantContext
@@ -1545,18 +1544,26 @@ async def _execute_quarantine_flow(
     incident_repo: IncidentRepositoryProtocol,
     quarantine_service: QuarantineServiceProtocol,
 ) -> MemoryQuarantineResponse:
-    """Authoritative quarantine execution flow shared by /memory and /security routes."""
+    """Quarantine flow shared by /memory and /security routes.
+
+    API request -> TenantContext -> M4 QuarantineWorkflow -> M4 TrustEvaluator (matrix, ledger,
+    race-safe write) -> durable evidence (quarantine row + audit event, atomic) -> M3 retrieval
+    exclusion. There is no fallback: if M4 cannot complete or record the quarantine, the request
+    fails (never reported as success). ``quarantine_service`` is kept for signature compatibility
+    and only supplies the legacy eligibility pre-check message for unauthorized roles.
+    """
     clean_record_id = validate_identifier(record_id, "record_id")
     tenant_id = tenant_context.tenant_id
     actor_id = tenant_context.user_id
     user_branch: Optional[str] = getattr(tenant_context, "branch_id", None)
 
-    # 1. Fetch memory record strictly within tenant boundary
+    # 1. Record must exist in the caller's tenant (cross-tenant == not found).
     record = mem_repo.get_record(clean_record_id, tenant_id)
     if not record:
         raise NotFoundError(f"Memory record '{clean_record_id}' not found.")
 
-    # 2. If incident_id provided, verify it belongs to tenant and is not RESOLVED
+    # 2. Optional incident link must belong to the tenant and be open.
+    clean_inc_id: Optional[str] = None
     if payload.incident_id:
         clean_inc_id = validate_identifier(payload.incident_id, "incident_id")
         res = await incident_repo.get_incident(tenant_id, clean_inc_id)
@@ -1570,112 +1577,74 @@ async def _execute_quarantine_flow(
                 f"Cannot link quarantine to incident '{clean_inc_id}' because it is already RESOLVED."
             )
 
-    # 3. Check M4 quarantine eligibility
-    eligible, err_msg = quarantine_service.evaluate_quarantine_eligibility(
-        record=record,
-        actor_role=tenant_context.role,
-    )
-    if not eligible:
-        raise ForbiddenError(err_msg or "Record is not eligible for quarantine.")
-
-    previous_state = record.trust_state
-    if isinstance(previous_state, TrustState):
-        previous_state = previous_state.value
-    previous_state = str(previous_state)
-
-    # 4. Perform M4 state transition
-    try:
-        transition_result = quarantine_service.execute_quarantine_transition(
-            record=record,
-            reason=payload.reason,
-            actor_id=actor_id,
-            analyst_notes=payload.analyst_notes,
-        )
-    except SecurityDependencyError:
-        # M4 quarantine service redirects bare execution; perform canonical transition through M3/M4 transition matrix
-        from backend.app.memory import transition_memory_trust_state
-        record = transition_memory_trust_state(
+    # 3. Durable evidence, written by the workflow AFTER the trust transition is applied.
+    #    If it fails, the record stays QUARANTINED (fail toward restriction) and the request fails.
+    async def persist_evidence(outcome: Any) -> None:
+        now = datetime.now(timezone.utc)
+        quarantine_entity = QuarantineEntity(
+            id=f"quar-{uuid.uuid4().hex[:12]}",
             tenant_id=tenant_id,
             record_id=clean_record_id,
-            new_trust_state="QUARANTINED",
+            incident_id=clean_inc_id,
             reason=payload.reason,
-            analyst_id=actor_id,
-            repository=mem_repo,
-        )
-        transition_result = QuarantineTransitionResult(
-            record_id=clean_record_id,
-            tenant_id=tenant_id,
-            previous_state=previous_state,
-            new_state=TrustState.QUARANTINED.value,
             quarantined_by=actor_id,
-            reason=payload.reason,
-            timestamp=datetime.now(timezone.utc),
+            created_at=now,
         )
-
-    # 5. Persist memory record mutation in memory repository
-    mem_repo.update_record(record)
-
-    # 6. Atomically persist Quarantine entity and Audit event in incident repository
-    quarantine_id = f"quar-{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
-    quarantine_entity = QuarantineEntity(
-        id=quarantine_id,
-        tenant_id=tenant_id,
-        record_id=clean_record_id,
-        incident_id=payload.incident_id,
-        reason=payload.reason,
-        quarantined_by=actor_id,
-        created_at=now,
-    )
-
-    audit_event = AuditEventEntity(
-        id=f"aud-{uuid.uuid4().hex[:12]}",
-        tenant_id=tenant_id,
-        actor_id=actor_id,
-        event_type="MEMORY_QUARANTINED",
-        resource_id=clean_record_id,
-        action="QUARANTINE_RECORD",
-        outcome="SUCCESS",
-        trace_id=getattr(request.state, "trace_id", None),
-        details_json={
-            "reason": payload.reason,
-            "analyst_notes": payload.analyst_notes,
-            "incident_id": payload.incident_id,
-            "previous_state": previous_state,
-            "new_state": "QUARANTINED",
-            **({"branch_id": user_branch} if user_branch else {}),
-        },
-        occurred_at=now,
-    )
-
-    try:
+        audit_event = AuditEventEntity(
+            id=f"aud-{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            event_type="MEMORY_QUARANTINED",
+            resource_id=clean_record_id,
+            action="QUARANTINE_RECORD",
+            outcome="SUCCESS",
+            trace_id=getattr(request.state, "trace_id", None),
+            details_json={
+                "reason": payload.reason,
+                "analyst_notes": payload.analyst_notes,
+                "incident_id": clean_inc_id,
+                "previous_state": outcome.previous_state,
+                "new_state": "QUARANTINED",
+                "trust_decision_id": outcome.trust_decision_id,
+                "transition_id": outcome.transition_id,
+                "record_version": outcome.record_version,
+                "policy_version": outcome.policy_version,
+                **({"branch_id": user_branch} if user_branch else {}),
+            },
+            occurred_at=now,
+        )
         await incident_repo.create_quarantine_atomic(
             quarantine=quarantine_entity,
             audit_event=audit_event,
-            incident_id=payload.incident_id,
+            incident_id=clean_inc_id,
         )
-    except Exception as exc:
-        # Rollback memory record state on persistence failure (fail-closed, GAP-034 / Finding G)
+
+    # 4. Authoritative M4 workflow (role check, matrix, ledger, post-conditions).
+    workflow = get_quarantine_workflow(request.app.state, mem_repo)
+    quarantine_request: Dict[str, Any] = {"record_id": clean_record_id, "reason": payload.reason}
+    if payload.analyst_notes:
+        quarantine_request["analyst_notes"] = payload.analyst_notes
+    if clean_inc_id:
+        quarantine_request["incident_id"] = clean_inc_id
+    outcome = await workflow.quarantine(tenant_context, quarantine_request, persist_evidence=persist_evidence)
+    if not outcome.success:
         logger.error(
-            "Quarantine persistence failure: rolling back memory state",
+            "Quarantine not completed",
             extra={
-                "event_id": "SEC-QUARANTINE-PERSISTENCE-FAIL",
-                "error_category": exc.__class__.__name__,
+                "event_id": "SEC-QUARANTINE-NOT-COMPLETED",
+                "status": outcome.status.value,
+                "reason_codes": list(outcome.reason_codes),
                 "record_id": clean_record_id,
                 "tenant_id": tenant_id,
             },
         )
-        if isinstance(record.trust_state, TrustState):
-            record.trust_state = TrustState(previous_state)
-        else:
-            record.trust_state = previous_state
-        mem_repo.update_record(record)
-        raise exc
+    raise_for_outcome(outcome)
 
+    previous_state = outcome.previous_state or TrustState.QUARANTINED.value
     return MemoryQuarantineResponse(
         id=clean_record_id,
         previous_state=previous_state,
-        trust_state="QUARANTINED",
+        trust_state=TrustState.QUARANTINED.value,
         message="Record successfully quarantined and excluded from protected agent retrieval.",
     )
 

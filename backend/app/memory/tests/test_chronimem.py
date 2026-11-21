@@ -27,6 +27,7 @@ from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import InMemoryMemoryRepository
 from backend.app.memory.retrieval import MemoryNotFoundError, retrieve_memory, transition_memory_trust_state
 from backend.app.memory.versioning import compare_versions, get_timeline, update_memory
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 
 @pytest.fixture
@@ -84,7 +85,7 @@ async def test_gate_test_trusted_v1_and_v2_injection_diff(repo):
         source_id="src-01",
         repository=repo,
     )
-    await transition_memory_trust_state(
+    force_trust_state(
         tenant_id=tenant_id,
         record_id=rec.id,
         new_trust_state="TRUSTED",

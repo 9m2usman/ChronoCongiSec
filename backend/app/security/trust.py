@@ -519,6 +519,11 @@ class TrustEvaluator:
 
     # -- public API -----------------------------------------------------------
 
+    @property
+    def repository(self) -> MemoryRepository:
+        """The memory repository this evaluator reads and writes (read-only property)."""
+        return self._repo
+
     def evaluate(self, request: object, actor: Optional[TrustActor]) -> TrustDecision:
         return self._run(request, actor, apply=False)
 
@@ -1229,24 +1234,3 @@ def _raw_record_id(request: object) -> Optional[str]:
         value = request.get("record_id")
         return value[:128] if type(value) is str else None
     return None
-
-
-# --- Compatibility exports for M1 / M7 callers ---
-M4TrustEvaluator = TrustEvaluator
-
-_default_trust_evaluator: Optional[TrustEvaluator] = None
-
-
-def get_default_trust_evaluator(
-    repository: Optional[MemoryRepository] = None,
-    store: Optional[TrustDecisionStore] = None,
-) -> TrustEvaluator:
-    global _default_trust_evaluator
-    if _default_trust_evaluator is None:
-        from backend.app.memory.repository import get_default_repository
-
-        repo = repository or get_default_repository()
-        st = store or InMemoryTrustDecisionStore()
-        _default_trust_evaluator = TrustEvaluator(repository=repo, store=st, app_env="test")
-    return _default_trust_evaluator
-

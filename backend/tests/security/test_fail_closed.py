@@ -69,6 +69,7 @@ from backend.tests.security.conftest import (
     make_ctx,
     proposal,
 )
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 SECRET_DSN = "postgresql+asyncpg://amsc:S3CR3T-PG-PASSWORD@db.internal:5432/amsc"
 SECRET_REDIS = "redis://:S3CR3T-REDIS-PASSWORD@redis.internal:6379/0"
@@ -551,7 +552,7 @@ def test_unverifiable_memory_blocks(w, setup):
         w.repo._records[rid].trust_state = "TRUSTED"
     elif setup == "trusted_outside_m4":
         rid = w.memory()
-        transition_memory_trust_state(T_A, rid, "TRUSTED", repository=w.repo)
+        force_trust_state(T_A, rid, "TRUSTED", repository=w.repo)
     elif setup == "tampered":
         rid = w.trusted_memory()
         w.repo._versions[rid][0].content = "tampered"

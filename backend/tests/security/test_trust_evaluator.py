@@ -47,6 +47,7 @@ from backend.app.security.trust import (
     raise_for_decision,
 )
 from backend.app.tenancy.context import TenantContext
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 T_A = "tenant-a-uuid-001"
 T_B = "tenant-b-uuid-002"
@@ -851,7 +852,7 @@ def test_m3_laundered_quarantine_cannot_be_used_to_promote_trust(h):
     """F-1 is fixed in M3 (update refused), but the stored state can still be laundered via
     M3's unguarded setter (F-2) or a direct write; M4's reconciliation must still hold."""
     rid = h.drive(Q)
-    transition_memory_trust_state(T_A, rid, "UNVERIFIED", repository=h.repo)  # remaining bypass (F-2)
+    force_trust_state(T_A, rid, "UNVERIFIED", repository=h.repo)  # out-of-band stored-state write
     assert h.state(rid) == "UNVERIFIED"
     assert h.ev.effective_state(T_A, rid) == "QUARANTINED"
     laundered = h.ev.apply(h.request(rid, OP.VALIDATE, expected_state="UNVERIFIED"), ANALYST)
