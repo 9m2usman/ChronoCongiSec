@@ -1,0 +1,3 @@
+# Root-level convenience entry point.
+# Keep backend dependency pins in one authoritative file to prevent drift.
+-r backend/requirements.txt

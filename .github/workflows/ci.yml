@@ -39,6 +39,8 @@ jobs:
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -52,59 +54,28 @@ jobs:
           pip install -r backend/requirements.txt
           pip install ruff
 
-      - name: Run Backend Static Linting (Ruff)
+      - name: Run Ruff on Changed Backend Python Files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
         shell: bash
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            git fetch origin "${GITHUB_BASE_REF}" --depth=1
-            changed_files="$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- backend/app)"
-          else
-            changed_files="$(git diff --name-only HEAD^ HEAD -- backend/app)"
+          if [ -z "$BASE_SHA" ] || [[ "$BASE_SHA" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)"
           fi
 
-          if [[ -z "${changed_files}" ]]; then
-            echo "No backend application files changed; skipping backend Ruff for this documentation-only change."
+          mapfile -d '' -t CHANGED_FILES < <(git diff --name-only -z "$BASE_SHA" "$HEAD_SHA" -- backend/app)
+          PYTHON_FILES=()
+          for file in "${CHANGED_FILES[@]}"; do
+            if [[ "$file" == *.py && -f "$file" ]]; then
+              PYTHON_FILES+=("$file")
+            fi
+          done
+
+          if [ "${#PYTHON_FILES[@]}" -eq 0 ]; then
+            echo "No changed backend Python files; Ruff check is not applicable to this change."
           else
-            printf '%s\n' "${changed_files}" | awk 'index($0, ".py") == length($0)-2' | xargs -r ruff check
-          fi
-
-      - name: Run Backend Unit & Security Test Suites
-        env:
-          APP_ENV: test
-          SECRET_KEY: test-ci-secret-key-at-least-32-bytes-long-now
-          RATE_LIMIT_HMAC_SECRET: test-hmac-secret-at-least-32-bytes
-          DATABASE_URL: postgresql+asyncpg://amsc_user:amsc_password@localhost:5432/amsc_db
-          TEST_DATABASE_URL: postgresql+asyncpg://amsc_user:amsc_password@localhost:5432/postgres
-          TEST_DATABASE_ALLOWED_HOSTS: localhost
-          REDIS_URL: redis://localhost:6379/0
-        run: |
-          pytest backend/tests/security backend/tests/unit backend/app/memory/tests -v --durations=10
-
-  frontend-check:
-    name: Frontend Lint & Build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js 22.22.2
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22.22.2"
-          cache: "npm"
-          cache-dependency-path: frontend/package.json
-
-      - name: Install Frontend Dependencies
-        working-directory: ./frontend
-        run: |
-          npm ci || npm install
-
-      - name: Run Frontend Type Check & Production Build
-        working-directory: ./frontend
-        run: |
-          npm run build
- | xargs -r ruff check
+            ruff check "${PYTHON_FILES[@]}"
           fi
 
       - name: Run Backend Unit & Security Test Suites
@@ -132,20 +103,16 @@ jobs:
         with:
           node-version: "22.22.2"
           cache: "npm"
-          cache-dependency-path: frontend/package.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install Frontend Dependencies
         working-directory: ./frontend
-        # Strict: the lockfile must satisfy package.json (a fallback to `npm install` hid mismatches).
-        run: |
-          npm ci
+        run: npm ci
 
       - name: Run Frontend Unit Tests (Vitest)
         working-directory: ./frontend
-        run: |
-          npm test
+        run: npm test
 
       - name: Run Frontend Type Check & Production Build
         working-directory: ./frontend
-        run: |
-          npm run build
+        run: npm run build
