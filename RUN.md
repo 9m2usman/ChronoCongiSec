@@ -1,373 +1,352 @@
-# ChronoCogniSec (Agent Memory Security Center) — Local Execution Guide
+# ChronoCongiSec (Agent Memory Security Center) — Local Development & Verification Guide
 
-This document provides complete, step-by-step instructions for setting up, installing dependencies, configuring environments, and executing the **ChronoCogniSec** (Agent Memory Security Center / AMSC) platform locally on **Windows** using **PowerShell**.
+This guide explains how to clone, configure, run, and test the current ChronoCongiSec repository on Windows using PowerShell. It describes the implementation that exists in the repository today; it does not claim that every service is production-wired.
 
----
+## 1. Project overview
 
-## 1. Project Overview
+ChronoCongiSec is the repository name for the Agent Memory Security Center (AMSC), a research-driven platform for AI-agent memory security, governance, observability, and recovery.
 
-### What the Application Does
-ChronoCogniSec (AMSC) is a research-driven AI Agent Security, Memory Governance, Observability, and Recovery platform. It protects enterprise LLM/agent deployments against:
-- **Indirect Prompt Injection & Memory Poisoning** (untrusted knowledge ingested into agent memories).
-- **Tool-Call Hijacking & Malicious Action Proposals** (enforcing fail-closed gate evaluation before tool execution).
-- **Memory Tampering & Provenance Drift** (cryptographically verified append-only memory version trees with SHA-256 checksums).
-- **Cross-Tenant Data Leakage** (strict logical tenant boundary enforcement across all APIs, storage layers, and traces).
+The repository contains:
+- **Backend:** FastAPI application, authentication and tenant context, protected gateway, memory and provenance services, security workflows, API routes, and database infrastructure.
+- **Frontend:** React, TypeScript, Vite, TanStack Query, and Zustand workstation.
+- **Database infrastructure:** PostgreSQL schema and Alembic migrations, with database integration tests.
+- **Local infrastructure:** Docker Compose definitions for PostgreSQL 16 and Redis 7.
 
-### Major Components & Architecture
-- **Backend API (`backend/`)**: FastAPI application exposing versioned REST APIs (`/api/v1`) for:
-  - **Authentication & RBAC (`/api/v1/auth`)**: JWT-based session tokens with Argon2id password verification and multi-tenant organization scoping.
-  - **Protected Gateway (`/api/v1/gateway`)**: Action proposal evaluation, memory trust checks (Gate G4), and policy enforcement.
-  - **Knowledge & Memory Engine (`/api/v1/memory`)**: Ingestion, cryptographic checksum verification, trust state transitions, and provenance DAG tracking.
-  - **ChroniMem & Knowledge Graph (`/api/v1/chronimem`, `/api/v1/knowledge`)**: Memory version evolution timeline, diff inspection, and topological relationship visualizer.
-  - **Incident Quarantine (`/api/v1/incidents`, `/api/v1/memory/{id}/quarantine`)**: Security incident investigation, containment, and analyst-audited forensic retrieval.
-  - **Dual Trace (`/api/v1/traces`)**: Request correlation, span hierarchy, execution grant recording, and telemetry redaction.
-- **Frontend Workstation (`frontend/`)**: React 19 single-page application built with TypeScript, Vite, Tailwind CSS, Zustand, and TanStack Query. Features security dashboards, visual memory DAG graphs, version diff viewers, and incident management workstations.
-- **Persistence & Infrastructure (`docker-compose.yml`)**:
-  - **Development Mode**: Can run completely standalone with zero external dependencies using high-performance in-memory repositories (`AUTH_BACKEND=in_memory_demo`).
-  - **PostgreSQL Mode**: Uses PostgreSQL 16 via async SQLAlchemy (`asyncpg`) for durable relational storage.
-  - **Redis Mode**: Ephemeral state, distributed locks, and token rate limiting.
-
-### Service Communication Flow
-```mermaid
-flowchart LR
-    Browser["Browser Client (React Workstation)"] -->|HTTP / Local Proxy :5173| ViteProxy["Vite Dev Server (:5173)"]
-    ViteProxy -->|Proxy /api and /health| Backend["FastAPI Backend (:8000)"]
-    Backend -->|Async SQLAlchemy (asyncpg)| Postgres[("PostgreSQL 16 (:5432)")]
-    Backend -->|Cache & Rate Limit| Redis[("Redis 7 (:6379)")]
-```
-
----
+The current development application initializes in-memory demo repositories for several services. A configured PostgreSQL URL does not, by itself, switch every API service to database-backed persistence. See [Current implementation boundaries](#14-current-implementation-boundaries).
 
 ## 2. Prerequisites
 
-Before running ChronoCogniSec, ensure the following tools are installed:
+| Tool | Version | Purpose |
+|---|---|---|
+| Python | 3.12 recommended; 3.11 minimum | Backend and tests |
+| Node.js | 20 LTS recommended | Frontend tooling |
+| npm | Bundled with Node.js 20 | Frontend dependencies |
+| Git | 2.30 or newer | Source control |
+| Docker Desktop | Optional | PostgreSQL and Redis containers |
 
-| Tool | Required Version | Verification Command | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Python** | `>= 3.11` (3.12 or 3.14 recommended) | `python --version` | Backend API, security engine, and test suites |
-| **Node.js** | `>= 18.0` (Node 20+ recommended) | `node -v` | Frontend runtime and tooling |
-| **npm** | `>= 9.0` | `npm -v` | Frontend package management |
-| **Git** | `>= 2.30` | `git --version` | Source control management |
-| **Docker & Docker Compose** | Optional (for PostgreSQL & Redis) | `docker --version`<br>`docker compose version` | Running database and caching containers |
+Verify the installations:
 
-### Installation Guidance
-- **Python**: Download from [python.org](https://www.python.org/downloads/). Check **"Add python.exe to PATH"** during installation.
-- **Node.js**: Download the LTS release from [nodejs.org](https://nodejs.org/).
-- **Docker Desktop**: If you plan to run PostgreSQL and Redis in containers, install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/).
-
----
-
-## 3. Clone the Repository
-
-If you already have this workspace open in your editor, proceed to **Section 4**.
-
-To clone a fresh copy from GitHub:
 ```powershell
-git clone https://github.com/9m2usman/ChronoCogniSec.git
-cd ChronoCogniSec
+python --version
+node --version
+npm --version
+git --version
+docker --version
+docker compose version
 ```
 
----
+Docker is only required for the PostgreSQL-backed migration and database-test steps. The local in-memory demo application does not require PostgreSQL or Redis.
 
-## 4. Project Structure
+## 3. Clone the repository
 
-```text
-ChronoCogniSec/
-├── backend/                       # Python Backend Service
-│   ├── app/
-│   │   ├── api/                   # REST API Routers (auth, memory, gateway, incidents, etc.)
-│   │   ├── core/                  # Configuration, logging, exception handlers, middlewares
-│   │   ├── database/              # DB schemas, models, and seed scripts
-│   │   ├── gateway/               # Protected execution guard and policy evaluator
-│   │   ├── knowledge/             # Topological knowledge graph builder
-│   │   ├── memory/                # Memory models, ingestion, versioning, provenance DAG, adapters
-│   │   ├── security/              # Trust evaluator, quarantine engine, security models
-│   │   ├── traces/                # Dual trace persistence and span telemetry
-│   │   └── main.py                # FastAPI application entry point
-│   ├── tests/
-│   │   ├── security/              # Exhaustive security test suites (1,100 tests)
-│   │   └── unit/                  # Unit test suites (288 tests)
-│   ├── Dockerfile                 # Backend container definition
-│   └── requirements.txt           # Backend-specific Python requirements
-├── frontend/                      # React / Vite Frontend Application
-│   ├── src/
-│   │   ├── components/            # Reusable UI components & layouts
-│   │   ├── services/              # API clients and HTTP adapters
-│   │   ├── stores/                # Zustand client state management
-│   │   └── types/                 # TypeScript interfaces and schemas
-│   ├── Dockerfile                 # Frontend container definition
-│   ├── package.json               # Frontend dependencies & build scripts
-│   ├── package-lock.json          # Pinned npm dependencies
-│   └── vite.config.ts             # Vite server config & reverse proxy
-├── docs/                          # Architecture & design specifications (read-only reference)
-├── docker-compose.yml             # Local PostgreSQL 16 and Redis 7 definitions
-├── pyproject.toml                 # Python package metadata
-├── pytest.ini                     # Pytest test configuration
-├── requirements.txt               # Pinned root-level Python dependencies
-├── .env.example                   # Local environment variable template
-└── RUN.md                         # This execution guide
+Run these commands from the directory where you keep your projects:
+
+```powershell
+git clone https://github.com/9m2usman/ChronoCongiSec.git
+Set-Location .\ChronoCongiSec
 ```
 
----
+If you already have the repository cloned, open PowerShell in that repository directory instead.
 
-## 5. Environment Configuration
+Confirm that you are at the repository root:
 
-The application reads configuration from a root `.env` file. A pre-configured template is provided at `.env.example`.
+```powershell
+git status --short --branch
+Get-ChildItem
+```
 
-### Step 1: Create `.env`
-In PowerShell, from the project root:
+The root should contain `backend`, `frontend`, `docs`, `docker-compose.yml`, `pyproject.toml`, and `backend\requirements.txt`.
+
+## 4. Create the local environment file
+
+From the repository root:
+
 ```powershell
 Copy-Item .env.example .env
 ```
 
-### Key Environment Variables Explained
+The checked-in `.env.example` contains local-development settings only. The application generates a random JWT secret when `JWT_SECRET` is empty in development/test mode. Do not commit `.env`, and never use the example database password or development settings in production.
 
-| Variable | Default Value | Required? | Description |
-| :--- | :--- | :--- | :--- |
-| `APP_ENV` | `development` | Yes | Controls security constraints (`development`, `staging`, `production`, `test`). |
-| `DEBUG` | `false` | Yes | Enable debug output. Must remain `false` in production. |
-| `API_PREFIX` | `/api/v1` | Yes | Prefix for all versioned API routes. |
-| `AUTH_BACKEND` | `in_memory_demo` | Yes | `in_memory_demo` for standalone zero-dependency mode; `database` for PostgreSQL mode. |
-| `ALLOW_IN_MEMORY_AUTH` | `true` | Yes | Allows in-memory authentication. Must be `false` in production. |
-| `JWT_SECRET` | Auto-generated in dev | No (Dev) | Secret key for JWT signing. In production, must be `>= 32` characters. |
-| `JWT_ALGORITHM` | `HS256` | Yes | Cryptographic algorithm for JWT signing. |
-| `DATABASE_URL` | `postgresql+asyncpg://...` | Optional | Async connection string for PostgreSQL. Only needed when using database persistence. |
-| `REDIS_URL` | `redis://localhost:6379/0` | Optional | Redis connection URL for distributed locking and rate limiting. |
-| `CORS_ORIGINS` | `http://localhost:5173,...` | Yes | Allowed origins for cross-origin browser requests. |
+The principal local settings are:
 
----
+| Variable | Local value | Purpose |
+|---|---|---|
+| `APP_ENV` | `development` | Enables local development behavior |
+| `AUTH_BACKEND` | `in_memory_demo` | Uses the seeded in-memory demo authentication repository |
+| `ALLOW_IN_MEMORY_AUTH` | `true` | Allows demo authentication outside production |
+| `RATE_LIMITER_BACKEND` | `in_memory` | Uses the local in-memory rate limiter |
+| `ALLOW_IN_MEMORY_RATE_LIMITER` | `true` | Allows the local rate limiter outside production |
+| `JWT_SECRET` | Empty | Generates a random development/test secret at startup |
+| `DATABASE_URL` | Local PostgreSQL URL | Used by database/migration tooling |
+| `REDIS_URL` | Local Redis URL | Connection setting for components that are configured to use Redis |
 
-## 6. Backend Installation
+Do not change `APP_ENV` to `production` to test the local demo. Production startup deliberately rejects in-memory repositories and requires persistent services to be explicitly wired.
 
-### Step 1: Open PowerShell at Project Root
-Open PowerShell and navigate to the project directory:
-```powershell
-cd E:\ChronoCogniSec
-```
+## 5. Install backend dependencies
 
-### Step 2: Create a Python Virtual Environment
+From the repository root, create and activate a virtual environment:
+
 ```powershell
 python -m venv .venv
-```
-
-### Step 3: Activate the Virtual Environment
-```powershell
 .\.venv\Scripts\Activate.ps1
 ```
-*(If PowerShell displays an `ExecutionPolicy` restriction, run `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` in your current terminal session and re-run the activation script).*
 
-### Step 4: Upgrade Pip & Install Dependencies
+If PowerShell blocks activation, allow scripts for the current terminal only and activate again:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+.\.venv\Scripts\Activate.ps1
+```
+
+Install the pinned backend dependencies:
+
 ```powershell
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
----
+The root `requirements.txt` delegates to `backend/requirements.txt`. Keep the backend dependency pins in that single authoritative file to avoid two manifests drifting apart.
 
-## 7. Database Setup
+## 6. Run the backend
 
-ChronoCogniSec supports two modes of execution:
+From the repository root, with the virtual environment active:
 
-### Option A: Standalone Demo Mode (Recommended for Instant First Run)
-In standalone mode, no database installation is required. The system boots using high-performance, in-memory reference repositories:
-- Pre-seeded users:
-  - `admin@companya.com` (Company A Administrator)
-  - `analyst@companya.com` (Company A Security Analyst)
-  - `dev@companya.com` (Company A AI Developer)
-  - Password for all pre-seeded users: `Password123!`
-- No Docker, PostgreSQL, or Redis installation needed.
-- This is the default setting in `.env` (`AUTH_BACKEND=in_memory_demo`).
-
-### Option B: PostgreSQL Mode (Production-Like Relational Storage)
-To run with a real database:
-
-1. **Start PostgreSQL via Docker Compose:**
-   ```powershell
-   docker compose up -d postgres
-   ```
-2. **Verify PostgreSQL is Ready:**
-   ```powershell
-   docker compose ps
-   ```
-3. **Update `.env`:**
-   Ensure `.env` contains:
-   ```ini
-   DATABASE_URL=postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/amsc
-   ```
-4. **Seed Database:**
-   ```powershell
-   python -m backend.app.database.seed
-   ```
-
----
-
-## 8. Additional Services (Redis)
-
-Redis is optional in development. It handles distributed rate limiting and token revocation caches.
-
-To start Redis via Docker:
 ```powershell
-docker compose up -d redis
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
-To run without Redis:
-Keep `RATE_LIMITER_BACKEND=in_memory` and `ALLOW_IN_MEMORY_RATE_LIMITER=true` in `.env`.
 
----
+The backend should start at:
 
-## 9. Frontend Installation
+- API base: `http://127.0.0.1:8000`
+- Liveness: `http://127.0.0.1:8000/health`
+- Readiness: `http://127.0.0.1:8000/ready`
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- ReDoc: `http://127.0.0.1:8000/redoc`
+- OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
-### Step 1: Navigate to Frontend Directory
-From the project root:
+The readiness route is `/ready`; it is not `/api/v1/health/readiness`.
+
+You can verify liveness from another PowerShell terminal:
+
 ```powershell
-cd frontend
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8000/ready
 ```
 
-### Step 2: Install Node Dependencies
+A successful liveness response confirms that the process responds. Readiness also checks the development dependencies attached by the application factory.
+
+## 7. Demo authentication
+
+The current development authentication repository is seeded in `backend/app/tenancy/context.py`.
+
+Use this local demo account with the login endpoint:
+
+| Field | Value |
+|---|---|
+| Email | `analyst@company-a.com` |
+| Password | `SecurePassword123!` |
+| Tenant slug | `company-a` |
+
+The login request is sent to `POST /api/v1/auth/login` with JSON fields `email`, `password`, and `tenant_slug`.
+
+These are public demo credentials for local development only. Do not reuse them for a real deployment.
+
+## 8. PostgreSQL migrations and database tests (optional)
+
+The Docker Compose file defines a local PostgreSQL 16 service. Start it from the repository root:
+
 ```powershell
-npm install
+docker compose up -d postgres
+docker compose ps
 ```
 
-### Step 3: Verify Frontend Build
-To verify TypeScript compilation and production bundle creation:
+The development database URL in `.env.example` matches the Compose service credentials:
+
+```text
+postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/amsc
+```
+
+Apply the Alembic migrations from the repository root:
+
+```powershell
+alembic -c backend/alembic.ini upgrade head
+```
+
+The database integration tests use a separate, explicitly configured `TEST_DATABASE_URL`. They intentionally do not fall back to `DATABASE_URL`, because they create and drop temporary test databases. The local Docker Compose PostgreSQL user has the privileges required by the test harness.
+
+Set the test connection to the maintenance database (not the application database):
+
+```powershell
+$env:TEST_DATABASE_URL = "postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/postgres"
+```
+
+Then run the database tests:
+
+```powershell
+python -m pytest backend/tests/database -v
+```
+
+The test harness creates uniquely named `amsc_test_*` databases and removes only those databases. Do not point `TEST_DATABASE_URL` at a production server or production database.
+
+**Database seeding note:** `backend/app/database/seed.py` currently exposes an asynchronous `seed_database(session)` function; it does not provide a `python -m backend.app.database.seed` command-line entry point. Do not run that module as a CLI command.
+
+## 9. Install and run the frontend
+
+Open a second PowerShell terminal and navigate to the frontend directory:
+
+```powershell
+Set-Location .\frontend
+npm ci
+npm run dev
+```
+
+Vite serves the workstation at:
+
+`http://localhost:5173`
+
+The Vite configuration proxies `/api` and `/health` requests to the backend at `http://127.0.0.1:8000`. If you change the backend port, update the proxy target in `frontend/vite.config.ts`.
+
+To create a production frontend bundle:
+
 ```powershell
 npm run build
 ```
 
----
+To run the frontend test suite:
 
-## 10. Running the Complete Application
-
-To run the complete platform, open **two PowerShell terminals** (or three if running Docker infrastructure).
-
-### Terminal 1: Infrastructure (Optional — only if using PostgreSQL/Redis)
 ```powershell
-cd E:\ChronoCogniSec
-docker compose up
+npm test
 ```
 
-### Terminal 2: Backend API Server
+## 10. Run backend tests
+
+From the repository root, with the virtual environment active, run the same primary backend test paths used by the repository CI workflow:
+
 ```powershell
-cd E:\ChronoCogniSec
+python -m pytest backend/tests/security backend/tests/unit backend/app/memory/tests -v --durations=10
+```
+
+The knowledge tests are in a separate directory:
+
+```powershell
+python -m pytest backend/app/knowledge/tests -v
+```
+
+The PostgreSQL-specific tests are separate and require the `TEST_DATABASE_URL` setup in Section 8:
+
+```powershell
+python -m pytest backend/tests/database -v
+```
+
+Do not rely on a previously documented fixed test count. The number of collected tests can change as the project evolves; use the actual pytest summary from your run.
+
+## 11. Run the full local verification sequence
+
+After starting PostgreSQL and setting `TEST_DATABASE_URL` (if you intend to run database tests), the following sequence verifies the principal backend, frontend, and database paths:
+
+```powershell
+# Backend unit, security, and memory tests
+python -m pytest backend/tests/security backend/tests/unit backend/app/memory/tests -v --durations=10
+
+# Knowledge tests
+python -m pytest backend/app/knowledge/tests -v
+
+# PostgreSQL migration/integration tests (requires TEST_DATABASE_URL)
+python -m pytest backend/tests/database -v
+
+# Frontend tests and production build
+Set-Location .\frontend
+npm ci
+npm test
+npm run build
+```
+
+Record the actual command output and test summary. A test suite that was not run, or could not connect to its required database, must be reported as skipped or blocked—not as passed.
+
+## 12. Docker services
+
+Start PostgreSQL only when you need migrations or PostgreSQL-backed tests:
+
+```powershell
+docker compose up -d postgres
+```
+
+Redis is also defined in `docker-compose.yml`:
+
+```powershell
+docker compose up -d redis
+```
+
+Starting the Redis container alone does not switch the current development application to a Redis-backed rate limiter. The local application factory initializes its in-memory rate limiter in development/test mode. Do not describe Redis as active in the application unless a Redis-backed implementation has actually been configured and attached.
+
+## 13. Common troubleshooting
+
+### PowerShell cannot activate the virtual environment
+
+Run this in the current terminal, then activate again:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 .\.venv\Scripts\Activate.ps1
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
-```
-**Expected Output:**
-```text
-INFO:     Started server process [12345]
-INFO:     Waiting for application startup.
-INFO:     Starting Agent Memory Security Center v1.0.0 [development]
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 ```
 
-### Terminal 3: Frontend Workstation Server
+### Port 8000 or 5173 is already in use
+
+Inspect the process using the port:
+
 ```powershell
-cd E:\ChronoCogniSec\frontend
-npm run dev
-```
-**Expected Output:**
-```text
-  VITE v6.0.0  ready in 250 ms
+Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue |
+    Select-Object LocalAddress, LocalPort, OwningProcess
 
-  ➜  Local:   http://localhost:5173/
-  ➜  Network: use --host to expose
-  ➜  press h + enter to show help
+Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue |
+    Select-Object LocalAddress, LocalPort, OwningProcess
 ```
 
----
+Stop a process only after confirming its PID and that it is safe to stop:
 
-## 11. Verification
-
-Once both servers are running, verify each tier:
-
-### 1. Backend Health Check
-Open a new terminal or browser tab:
 ```powershell
-curl http://127.0.0.1:8000/health
-```
-**Expected Response:**
-```json
-{"status":"healthy","service":"amsc-api"}
+Stop-Process -Id <PID>
 ```
 
-### 2. Service Readiness Probe
+### PostgreSQL connection fails
+
+Check that the container is running and healthy:
+
 ```powershell
-curl http://127.0.0.1:8000/api/v1/health/readiness
+docker compose ps
+docker compose logs postgres
 ```
 
-### 3. Interactive API Documentation (Swagger UI)
-Visit [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) in your browser. All route catalogs (Auth, Memory, ChroniMem, Knowledge, Gateway, Incidents, Traces) are documented and interactive.
+Confirm that `DATABASE_URL` uses the local Compose credentials and that PostgreSQL is listening on port 5432.
 
-### 4. Frontend Application Access
-Open [http://localhost:5173](http://localhost:5173) in your browser.
-- **Login Credentials:**
-  - Email: `analyst@companya.com`
-  - Password: `Password123!`
-  - Tenant ID: `tenant-company-a`
+### Database tests reject the connection string
 
-### 5. Running the Automated Test Suites
-From the project root with the virtual environment activated:
+Set `TEST_DATABASE_URL` to the local maintenance database named `postgres`, as shown in Section 8. Do not use the application database name `amsc` for the test harness.
+
+### Frontend cannot reach the API
+
+Confirm that the backend is running on port 8000 and that `frontend/vite.config.ts` points to the correct backend address.
+
+## 14. Current implementation boundaries
+
+These details describe the current repository implementation and prevent the local guide from overstating runtime capabilities:
+
+- The development application factory initializes in-memory repositories for authentication fallback, memory, agents, gateway, incidents, traces, and rate limiting.
+- PostgreSQL models, migrations, and database repositories exist, but setting `DATABASE_URL` alone does not attach every database-backed repository to the running application. Production startup requires persistent repositories and a Redis-backed rate limiter to be explicitly configured; it fails closed when those dependencies are absent.
+- The database seed module is an asynchronous function, not a standalone CLI.
+- Redis is available as a Compose service, but the development application factory currently selects the in-memory rate limiter.
+- The frontend dev server proxies API and liveness requests to the local backend. It does not itself establish production deployment, event streaming, or persistent storage.
+
+Treat the approved architecture and implementation gap register as authoritative for feature status. Do not present a placeholder, fixture, or unavailable integration as a completed production capability.
+
+## 15. Shutdown
+
+Stop the backend and frontend terminals with `Ctrl+C`.
+
+Stop optional Docker services from the repository root:
+
 ```powershell
-# Run Unit Tests (288 tests)
-python -m pytest backend/tests/unit/ -v
-
-# Run Security Regression Tests (1,100 tests)
-python -m pytest backend/tests/security/ -q
-
-# Run Memory & Knowledge Tests (164 tests)
-python -m pytest backend/app/memory/tests/ backend/app/knowledge/tests/ -v
+docker compose down
 ```
 
----
-
-## 12. Common Errors and Troubleshooting
-
-### Issue 1: PowerShell Script Execution Policy Restriction
-* **Error:** `File .venv\Scripts\Activate.ps1 cannot be loaded because running scripts is disabled on this system.`
-* **Solution:** Run the following command in PowerShell before activating:
-  ```powershell
-  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-  ```
-
-### Issue 2: Port 8000 or Port 5173 Already in Use
-* **Error:** `[Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000): address already in use`
-* **Solution:** Identify and terminate the conflicting process:
-  ```powershell
-  # Find process using port 8000
-  Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object OwningProcess
-  # Terminate process by PID (e.g., PID 1234)
-  Stop-Process -Id 1234 -Force
-  ```
-
-### Issue 3: In-Memory Demo Authentication Rejected in Production
-* **Error:** `Production startup failure: Real database authentication repository is not configured.`
-* **Solution:** If running in production mode (`APP_ENV=production`), you must configure a PostgreSQL database (`AUTH_BACKEND=database`) and provide real secrets. For local development, ensure `APP_ENV=development` in your `.env` file.
-
-### Issue 4: JWT Secret Invalidation Warning
-* **Error:** `JWT_SECRET contains prohibited keyword 'replace', 'example', or 'dev'` in production mode.
-* **Solution:** In `.env`, provide a high-entropy string of at least 32 characters generated via:
-  ```powershell
-  python -c "import secrets; print(secrets.token_hex(32))"
-  ```
-
----
-
-## 13. Shutdown Instructions
-
-To gracefully stop running services:
-
-1. **Backend Server:** Press `Ctrl + C` in Terminal 2.
-2. **Frontend Server:** Press `Ctrl + C` in Terminal 3.
-3. **Docker Containers (if running):**
-   ```powershell
-   cd E:\ChronoCogniSec
-   docker compose down
-   ```
-
----
-
-## 14. Current Limitations
-
-- **M2 Drift Detection & Security ML Models:** In accordance with project architecture specifications, external ML model training pipelines and raw datasets are deferred; the API provides deterministic statistical drift scoring and stubbed anomaly detection endpoints.
-- **In-Memory vs. PostgreSQL Memory Repository:** In development, memory and knowledge records default to in-memory persistence. To persist memory records across restarts, configure PostgreSQL and set `DATABASE_URL`.
-- **Browser Proxying:** Vite proxies API calls directly to `127.0.0.1:8000`. If you change the backend port, update the `target` address in `frontend/vite.config.ts`.
+To also remove the local PostgreSQL data volume, use `docker compose down -v` only if you intentionally want to delete the local database contents.
