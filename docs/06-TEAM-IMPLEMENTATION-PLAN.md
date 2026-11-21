@@ -88,7 +88,7 @@
 | Day 3 | Knowledge Ingestion, Lineage, Agent Registry & Explorer (Exit Gate G3)             |
 | Day 4 | Protected Tool Gateway & Fail-Closed Enforcement Vertical Slice (Exit Gate G4 - P0)|
 | Day 5 | Forensics, Quarantine, ChroniMem Diffing & Rollback Engine (Exit Gate G5)          |
-| Day 6 | Observability, Dual Trace, Knowledge Graph & 3 Demos (Exit Gate G6)                |
+| Day 6 | Observability, Dual Trace, Knowledge Graph & Single-Company Multi-Branch Demo (Exit Gate G6) |
 | Day 7 | Hardening, Security Validation, End-to-End Test Suite & Handover (Exit Gate G7)    |
 +-------+------------------------------------------------------------------------------------+
 ```
@@ -175,7 +175,7 @@
 
 ---
 
-### Day 6: Observability, Dual Trace & Three Core Demonstrations
+### Day 6: Observability, Dual Trace & Single-Company Multi-Branch Demo
 
 | Member | Tasks | Expected Deliverable | Dependencies | Exit Criteria |
 |---|---|---|---|---|
