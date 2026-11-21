@@ -580,13 +580,17 @@ def recovery_app(env=None):
 def test_http_preview_execute_and_read(env):
     app = recovery_app(env)
     res = call(app, "POST", "/api/v1/recovery/plans/preview", "analyst-a", env.request())
-    assert res.status_code == 200 and res.json()["restored_records_become"] == "UNVERIFIED"
+    assert res.status_code == 200 and res.json()["preview"]["restored_records_become"] == "UNVERIFIED"
     plan_id = res.json()["plan_id"]
-    assert res.json()["irreversible_external_actions"] == 1
+    assert res.json()["preview"]["irreversible_external_actions"] == 1
     read = call(app, "GET", f"/api/v1/recovery/plans/{plan_id}", "aud-a")          # AUDITOR may read
     assert read.status_code == 200 and read.json()["status"] == "PREVIEWED"
     ex = call(app, "POST", "/api/v1/recovery/plans/execute", "admin-a", {"plan_id": plan_id})
     assert ex.status_code == 200 and ex.json()["status"] == "EXECUTED" and ex.json()["success"] is True
+    body = ex.json()
+    assert body["restored_records"] == [env.target] and body["restored_records_count"] == 1
+    assert body["executed_at"] and body["audit_event_id"] == env.audit[-1]["id"]
+    assert body["restored_records_trust_state"] == "UNVERIFIED"
     again = call(app, "POST", "/api/v1/recovery/plans/execute", "admin-a", {"plan_id": plan_id})
     assert again.status_code == 409 and again.json()["success"] is False
 
@@ -655,3 +659,45 @@ def test_http_route_layer_alone_rejects_non_operators(env):
     assert calls == []
     assert call(app, "POST", "/api/v1/recovery/plans/execute", "analyst-a", {"plan_id": "plan-1"}).status_code == 404
     assert calls == ["execute"]
+
+
+# =============================================================================
+# Doc 05 §6.3 contract (what the M5 client consumes)
+# =============================================================================
+
+def test_preview_matches_doc05_shape_and_reason_is_optional(env):
+    body = {"checkpoint_id": "cp-001", "target_record_id": env.target}          # exactly what M5 sends
+    res = call(recovery_app(env), "POST", "/api/v1/recovery/plans/preview", "analyst-a", body)
+    assert res.status_code == 200
+    doc = res.json()
+    assert set(doc) == {"plan_id", "status", "preview"} and doc["status"] == "PREVIEWED"
+    pv = doc["preview"]
+    for key in ("checkpoint_id", "checkpoint_name", "affected_records_count", "affected_records",
+                "irreversible_external_actions", "risk_level"):
+        assert key in pv, key
+    assert pv["risk_level"] == "HIGH"                       # one irreversible external action
+    target = next(r for r in pv["affected_records"] if r["record_id"] == env.target)
+    assert target["action"] == "RESTORED_TO_CHECKPOINT" and target["checkpoint_version"] == 1
+    assert target["target_checksum"] == env.checkpoint.items[0].checksum
+    child = next(r for r in pv["affected_records"] if r["record_id"] == env.child)
+    assert child["action"] == "QUARANTINED_INTERMEDIARY" and child["checkpoint_version"] is None
+
+
+def test_risk_level_reflects_scope(env):
+    env.external.actions = []
+    assert run(env.svc.preview(ANALYST, env.request())).risk_level == "MEDIUM"   # intermediary present
+
+
+def test_snapshot_cannot_be_declined(env):
+    plan_id = env.preview().plan_id
+    res = call(recovery_app(env), "POST", "/api/v1/recovery/plans/execute", "analyst-a",
+               {"plan_id": plan_id, "pre_recovery_snapshot_confirmed": False})
+    assert res.status_code == 400 and env.rewind.capture_calls == 0
+
+
+def test_execute_rejects_client_supplied_target(env):
+    """The plan fixes the target; a client cannot redirect execution to another record."""
+    plan_id = env.preview().plan_id
+    res = call(recovery_app(env), "POST", "/api/v1/recovery/plans/execute", "analyst-a",
+               {"plan_id": plan_id, "target_record_id": "rec-8812-441a"})
+    assert res.status_code in (400, 422) and env.rewind.capture_calls == 0

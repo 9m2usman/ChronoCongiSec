@@ -119,6 +119,7 @@ class CheckpointView:
     integrity_hash: str
     created_at: datetime
     items: Tuple[CheckpointItemView, ...]
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,7 +181,8 @@ class RecoveryPreviewRequest(BaseModel):
     checkpoint_id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
     target_record_id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
     incident_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
-    reason: str = Field(min_length=10, max_length=2000)
+    # Doc 05 §6.3 has no reason field; when supplied it is kept in the audit evidence.
+    reason: Optional[str] = Field(default=None, min_length=10, max_length=2000)
 
 
 @dataclass(frozen=True)
@@ -201,21 +203,43 @@ class RecoveryPreview:
     checkpoint_id: str
     checkpoint_integrity_hash: str
     target_record_id: str
+    checkpoint_name: str
     records: Tuple[PlannedRecord, ...]
     irreversible_external_actions: Tuple[ExternalActionView, ...]
     fingerprint: str
     status: str = PlanStatus.PREVIEWED.value
 
+    @property
+    def risk_level(self) -> str:
+        """HIGH: irreversible external actions; MEDIUM: intermediaries or several restored; else LOW."""
+        if self.irreversible_external_actions:
+            return "HIGH"
+        restored = sum(1 for r in self.records if r.action == ActionTaken.RESTORED_TO_CHECKPOINT.value)
+        if any(r.action == ActionTaken.QUARANTINED_INTERMEDIARY.value for r in self.records) or restored > 1:
+            return "MEDIUM"
+        return "LOW"
+
     def to_dict(self) -> Dict[str, Any]:
+        """Doc 05 §6.3 response shape; extra fields are additive."""
         return {
-            "plan_id": self.plan_id, "status": self.status, "checkpoint_id": self.checkpoint_id,
-            "target_record_id": self.target_record_id,
-            "affected_records_count": len(self.records),
-            "affected_records": [r.__dict__ for r in self.records],
-            "irreversible_external_actions": len(self.irreversible_external_actions),
-            "irreversible_execution_ids": [a.execution_id for a in self.irreversible_external_actions],
-            "restored_records_become": "UNVERIFIED",   # never TRUSTED (TRD §18, T-17)
-            "policy_version": RECOVERY_POLICY_VERSION,
+            "plan_id": self.plan_id,
+            "status": self.status,
+            "preview": {
+                "checkpoint_id": self.checkpoint_id,
+                "checkpoint_name": self.checkpoint_name,
+                "target_record_id": self.target_record_id,
+                "affected_records_count": len(self.records),
+                "affected_records": [{
+                    "record_id": r.record_id, "action": r.action,
+                    "checkpoint_version": r.checkpoint_version, "target_checksum": r.checkpoint_checksum,
+                    "current_version": r.current_version, "current_trust_state": r.effective_state,
+                } for r in self.records],
+                "irreversible_external_actions": len(self.irreversible_external_actions),
+                "irreversible_execution_ids": [a.execution_id for a in self.irreversible_external_actions],
+                "risk_level": self.risk_level,
+                "restored_records_become": "UNVERIFIED",   # never TRUSTED (TRD §18, T-17)
+                "policy_version": RECOVERY_POLICY_VERSION,
+            },
         }
 
 
@@ -229,6 +253,8 @@ class RecoveryOutcome:
     irreversible_external_actions: int = 0
     snapshot_sha256: Optional[str] = None
     postconditions: Mapping[str, Any] = field(default_factory=dict)
+    executed_at: Optional[str] = None
+    audit_event_id: Optional[str] = None
 
     @property
     def success(self) -> bool:
@@ -410,6 +436,7 @@ class RecoveryService:
         })
         return RecoveryPreview(plan_id=plan_id, tenant_id=tenant_id, checkpoint_id=checkpoint.id,
                                checkpoint_integrity_hash=checkpoint.integrity_hash, target_record_id=target_record_id,
+                               checkpoint_name=checkpoint.name if isinstance(checkpoint.name, str) else "",
                                records=tuple(planned), irreversible_external_actions=external, fingerprint=fingerprint)
 
     # -- execute ----------------------------------------------------------------
@@ -532,11 +559,12 @@ class RecoveryService:
             restored_record_ids=tuple(p.record_id for p in restore),
             quarantined_intermediary_ids=tuple(p.record_id for p in intermediaries),
             irreversible_external_actions=len(current.irreversible_external_actions),
-            snapshot_sha256=snapshot_sha, postconditions=post,
+            snapshot_sha256=snapshot_sha, postconditions=post, executed_at=self._clock().isoformat(),
         )
         try:
-            await self._audit(tenant_id, actor, "RECOVERY_EXECUTED", plan_id, "ROLLBACK",
-                              "SUCCESS" if outcome.success else "FAILED", self._outcome_details(outcome))
+            audit_id = await self._audit(tenant_id, actor, "RECOVERY_EXECUTED", plan_id, "ROLLBACK",
+                                         "SUCCESS" if outcome.success else "FAILED", self._outcome_details(outcome))
+            outcome = RecoveryOutcome(**{**outcome.__dict__, "audit_event_id": audit_id})
         except SecurityDependencyError:
             return RecoveryOutcome(**{**outcome.__dict__, "status": RecoveryStatus.RECONCILIATION_REQUIRED,
                                       "reason_codes": outcome.reason_codes + (RecoveryReason.AUDIT_FAILED.value,)})
@@ -598,7 +626,7 @@ class RecoveryService:
             return False
 
     async def _audit(self, tenant_id: str, actor: str, event_type: str, resource_id: str, action: str,
-                     outcome: str, details: Mapping[str, Any]) -> None:
+                     outcome: str, details: Mapping[str, Any]) -> str:
         event = {"id": str(uuid.uuid4()), "tenant_id": tenant_id, "actor_id": actor, "event_type": event_type,
                  "resource_id": resource_id, "action": action, "outcome": outcome,
                  "details_json": {**details, "policy_version": RECOVERY_POLICY_VERSION},
@@ -609,6 +637,7 @@ class RecoveryService:
             raise SecurityDependencyError("Recovery audit could not be recorded.") from exc
         if result is False:
             raise SecurityDependencyError("Recovery audit could not be recorded.")
+        return event["id"]
 
     @staticmethod
     def _outcome_details(o: RecoveryOutcome) -> Dict[str, Any]:

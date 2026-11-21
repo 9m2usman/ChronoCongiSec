@@ -32,12 +32,19 @@ from fastapi import APIRouter, Depends, Path, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.core.exceptions import SecurityDependencyError
+from backend.app.core.exceptions import SecurityDependencyError, ValidationError
 from backend.app.recovery.orchestrator import RecoveryPreviewRequest, RecoveryReason, RecoveryService, RecoveryStatus
 from backend.app.security.authorization import READER_ROLES, SECURITY_OPERATOR_ROLES, require_role_access
 from backend.app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/recovery", tags=["recovery"])
+
+_MESSAGES = {
+    RecoveryStatus.EXECUTED: "Rollback committed. Restored records are UNVERIFIED and must be re-validated before use.",
+    RecoveryStatus.RECONCILIATION_REQUIRED: "Rollback committed but a follow-up step failed; records remain restricted. "
+                                            "Reconciliation is required.",
+    RecoveryStatus.FAILED: "Recovery was not executed. No memory content was changed.",
+}
 
 _PLAN_STATE_REASONS = {RecoveryReason.PLAN_STALE.value, RecoveryReason.PLAN_ALREADY_EXECUTED.value,
                        RecoveryReason.PLAN_NOT_EXECUTABLE.value}
@@ -47,6 +54,9 @@ class RecoveryExecuteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     plan_id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
+    # Doc 05 client flag. The pre-recovery snapshot is always captured; an explicit false is refused
+    # rather than silently ignored.
+    pre_recovery_snapshot_confirmed: bool = True
 
 
 class RecoveryPlanResponse(BaseModel):
@@ -85,6 +95,8 @@ async def execute_recovery(
     payload: RecoveryExecuteRequest,
     context: TenantContext = Depends(require_role_access(*SECURITY_OPERATOR_ROLES)),
 ) -> JSONResponse:
+    if payload.pre_recovery_snapshot_confirmed is not True:
+        raise ValidationError("The pre-recovery snapshot is mandatory and cannot be declined.")
     outcome = await _service(request).execute(context, payload.plan_id)
     if outcome.status is RecoveryStatus.EXECUTED:
         code = status.HTTP_200_OK
@@ -97,11 +109,14 @@ async def execute_recovery(
     body: Dict[str, Any] = {
         "plan_id": outcome.plan_id, "status": outcome.status.value, "success": outcome.success,
         "reason_codes": list(outcome.reason_codes),
+        "executed_at": outcome.executed_at,
+        "restored_records": list(outcome.restored_record_ids),
         "restored_records_count": len(outcome.restored_record_ids),
-        "restored_record_ids": list(outcome.restored_record_ids),
         "quarantined_intermediary_ids": list(outcome.quarantined_intermediary_ids),
         "irreversible_external_actions": outcome.irreversible_external_actions,
+        "audit_event_id": outcome.audit_event_id,
         "restored_records_trust_state": "UNVERIFIED" if outcome.success else None,
+        "message": _MESSAGES.get(outcome.status, "Recovery did not complete."),
     }
     return JSONResponse(status_code=code, content=body)
 

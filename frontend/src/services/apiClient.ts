@@ -553,28 +553,20 @@ class ApiClient {
         this.setApiStatus(true);
         return await res.json();
       }
-      throw new ApiError(`POST /recovery/plans/preview returned ${res.status}`, res.status);
-    } catch {
+      let message = `POST /recovery/plans/preview failed (HTTP ${res.status})`;
+      try {
+        const body = await res.json();
+        message = body?.error?.message || body?.detail || body?.message || message;
+      } catch {
+        // keep the generic message
+      }
+      if (res.status === 403) throw new AuthorizationError(message, res.status);
+      throw new ApiError(message, res.status);
+    } catch (err) {
+      // Never fabricate a recovery plan: a preview that the server did not produce cannot be executed.
+      if (err instanceof ApiError || err instanceof AuthorizationError) throw err;
       this.setApiStatus(false);
-      return {
-        plan_id: `plan-${targetRecordId}-${Date.now()}`,
-        status: 'READY_FOR_EXECUTION',
-        preview: {
-          checkpoint_id: checkpointId,
-          checkpoint_name: 'Verified Baseline (SEC-007)',
-          affected_records_count: 2,
-          affected_records: [
-            {
-              record_id: targetRecordId,
-              action: 'RESTORE_BASELINE_CHECKSUM',
-              checkpoint_version: 1,
-              target_checksum: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
-            },
-          ],
-          irreversible_external_actions: 0,
-          risk_level: 'LOW',
-        },
-      };
+      throw new ApiError('Recovery preview unavailable: the server could not be reached.', 0);
     }
   }
 
@@ -582,12 +574,13 @@ class ApiClient {
    * Execute atomic memory rewind with strict error propagation.
    * NEVER returns a fake success object on failure or 404.
    */
-  async executeAtomicRewind(planId: string, targetRecordId = 'rec-8812-441a', tenantId?: string): Promise<RecoveryExecuteResponse> {
+  async executeAtomicRewind(planId: string, tenantId?: string): Promise<RecoveryExecuteResponse> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    // The previewed plan fixes the target records; the client sends only the plan id.
     const res = await this.fetchWithTimeout(`${API_BASE_URL}/recovery/plans/execute`, {
       method: 'POST',
       headers: this.getHeaders(effectiveTenant),
-      body: JSON.stringify({ plan_id: planId, target_record_id: targetRecordId }),
+      body: JSON.stringify({ plan_id: planId }),
     });
 
     if (res.ok) {
@@ -596,11 +589,23 @@ class ApiClient {
     }
 
     let errMsg = `POST /recovery/plans/execute failed (HTTP ${res.status})`;
+    let outcome: Partial<RecoveryExecuteResponse> | undefined;
     try {
       const errJson = await res.json();
-      if (errJson?.detail) errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      if (errJson?.status && Array.isArray(errJson?.reason_codes)) {
+        // Honest server outcome (FAILED / RECONCILIATION_REQUIRED): surface it, never treat it as success.
+        outcome = errJson;
+        errMsg = `${errJson.status}: ${errJson.message ?? ''} [${errJson.reason_codes.join(', ')}]`;
+      } else if (errJson?.error?.message) {
+        errMsg = errJson.error.message;
+      } else if (errJson?.detail) {
+        errMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
+      }
     } catch {
       // Ignore
+    }
+    if (outcome) {
+      throw new ApiError(errMsg, res.status, outcome);
     }
 
     if (res.status === 403) {

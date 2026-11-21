@@ -147,13 +147,22 @@ export function useDriftObservations() {
 }
 
 // 10. Agent Rewinding & Atomic Recovery
+/** Step 1: ask the server for a real recovery plan (blast radius, irreversible actions, risk). */
+export function usePreviewRecoveryMutation() {
+  const active = useTenantContext();
+  return useMutation({
+    mutationFn: ({ checkpointId, targetRecordId }: { checkpointId: string; targetRecordId: string }) =>
+      apiClient.previewRecoveryPlan(checkpointId, targetRecordId, active.id),
+  });
+}
+
+/** Step 2: execute exactly the plan the server previewed (the plan fixes the target records). */
 export function useAtomicRewindMutation() {
   const active = useTenantContext();
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ planId, targetRecordId }: { planId: string; targetRecordId?: string }) =>
-      apiClient.executeAtomicRewind(planId, targetRecordId, active.id),
+    mutationFn: ({ planId }: { planId: string }) => apiClient.executeAtomicRewind(planId, active.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['memories', active.id] });
       queryClient.invalidateQueries({ queryKey: ['chronimem', active.id] });
