@@ -66,6 +66,7 @@ jobs:
             echo "No backend application files changed; skipping backend Ruff for this documentation-only change."
           else
             printf '%s\n' "${changed_files}" | awk 'index($0, ".py") == length($0)-2' | xargs -r ruff check
+          fi
 
       - name: Run Backend Unit & Security Test Suites
         env:
