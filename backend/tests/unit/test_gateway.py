@@ -1350,15 +1350,15 @@ async def test_memory_marked_trusted_without_m4_evidence_is_blocked(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN"])
+@pytest.mark.parametrize("role,user", [("SECURITY_ANALYST", USER_A_ANALYST_ID), ("TENANT_ADMIN", "user-a-admin-002")])
 async def test_non_proposer_roles_are_blocked_by_m4(
-    client: httpx.AsyncClient, test_settings: Settings, role: str,
+    client: httpx.AsyncClient, test_settings: Settings, role: str, user: str,
     isolated_agent_repo: InMemoryAgentRepository, isolated_memory_repo: InMemoryMemoryRepository,
 ):
     await seed_agents(isolated_agent_repo)
     seed_memory_record(isolated_memory_repo, record_id=f"mem-role-{role}", tenant_id=TENANT_A_ID,
                        content="Trusted instruction", trust_state=TrustState.TRUSTED)
-    token = create_token_for(USER_A_ANALYST_ID, "analyst@company-a.com", TENANT_A_ID, role, test_settings)
+    token = create_token_for(user, "user@company-a.com", TENANT_A_ID, role, test_settings)   # role from membership
     resp = await client.post("/api/v1/gateway/actions/propose",
                              json=_wire_payload(f"mem-role-{role}", f"idemp-role-{role}"),
                              headers={"Authorization": f"Bearer {token}"})

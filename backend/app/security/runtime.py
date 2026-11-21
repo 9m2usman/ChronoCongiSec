@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 from backend.app.core.exceptions import SecurityDependencyError
 from backend.app.security.policy import PolicyEngine, ProtectedExecutionGuard, ToolGrant
-from backend.app.security.quarantine import QuarantineWorkflow
+from backend.app.security.quarantine import ForensicAccess, QuarantineWorkflow
 from backend.app.security.trust import InMemoryTrustDecisionStore, TrustEvaluator
 
 _lock = threading.Lock()
@@ -60,6 +60,58 @@ def get_trust_evaluator(app_state: Any, memory_repo: Any) -> TrustEvaluator:
 
 def get_quarantine_workflow(app_state: Any, memory_repo: Any) -> QuarantineWorkflow:
     return QuarantineWorkflow(get_trust_evaluator(app_state, memory_repo), memory_repo)
+
+
+def get_forensic_access(app_state: Any, memory_repo: Any) -> ForensicAccess:
+    return ForensicAccess(get_trust_evaluator(app_state, memory_repo), memory_repo)
+
+
+def get_audit_sink(app_state: Any):
+    """Async audit sink for M4-written events.
+
+    - With ``app_state.db_session_factory``: M6's append-only, hash-chained ``audit_events`` via
+      ``UnitOfWork`` (committed before the call returns).
+    - Without it, in ``development``/``test`` only: the in-memory audit repository behind
+      ``GET /audit/events`` (``app_state.audit_repo`` or the module default).
+    - Otherwise (production without a database): ``SecurityDependencyError``. An unaudited
+      security event is never accepted silently.
+    """
+    session_factory = getattr(app_state, "db_session_factory", None)
+    if session_factory is not None:
+        from datetime import datetime
+
+        from backend.app.database.models import AuditEvent
+        from backend.app.database.unit_of_work import UnitOfWork
+
+        uow = UnitOfWork(session_factory)
+
+        async def persist_db(event: dict) -> None:
+            occurred = event.get("occurred_at")
+            async with uow(event["tenant_id"]) as tx:
+                await tx.audit.append(AuditEvent(
+                    id=event["id"], actor_id=event["actor_id"], event_type=event["event_type"],
+                    resource_id=event["resource_id"], action=event["action"], outcome=event["outcome"],
+                    trace_id=event.get("trace_id"), details_json=event.get("details_json") or {},
+                    **({"occurred_at": datetime.fromisoformat(occurred)} if isinstance(occurred, str) else {}),
+                ))
+
+        return persist_db
+
+    if (_app_env(app_state) or "").strip().lower() not in ("development", "test"):
+        raise SecurityDependencyError("Durable audit persistence is not configured.")
+    from backend.app.api.audit import get_default_audit_repository
+
+    repo = getattr(app_state, "audit_repo", None) or get_default_audit_repository()
+
+    async def persist_memory(event: dict) -> None:
+        repo.append_event({
+            "id": event["id"], "tenant_id": event["tenant_id"], "actor_id": event["actor_id"],
+            "event_type": event["event_type"], "resource_id": event["resource_id"], "action": event["action"],
+            "outcome": event["outcome"], "details": event.get("details_json") or {},
+            "occurred_at": event.get("occurred_at"),
+        })
+
+    return persist_memory
 
 
 class AgentRegistryDirectory:
@@ -120,5 +172,5 @@ def get_gateway_enforcement(app_state: Any, memory_repo: Any, agent_repo: Any,
         return engine, guard
 
 
-__all__ = ["AgentRegistryDirectory", "AgentRegistryToolGrants", "get_gateway_enforcement",
-           "get_quarantine_workflow", "get_trust_evaluator"]
+__all__ = ["AgentRegistryDirectory", "AgentRegistryToolGrants", "get_audit_sink", "get_forensic_access",
+           "get_gateway_enforcement", "get_quarantine_workflow", "get_trust_evaluator"]

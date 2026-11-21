@@ -18,7 +18,8 @@ Wiring (M1, ``main.py``)::
     app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
     api_router.include_router(drift_router)
 
-If ``app.state.drift_service`` is not configured, every route returns 503 (fail closed).
+If ``app.state.drift_service`` is not set, the router builds it from ``app.state.db_session_factory``
+(M6 ``UnitOfWork`` + ``SqlDriftReviewStore``). Without either, every route returns 503 (fail closed).
 """
 
 from datetime import datetime
@@ -35,6 +36,7 @@ from backend.app.security.drift import (
     DriftObservationView,
     DriftReviewService,
     ReviewerStatus,
+    SqlDriftReviewStore,
 )
 from backend.app.tenancy.context import TenantContext
 
@@ -91,10 +93,21 @@ class DriftReviewResponse(BaseModel):
 
 
 def _service(request: Request) -> DriftReviewService:
-    service = getattr(request.app.state, "drift_service", None)
-    if not isinstance(service, DriftReviewService):
-        raise SecurityDependencyError("Drift review service is not configured.")
-    return service
+    """The configured service, or one built over M6's UnitOfWork when a session factory exists.
+
+    There is deliberately no in-memory fallback: without durable persistence the routes return
+    503 instead of serving or recording drift reviews that would not survive a restart.
+    """
+    state = request.app.state
+    service = getattr(state, "drift_service", None)
+    if isinstance(service, DriftReviewService):
+        return service
+    session_factory = getattr(state, "db_session_factory", None)
+    if session_factory is not None:
+        service = DriftReviewService(SqlDriftReviewStore(session_factory))
+        state.drift_service = service
+        return service
+    raise SecurityDependencyError("Drift review service is not configured.")
 
 
 def _to_response(view: DriftObservationView, assessment: DriftAssessment) -> DriftObservationResponse:

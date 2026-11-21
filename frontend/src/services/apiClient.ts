@@ -13,6 +13,7 @@ import {
   Agent,
   PolicyDecision,
   SecurityIncident,
+  IncidentSummary,
   SecurityAlertsSummary,
   DualTraceData,
   ChroniMemRecordTimeline,
@@ -24,6 +25,24 @@ import {
 
 const API_BASE_URL = '/api/v1';
 const REQUEST_TIMEOUT_MS = 2500;
+
+/** Map the backend IncidentSummaryResponse to the UI SecurityIncident shape without inventing data. */
+export function toSecurityIncident(item: IncidentSummary): SecurityIncident {
+  return {
+    id: item.id,
+    tenant_id: item.tenant_id,
+    title: item.title,
+    classification: item.classification,
+    threat_type: item.classification,
+    severity: item.severity,
+    status: item.status,
+    tainted_chunk_id: item.affected_record_id ?? undefined,
+    target_agent_id: item.agent_id ?? undefined,
+    gateway_status: 'NOT_REPORTED',
+    evidence_summary: `${item.evidence_count} evidence item(s)`,
+    created_at: item.created_at,
+  };
+}
 
 export class ApiError extends Error {
   public status: number;
@@ -279,7 +298,18 @@ class ApiClient {
     return this.listMemories(tenantId, trustState, forForensic);
   }
 
-  async getMemoryDetail(recordId: string, tenantId?: string, forForensic?: boolean): Promise<MemoryDetailResponse> {
+  /**
+   * Memory detail. Forensic access is a request, not an authorization: the backend serves it only
+   * through M4 ForensicAccess (analyst/admin role from the verified session, an investigation
+   * reason, audit written before the read). Server errors (403/404/503) are surfaced, never
+   * replaced with fixture data; fixtures are used only when the server is unreachable.
+   */
+  async getMemoryDetail(
+    recordId: string,
+    tenantId?: string,
+    forForensic?: boolean,
+    forensicReason?: string,
+  ): Promise<MemoryDetailResponse> {
     const store = useWorkstationStore.getState();
     const effectiveTenant = tenantId || store.activeTenant.id;
     const userRole = (store.currentUser?.role || '').toUpperCase();
@@ -288,19 +318,27 @@ class ApiClient {
       userRole === 'TENANT_ADMIN' ||
       userRole === 'SECURITY_ADMIN' ||
       userRole === 'ADMIN';
-    const shouldAppendForensic = forForensic ?? isSecOps;
-    const query = shouldAppendForensic ? '?for_forensic=true' : '';
+    const shouldRequestForensic = forForensic ?? isSecOps;
 
     try {
-      const res = await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}${query}`, {
-        headers: this.getHeaders(effectiveTenant),
-      });
+      // GAP-012: no forensic flag on the normal route; forensic reads use the dedicated audited route.
+      const res = shouldRequestForensic
+        ? await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}/forensic-access`, {
+            method: 'POST',
+            headers: { ...this.getHeaders(effectiveTenant), 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: forensicReason || `Security Center inspection of ${recordId}` }),
+          })
+        : await this.fetchWithTimeout(`${API_BASE_URL}/memory/${recordId}`, {
+            headers: this.getHeaders(effectiveTenant),
+          });
       if (res.ok) {
         this.setApiStatus(true);
         return await res.json();
       }
+      if (res.status === 403) throw new AuthorizationError(`GET /memory/${recordId} forbidden`, res.status);
       throw new ApiError(`GET /memory/${recordId} returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError) throw err;   // a real server answer is never masked by fixtures
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       const match = fixtures.memoryDetails[recordId];
@@ -424,22 +462,34 @@ class ApiClient {
   }
 
   // --- 7. Security Center Endpoints ---
+  /**
+   * Incidents. The backend returns the canonical paginated envelope (TRD §22):
+   * { items: IncidentSummary[], limit, offset, has_more, total }. Items are mapped to the UI's
+   * SecurityIncident shape; fields the backend does not provide are marked NOT_REPORTED rather
+   * than invented. A shape mismatch is an error, not a reason to show fixtures.
+   */
   async listIncidents(tenantId?: string): Promise<SecurityIncident[]> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    let res: Response;
     try {
-      const res = await this.fetchWithTimeout(`${API_BASE_URL}/security/incidents`, {
+      res = await this.fetchWithTimeout(`${API_BASE_URL}/security/incidents`, {
         headers: this.getHeaders(effectiveTenant),
       });
-      if (res.ok) {
-        this.setApiStatus(true);
-        return await res.json();
-      }
-      throw new ApiError(`GET /security/incidents returned ${res.status}`, res.status);
     } catch {
+      // Server unreachable: labelled fixture fallback (DualModeBadge shows CONTRACT FALLBACK).
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.incidents;
+      return getTenantFixtures(effectiveTenant).incidents;
     }
+    if (!res.ok) {
+      if (res.status === 403) throw new AuthorizationError('GET /security/incidents forbidden', res.status);
+      throw new ApiError(`GET /security/incidents returned ${res.status}`, res.status);
+    }
+    this.setApiStatus(true);
+    const body = await res.json();
+    if (!body || !Array.isArray(body.items)) {
+      throw new ApiError('GET /security/incidents returned an unexpected shape (expected { items: [...] })', 502);
+    }
+    return body.items.map(toSecurityIncident);
   }
 
   async getSecurityAlerts(tenantId?: string): Promise<SecurityAlertsSummary> {

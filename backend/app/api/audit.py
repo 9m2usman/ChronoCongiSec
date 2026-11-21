@@ -9,17 +9,16 @@ Implements Canonical Architecture:
 """
 
 from copy import deepcopy
-from datetime import datetime, timezone
+
 import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.app.core.dependencies import (
-    TenantContextDep,
-    get_tenant_context,
-)
+from backend.app.core.exceptions import SecurityDependencyError
+from backend.app.security.authorization import Role, require_role_access
+from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.api.audit")
 
@@ -41,24 +40,14 @@ class AuditEventResponse(BaseModel):
 
 
 class InMemoryAuditRepository:
+    """Development/test audit store. Not durable, not hash-chained; never used in production.
+
+    It starts empty: it previously seeded a fabricated SYSTEM_STARTUP event claiming
+    ``"audit_chain": "sha256-verified"``, which nothing had verified.
+    """
+
     def __init__(self) -> None:
         self._events: List[Dict[str, Any]] = []
-        self._seed_default_events()
-
-    def _seed_default_events(self) -> None:
-        t_a = "tenant-a-uuid-001"
-        now = datetime.now(timezone.utc)
-        self._events.append({
-            "id": "aud-init-001",
-            "tenant_id": t_a,
-            "actor_id": "system",
-            "event_type": "SYSTEM_STARTUP",
-            "resource_id": "amsc-core",
-            "action": "STARTUP_COMPLETED",
-            "outcome": "SUCCESS",
-            "details": {"status": "operational", "audit_chain": "sha256-verified"},
-            "occurred_at": now.isoformat(),
-        })
 
     def append_event(self, event: Dict[str, Any]) -> None:
         self._events.insert(0, deepcopy(event))
@@ -86,9 +75,31 @@ def get_default_audit_repository() -> InMemoryAuditRepository:
     description="Query append-only cryptographic audit records for authorized tenant members.",
 )
 async def list_audit_events(
-    context: TenantContextDep,
+    request: Request,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    context: TenantContext = Depends(require_role_access(Role.TENANT_ADMIN, Role.SECURITY_ANALYST, Role.AUDITOR)),
 ) -> List[AuditEventResponse]:
-    events = _default_audit_repo.list_events(context.tenant_id, limit=limit, offset=offset)
+    """Doc 05 route catalog: AUDITOR (plus security operators). Reads M6's append-only, hash-chained
+    ``audit_events`` when a database session factory is configured; the in-memory store only in
+    development/test; otherwise 503 rather than serving non-durable data as audit evidence."""
+    state = request.app.state
+    session_factory = getattr(state, "db_session_factory", None)
+    if session_factory is not None:
+        from backend.app.database.unit_of_work import UnitOfWork
+
+        async with UnitOfWork(session_factory)(context.tenant_id) as tx:
+            rows = await tx.audit.list_recent(limit=limit, offset=offset)
+        return [AuditEventResponse(
+            id=e.id, tenant_id=e.tenant_id, actor_id=e.actor_id, event_type=e.event_type,
+            resource_id=e.resource_id, action=e.action, outcome=e.outcome,
+            details=dict(e.details_json or {}), occurred_at=e.occurred_at.isoformat(),
+        ) for e in rows]
+
+    settings = getattr(state, "settings", None)
+    env = str(getattr(settings, "APP_ENV", "") or "").strip().lower()
+    if env not in ("development", "test"):
+        raise SecurityDependencyError("Durable audit persistence is not configured.")
+    repo = getattr(state, "audit_repo", None) or _default_audit_repo
+    events = repo.list_events(context.tenant_id, limit=limit, offset=offset)
     return [AuditEventResponse(**e) for e in events]

@@ -509,3 +509,22 @@ def test_audit_chain_sequence_is_per_tenant(app, store):
     review(app, "obs-a2", "REJECTED")
     review(app, "obs-b1", "REJECTED", "analyst-b")
     assert [(e["tenant_id"], e["chain_seq"]) for e in store.audit] == [(T_A, 1), (T_A, 2), (T_B, 1)]
+
+
+def test_service_is_built_from_m6_session_factory_when_not_configured(store):
+    """main.py does not set drift_service; the router builds it over M6's UnitOfWork if a session
+    factory exists, and otherwise fails closed (no in-memory fallback)."""
+    from backend.app.api.drift import _service
+    from backend.app.security.drift import SqlDriftReviewStore
+    from types import SimpleNamespace
+
+    class _Req:
+        def __init__(self, state):
+            self.app = SimpleNamespace(state=state)
+
+    state = SimpleNamespace(drift_service=None, db_session_factory=object())
+    svc = _service(_Req(state))
+    assert isinstance(svc._store, SqlDriftReviewStore) and state.drift_service is svc
+    from backend.app.core.exceptions import SecurityDependencyError
+    with pytest.raises(SecurityDependencyError):
+        _service(_Req(SimpleNamespace(drift_service=None, db_session_factory=None)))

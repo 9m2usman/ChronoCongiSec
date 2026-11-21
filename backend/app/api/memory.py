@@ -19,6 +19,7 @@ Security & Governance:
 import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
@@ -194,3 +195,42 @@ async def api_get_memory_detail(
         versions=versions,
         provenance=provenance,
     )
+
+
+class ForensicAccessRequest(BaseModel):
+    """Justification for audited forensic access (GAP-012: no forensic flag on normal routes)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    reason: str = Field(min_length=5, max_length=500)
+    incident_id: Optional[str] = Field(default=None, min_length=1, max_length=128,
+                                       pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
+
+
+@router.post(
+    "/{id}/forensic-access",
+    response_model=MemoryDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Audited forensic read of a memory record (analyst/admin)",
+)
+async def api_forensic_memory_access(
+    id: str,
+    payload: ForensicAccessRequest,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+    repo: MemoryRepository = Depends(get_repository),
+) -> MemoryDetailResponse:
+    """Separate, authorized, audited path for non-TRUSTED records (TRD §17, GAP-012).
+
+    Served only by M4's ``ForensicAccess``: SECURITY_ANALYST or TENANT_ADMIN from the verified
+    tenant context, an investigation reason, and a durable audit event written BEFORE the read.
+    The result is non-actionable (never agent context). Any failure refuses access. The normal
+    detail route never accepts a forensic flag.
+    """
+    from backend.app.security.runtime import get_audit_sink, get_forensic_access
+
+    view = await get_forensic_access(request.app.state, repo).read(
+        context, id, payload.reason, persist_audit=get_audit_sink(request.app.state),
+        incident_id=payload.incident_id, trace_id=getattr(request.state, "trace_id", None),
+    )
+    return MemoryDetailResponse(record=view.record, versions=list(view.versions), provenance=list(view.provenance))
