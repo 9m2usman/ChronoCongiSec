@@ -15,6 +15,7 @@ import os
 import uuid
 
 import pytest
+from sqlalchemy.pool import NullPool
 
 pytestmark = pytest.mark.skipif(not os.environ.get("TEST_DATABASE_URL"),
                                 reason="TEST_DATABASE_URL not set: PostgreSQL drift tests NOT RUN")
@@ -51,7 +52,7 @@ def env(database):
     from backend.tests.database.helpers import sqlalchemy_url
 
     async def setup():
-        engine = create_engine(sqlalchemy_url(database))
+        engine = create_engine(sqlalchemy_url(database), poolclass=NullPool)
         factory = create_session_factory(engine)
         ids = {}
         for tenant in (T_A, T_B):
