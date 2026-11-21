@@ -807,7 +807,7 @@ def test_applied_decision_records_actor_reason_evidence_policy_and_time(h):
 
 def test_denied_attempts_are_recorded_and_do_not_count_as_state(h):
     rid = h.drive(U)
-    h.do(rid, OP.VALIDATE, actor=UserActor(make_ctx(role="DEVELOPER", user="dev-1")))
+    h.do(rid, OP.VALIDATE, actor=UserActor(make_ctx(role="AI_DEVELOPER", user="dev-1")))
     history = h.ev.history(ANALYST, rid)
     assert len(history) == 1 and history[0].decision == "DENIED" and history[0].actor_id == "dev-1"
     assert h.ev.effective_state(T_A, rid) == "UNVERIFIED"

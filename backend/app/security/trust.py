@@ -38,6 +38,7 @@ Key properties (details in ``docs/security-design/trust-state-machine.md``):
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -412,6 +413,10 @@ class ActionMemoryAssessment:
     ancestors: Mapping[str, str] = field(default_factory=dict)
 
 
+# Environments in which the in-memory trust store / memory repository may be used (M4-F6).
+NON_DURABLE_ALLOWED_ENVIRONMENTS: FrozenSet[str] = frozenset({"development", "test"})
+
+
 class TrustDecisionStore(Protocol):
     """Append-only, tenant-scoped decision history (durable implementation: M6)."""
 
@@ -496,7 +501,10 @@ class TrustEvaluator:
                 env = get_settings().APP_ENV
             except Exception:  # noqa: BLE001 — unknown environment is treated as production
                 env = "production"
-        if env == "production":
+        # M4-F6: only an explicit non-production environment may use non-durable stores.
+        # Anything else (production, staging, an unknown or misspelled value) requires them.
+        normalized_env = env.strip().lower() if isinstance(env, str) else ""
+        if normalized_env not in NON_DURABLE_ALLOWED_ENVIRONMENTS:
             if not getattr(store, "is_persistent", False):
                 raise RuntimeError("A persistent trust decision store (M6) is required in production.")
             if getattr(repository, "is_in_memory", True) or not getattr(repository, "is_persistent", False):
@@ -504,6 +512,10 @@ class TrustEvaluator:
         self._repo = repository
         self._store = store
         self._clock = clock
+        # Per-(tenant, record) locks: the re-read + write in _apply is atomic within this process
+        # (finding M4-F5). Cross-process atomicity needs a repository compare-and-set (M3/M6 contract).
+        self._locks: Dict[Tuple[str, str], threading.Lock] = {}
+        self._locks_guard = threading.Lock()
 
     # -- public API -----------------------------------------------------------
 
@@ -999,13 +1011,37 @@ class TrustEvaluator:
 
     # -- apply ----------------------------------------------------------------
 
+    def _record_lock(self, tenant_id: str, record_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault((tenant_id, record_id), threading.Lock())
+
     def _apply(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> TrustDecision:
+        with self._record_lock(ctx.tenant_id or "", req.record_id):
+            return self._apply_locked(req, record, ctx)
+
+    def _apply_locked(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> TrustDecision:
         rule = ctx.rule
         assert rule is not None
         now = self._clock()
-        previous = record
+        # M4-F5: the decision was evaluated against ``record``; re-read immediately before the
+        # write and refuse if the state or version moved meanwhile (a concurrent quarantine, a
+        # new version, another transition). Writing the stale copy would silently undo them.
         try:
-            updated = record.model_copy(update={"trust_state": rule.to_state.value, "updated_at": now})
+            fresh = self._repo.get_record(req.record_id, ctx.tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Trust transition not applied: repository re-read failed (%s).", type(exc).__name__)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.REPOSITORY_UNAVAILABLE,))
+        if fresh is None or getattr(fresh, "tenant_id", None) != ctx.tenant_id:
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.RECORD_NOT_FOUND,))
+        if _state_value(fresh.trust_state) != _state_value(record.trust_state):
+            logger.warning("Trust transition refused: record %s state changed during evaluation.", req.record_id)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.STALE_STATE,))
+        if fresh.current_version != record.current_version:
+            logger.warning("Trust transition refused: record %s version changed during evaluation.", req.record_id)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.STALE_VERSION,))
+        previous = fresh
+        try:
+            updated = fresh.model_copy(update={"trust_state": rule.to_state.value, "updated_at": now})
             self._repo.update_record(updated)
         except Exception as exc:  # noqa: BLE001
             raise_codes = (TrustReason.REPOSITORY_UNAVAILABLE,)
@@ -1019,6 +1055,10 @@ class TrustEvaluator:
             # Evidence could not be recorded: undo the state change (fail closed).
             logger.error("Trust decision store append failed (%s); reverting transition.", type(exc).__name__)
             try:
+                current = self._repo.get_record(req.record_id, ctx.tenant_id)
+                if current is None or _state_value(current.trust_state) != rule.to_state.value                         or current.current_version != previous.current_version:
+                    # Someone else wrote meanwhile: never overwrite their change with our snapshot.
+                    raise RuntimeError("record changed after the transition; revert skipped")
                 self._repo.update_record(previous)
             except Exception:  # noqa: BLE001
                 logger.critical(

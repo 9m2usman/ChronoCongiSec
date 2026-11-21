@@ -1,5 +1,11 @@
 # M4 Day 3 — Memory Trust State Machine & Trust Evaluator
 
+> **Update 2026-11-19:**
+> - **M4-F5:** `apply` re-reads the record under a per-record lock and refuses (`STALE_STATE` / `STALE_VERSION`) if it changed during evaluation. It writes the fresh copy, and reverts only if the record is still what M4 wrote. Cross-process atomicity still needs a repository compare-and-set (M3/M6).
+> - **M4-F6:** non-durable stores are allowed only when `APP_ENV` is `development` or `test`.
+> - **Durable store:** the `TrustDecisionStore` contract suite is `backend/tests/security/test_trust_store_contract.py`; a durable store is still pending (M6).
+> - See [m4-security-assessment.md](m4-security-assessment.md) and [m4-integration-contracts.md](m4-integration-contracts.md).
+
 **Document ID:** AMSC-SEC-003
 **Owner:** M4 — Security Engine & Incident Response Lead
 **Status:** Implemented and tested in M4-owned code.

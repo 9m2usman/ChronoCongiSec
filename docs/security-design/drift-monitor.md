@@ -1,5 +1,10 @@
 # M4 Day 6 — Drift Monitor: Deterministic Scoring & Analyst Review
 
+> **Update 2026-11-19:**
+> - **M4-F3:** listing now requires a canonical role (`READER_ROLES`, incl. read-only `AUDITOR`) at both the route and the service.
+> - **M4-F4:** the review audit event's `actor_id` is `user:<id>` (OD-9).
+> - The router is still **not registered** in `main.py` (M1), and the PostgreSQL adapter tests are still skipped (no database).
+
 **Document ID:** AMSC-SEC-006
 **Owner:** M4 — Security Engine & Incident Response Lead
 **Status:**

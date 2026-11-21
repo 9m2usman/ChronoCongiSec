@@ -318,7 +318,7 @@ class _BadDriftStore:
 def test_drift_store_invalid_list_result_is_503_not_data(bad):
     svc = DriftReviewService(_BadDriftStore(list_result=bad))
     with pytest.raises(SecurityDependencyError):
-        run(svc.list_observations(make_ctx(role="DEVELOPER", user="d")))
+        run(svc.list_observations(make_ctx(role="AI_DEVELOPER", user="d")))
 
 
 @pytest.mark.parametrize("bad", ["applied", {"plan": "APPLY"}, SimpleNamespace(plan=None, before=None, after=None), 1])
@@ -788,7 +788,7 @@ def test_missing_or_invalid_context_blocks(w, ctx):
     assert spy.calls == []
 
 
-@pytest.mark.parametrize("role", ["AI_DEVELOPER", "AUDITOR", "SECURITY_ANALYST", "", "developer"])
+@pytest.mark.parametrize("role", ["DEVELOPER", "AUDITOR", "SECURITY_ANALYST", "TENANT_ADMIN", "", "developer"])
 def test_unauthorized_or_unknown_role_blocks(w, role):
     d = run(w.engine.evaluate(proposal([w.trusted_memory()]), make_ctx(role=role, user="u")))
     assert d.outcome is PolicyOutcome.BLOCK and "PRINCIPAL_ROLE_NOT_AUTHORIZED" in d.reason_codes
@@ -831,8 +831,8 @@ def _http_app(w, *, limiter=None, factory=None):
     repo = _AuthRepo()
     repo.add_tenant(TenantRecord(id=T_A, name="A", slug="a"))
     repo.add_tenant(TenantRecord(id=T_B, name="B", slug="b"))
-    for uid, tid, role, status in [("dev-1", T_A, "DEVELOPER", "ACTIVE"), ("dev-rev", T_A, "DEVELOPER", "REVOKED"),
-                                   ("dev-b", T_B, "DEVELOPER", "ACTIVE")]:
+    for uid, tid, role, status in [("dev-1", T_A, "AI_DEVELOPER", "ACTIVE"), ("dev-rev", T_A, "AI_DEVELOPER", "REVOKED"),
+                                   ("dev-b", T_B, "AI_DEVELOPER", "ACTIVE")]:
         repo.add_user(UserRecord(id=uid, email=f"{uid}@x.t", hashed_password="x", full_name=uid))
         repo.add_membership(MembershipRecord(id=f"m-{uid}", tenant_id=tid, user_id=uid, role=role, status=status))
     app.state.auth_repo = repo

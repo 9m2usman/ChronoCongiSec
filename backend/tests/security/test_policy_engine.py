@@ -205,7 +205,7 @@ def test_grant_for_different_tool_is_rejected(world):
     assert_block(evaluate(world, proposal([world.trusted_memory()])), "POLICY_CONFIG_INVALID")
 
 
-@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN", "AI_DEVELOPER", "AUDITOR", ""])
+@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN", "DEVELOPER", "AUDITOR", "ai_developer", ""])
 def test_principal_role_not_permitted_to_propose(world, role):
     d = evaluate(world, proposal([world.trusted_memory()]), make_ctx(role=role, user="u-x"))
     assert_block(d, "PRINCIPAL_ROLE_NOT_AUTHORIZED")
@@ -465,7 +465,7 @@ def test_non_proposal_inputs_blocked(world, p):
 
 @pytest.mark.parametrize("cfg", [
     PolicyConfig(proposer_roles=()),
-    PolicyConfig(proposer_roles=("AI_DEVELOPER",)),
+    PolicyConfig(proposer_roles=("DEVELOPER",)),
     PolicyConfig(timeout_seconds=0),
     PolicyConfig(timeout_seconds=float("inf")),
     PolicyConfig(tool_policies={("t", "o"): ToolPolicy(mandatory_constraints=("ceiling",))}),
@@ -521,6 +521,7 @@ def test_valid_approval_satisfies_threshold(world):
     (dict(consumed=True), "APPROVAL_ALREADY_CONSUMED"),
     (dict(approver_user_id="dev-1"), "APPROVAL_SELF_APPROVAL"),
     (dict(approver_role="DEVELOPER"), "APPROVAL_INVALID"),
+    (dict(approver_role="AI_DEVELOPER"), "APPROVAL_INVALID"),
     (dict(approver_role="AUDITOR"), "APPROVAL_INVALID"),
 ])
 def test_invalid_approvals_block(world, overrides, code):

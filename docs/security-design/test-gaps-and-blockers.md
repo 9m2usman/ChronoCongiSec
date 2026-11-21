@@ -4,6 +4,21 @@
 **For:** M1, M2, M3, M6 and M7, where named; and the M4 lead.
 **Date:** 2026-11-18. Branch `feat/m4-security-ml` (all M4 work uncommitted).
 
+## 00. Status update, 2026-11-19 (security improvement pass)
+
+The current, authoritative state is in [m4-security-assessment.md](m4-security-assessment.md) (findings M4-F1 to M4-F7, acceptance checklist, scores) and [m4-integration-contracts.md](m4-integration-contracts.md) (what each member must connect).
+
+Changes in this pass:
+- replay protection (M4-F1);
+- canonical roles (M4-F2);
+- drift list role check (M4-F3);
+- OD-9 audit actors (M4-F4);
+- race-safe trust apply (M4-F5);
+- environment gating (M4-F6);
+- recovery orchestration and API (M4-F7).
+
+Still blocked: M2 controller; M1 router registration; M3 F-2/F-1a/F-1b and checkpoint reader; M6 durable trust store and plan store; PostgreSQL, Redis and CI.
+
 ## 0. Status update, 2026-11-19 (after rebasing onto `origin/main` @ `e39f2da`)
 
 This section supersedes the F-1 statements below and in the earlier day documents.

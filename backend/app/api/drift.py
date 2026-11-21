@@ -5,7 +5,7 @@ Owner: M4 — Security Engine & Incident Response Lead (Doc 06 Day 6 deliverable
 
 Routes (canonical; no additional public routes are introduced):
 
-    GET  /drift/observations                 any authenticated member of the tenant
+    GET  /drift/observations                 any canonical role (incl. read-only AUDITOR); unknown roles 403
     POST /drift/observations/{id}/review     SECURITY_ANALYST or TENANT_ADMIN
 
 Scoring is not a separate route: every observation in both responses carries its
@@ -27,9 +27,8 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from backend.app.core.dependencies import get_tenant_context
 from backend.app.core.exceptions import SecurityDependencyError, get_trace_context
-from backend.app.security.authorization import Role, require_role_access
+from backend.app.security.authorization import READER_ROLES, Role, require_role_access
 from backend.app.security.drift import (
     DriftAssessment,
     DriftClassification,
@@ -119,7 +118,7 @@ async def list_drift_observations(
     offset: int = Query(0, ge=0),
     classification: Optional[DriftClassification] = Query(None),
     reviewer_status: Optional[ReviewerStatus] = Query(None),
-    context: TenantContext = Depends(get_tenant_context),
+    context: TenantContext = Depends(require_role_access(*READER_ROLES)),
 ) -> List[DriftObservationResponse]:
     service = _service(request)
     rows = await service.list_observations(

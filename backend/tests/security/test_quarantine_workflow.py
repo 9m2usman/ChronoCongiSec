@@ -332,7 +332,7 @@ def _http_app(env):
     repo = InMemoryAuthRepository()
     repo.add_tenant(TenantRecord(id=T_A, name="A", slug="a"))
     repo.add_user(UserRecord(id="dev-1", email="d@x.test", hashed_password="x", full_name="d"))
-    repo.add_membership(MembershipRecord(id="m1", tenant_id=T_A, user_id="dev-1", role="DEVELOPER", status="ACTIVE"))
+    repo.add_membership(MembershipRecord(id="m1", tenant_id=T_A, user_id="dev-1", role="AI_DEVELOPER", status="ACTIVE"))
     app.state.auth_repo = repo
     app.state.memory_repo = env.w.repo
     app.include_router(memory_router, prefix="/api/v1")
@@ -340,7 +340,7 @@ def _http_app(env):
 
 
 def _get(app, path):
-    token = create_access_token(user_id="dev-1", tenant_id=T_A, role="DEVELOPER", settings=SETTINGS)
+    token = create_access_token(user_id="dev-1", tenant_id=T_A, role="AI_DEVELOPER", settings=SETTINGS)
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
@@ -381,7 +381,7 @@ def test_analyst_forensic_read_is_audited_before_read_and_non_actionable(env, mo
     assert view.actionable is False and view.record.id == rid and view.record.trust_state == "QUARANTINED"
     assert view.versions and view.trust_history and view.trust_history[-1].resulting_state == "QUARANTINED"
     ev = env.audit[0]
-    assert ev["event_type"] == "FORENSIC_MEMORY_ACCESSED" and ev["actor_id"] == "analyst-1"
+    assert ev["event_type"] == "FORENSIC_MEMORY_ACCESSED" and ev["actor_id"] == "user:analyst-1"
     assert ev["details_json"]["reason"] == "INC-1 root cause analysis"
     assert ev["details_json"]["trust_state_at_access"] == "QUARANTINED"
 

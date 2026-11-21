@@ -99,7 +99,7 @@ def test_review_persists_status_and_appends_hash_chained_audit(env):
     assert run(_status(factory, T_A, ids[T_A])) == "REJECTED"           # committed, re-read in a new tx
     events, chain_break = run(_audit(factory, T_A))
     ev = next(e for e in events if e.id == out.audit_event_id)
-    assert ev.event_type == "DRIFT_OBSERVATION_REVIEWED" and ev.actor_id == "analyst-a" and ev.trace_id == "tr-pg-1"
+    assert ev.event_type == "DRIFT_OBSERVATION_REVIEWED" and ev.actor_id == "user:analyst-a" and ev.trace_id == "tr-pg-1"
     assert ev.details_json["previous_status"] == "PENDING" and ev.details_json["new_status"] == "REJECTED"
     assert ev.chain_seq >= 1 and ev.event_hash and chain_break is None
 
