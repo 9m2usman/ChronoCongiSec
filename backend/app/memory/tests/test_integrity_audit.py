@@ -4,7 +4,6 @@ Module: backend.app.memory.tests.test_integrity_audit
 Owner: M3 — Knowledge & Memory Systems Lead
 """
 
-import asyncio
 from copy import deepcopy
 from pathlib import Path
 import subprocess
@@ -181,7 +180,7 @@ def test_audit_cli_entry_point_failure_exit_code(monkeypatch, repo):
 
     tenant_id = "tenant-cli-fail"
     default_repo = get_default_repository()
-    r1, _ = asyncio.run(ingest_memory(tenant_id=tenant_id, content="Tampered content", repository=default_repo))
+    r1, _ = ingest_memory(tenant_id=tenant_id, content="Tampered content", repository=default_repo)
     # Tamper with version content
     default_repo._versions[r1.id][0].content = "TAMPERED SECRET"
 
