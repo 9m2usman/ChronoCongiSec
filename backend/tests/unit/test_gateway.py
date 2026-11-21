@@ -87,6 +87,15 @@ from backend.app.memory.models import (
     TrustState,
 )
 from backend.app.memory.repository import InMemoryMemoryRepository
+from backend.app.security.trust import (
+    OPERATION_TARGET,
+    InMemoryTrustDecisionStore,
+    TrustDimension,
+    TrustEvaluator,
+    TrustOperation,
+    UserActor,
+)
+from backend.app.tenancy.context import TenantContext
 
 
 @pytest.fixture
@@ -109,7 +118,11 @@ def isolated_agent_repo() -> InMemoryAgentRepository:
 
 @pytest.fixture
 def isolated_memory_repo() -> InMemoryMemoryRepository:
-    return InMemoryMemoryRepository()
+    repo = InMemoryMemoryRepository()
+    # M4 trust decision ledger shared with the app (app.state.trust_decision_store): TRUSTED
+    # requires version-bound M4 evidence, not just a stored field.
+    repo._trust_store = InMemoryTrustDecisionStore()
+    return repo
 
 
 @pytest.fixture
@@ -129,6 +142,7 @@ def client(
     app.state.agent_repo = isolated_agent_repo
     app.state.memory_repo = isolated_memory_repo
     app.state.gateway_repo = isolated_gateway_repo
+    app.state.trust_decision_store = isolated_memory_repo._trust_store
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -164,8 +178,17 @@ AGENT_A_ISOLATED_ID = "isolated-agent-uuid-002"
 AGENT_B_ACTIVE_ID = "agent-b-active-uuid-003"
 
 
+SANDBOX_TRANSFER_GRANT = {
+    "tool_name": "sandbox_transfer",
+    "allowed_operations": ["transfer_funds", "get_balance"],
+    "constraints": {"max_amount": 500, "approval_threshold_amount": 300},
+}
+
+
 async def seed_agents(agent_repo: InMemoryAgentRepository) -> None:
-    """Seed test agents for tenant A and tenant B."""
+    """Seed test agents for tenant A and tenant B, with M4 tool grants for the active agents."""
+    agent_repo._tool_permissions[AGENT_A_ACTIVE_ID] = [dict(SANDBOX_TRANSFER_GRANT)]
+    agent_repo._tool_permissions[AGENT_B_ACTIVE_ID] = [dict(SANDBOX_TRANSFER_GRANT)]
     # Tenant A Active Agent
     await agent_repo.create_agent_atomic(
         AgentEntity(
@@ -244,12 +267,17 @@ def seed_memory_record(
     # Valid 64-char hex string that doesn't match content
     recorded_checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" if corrupt_checksum else real_checksum
 
+    # TRUSTED is reached through M4 VALIDATE (version-bound evidence). A corrupted record cannot be
+    # validated, so it is stored TRUSTED directly (an out-of-band write M4 must still refuse).
+    validate_via_m4 = trust_state == TrustState.TRUSTED and not corrupt_checksum
     rec = MemoryRecord(
         id=record_id,
         tenant_id=tenant_id,
         agent_id=agent_id,
+        # Provenance: an ACTIVE seeded source per tenant (M4 refuses to trust memory without one).
+        source_id={"tenant-a-uuid-001": "src-doc-001", "tenant-b-uuid-002": "src-b-001"}.get(tenant_id),
         record_type=RecordType.KNOWLEDGE,
-        trust_state=trust_state,
+        trust_state=TrustState.UNVERIFIED if validate_via_m4 else trust_state,
         current_version=1,
     )
     memory_repo.create_record(rec)
@@ -263,7 +291,30 @@ def seed_memory_record(
         checksum=recorded_checksum,
     )
     memory_repo.create_version(ver)
+    if validate_via_m4:
+        _m4_validate(memory_repo, tenant_id, record_id)
+        rec = memory_repo.get_record(record_id, tenant_id)
     return rec
+
+
+def _m4_validate(memory_repo: InMemoryMemoryRepository, tenant_id: str, record_id: str) -> None:
+    """Promote a record to TRUSTED the only legitimate way: an analyst VALIDATE through M4."""
+    store = getattr(memory_repo, "_trust_store", None) or InMemoryTrustDecisionStore()
+    memory_repo._trust_store = store
+    evaluator = TrustEvaluator(memory_repo, store, app_env="test")
+    rec = memory_repo.get_record(record_id, tenant_id)
+    ver = memory_repo.get_version(record_id, rec.current_version, tenant_id)
+    analyst = UserActor(TenantContext(tenant_id=tenant_id, tenant_slug="t", tenant_name="T",
+                                      user_id="analyst-validator", role="SECURITY_ANALYST", is_active=True))
+    decision = evaluator.apply({
+        "record_id": record_id, "operation": TrustOperation.VALIDATE.value,
+        "target_state": OPERATION_TARGET[TrustOperation.VALIDATE].value,
+        "expected_state": "UNVERIFIED", "expected_version": rec.current_version, "reason": "test validation",
+        "evidence": {"evidence_refs": ["ev-1"], "validation": {
+            "assessed_version": rec.current_version, "assessed_checksum": ver.checksum,
+            "dimensions": {d.value: {"status": "PASS", "evidence_ref": "r"} for d in TrustDimension}}},
+    }, analyst)
+    assert decision.applied, decision.reason_codes
 
 
 # ============================================================================
@@ -526,7 +577,7 @@ async def test_suspicious_memory_is_blocked_and_adapter_not_executed(
     assert data["policy_result"] == "DENIED"
     assert data["execution_status"] == "NOT_EXECUTED"
     assert data["result"] is None
-    assert any("marked SUSPICIOUS" in r for r in data["reasons"])
+    assert "MEMORY_SUSPICIOUS" in data["reason_codes"]
 
     # Verify decision is durably recorded in repository
     record = await isolated_gateway_repo.get_by_id(TENANT_A_ID, data["proposal_id"])
@@ -646,9 +697,11 @@ async def test_memory_checksum_mismatch_fails_closed(
         "trace_id": "tr-chk-001",
     }
     resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     data = resp.json()
-    assert data["error"]["code"] == "MEMORY_INTEGRITY_VIOLATION"
+    assert data["decision"] == "BLOCK" and data["execution_status"] == "NOT_EXECUTED"
+    assert data["result"] is None
+    assert "MEMORY_INTEGRITY_VIOLATION" in data["reason_codes"]
 
 
 # ============================================================================
@@ -656,13 +709,14 @@ async def test_memory_checksum_mismatch_fails_closed(
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_transfer_amount_exceeding_dual_custody_ceiling_is_blocked(
+async def test_transfer_amount_above_dual_custody_threshold_requires_approval_and_is_not_executed(
     client: httpx.AsyncClient,
     test_settings: Settings,
     isolated_agent_repo: InMemoryAgentRepository,
     isolated_memory_repo: InMemoryMemoryRepository,
 ):
-    """Amount $450 exceeds dual-custody threshold of $300; must be BLOCKED."""
+    """$450 exceeds the $300 dual-custody threshold (grant allows up to $500): M4 returns
+    REQUIRES_APPROVAL (FR-015, TRD Check 5). It is not executed without a valid approval."""
     await seed_agents(isolated_agent_repo)
     mem_id = "mem-trusted-005"
     seed_memory_record(
@@ -689,10 +743,11 @@ async def test_transfer_amount_exceeding_dual_custody_ceiling_is_blocked(
     resp = await client.post("/api/v1/gateway/actions/propose", json=payload, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["decision"] == "BLOCK"
-    assert data["policy_result"] == "DENIED"
-    assert data["execution_status"] == "NOT_EXECUTED"
-    assert any("exceeds dual-custody threshold" in r for r in data["reasons"])
+    assert data["decision"] == "REQUIRES_APPROVAL"
+    assert data["policy_result"] == "ELEVATED"
+    assert data["execution_status"] == "PENDING_APPROVAL"
+    assert data["result"] is None
+    assert "APPROVAL_THRESHOLD_EXCEEDED" in data["reason_codes"]
 
 
 # ============================================================================
@@ -708,6 +763,9 @@ async def test_idempotent_duplicate_returns_identical_cached_result_without_reex
 ):
     """Same tenant + same idempotency key + same payload returns existing decision and does NOT invoke adapter again."""
     await seed_agents(isolated_agent_repo)
+    # M4 policy: a financial transfer must be justified by eligible TRUSTED memory (PRD SEC-002).
+    seed_memory_record(isolated_memory_repo, record_id="mem-justify-idem", tenant_id=TENANT_A_ID,
+                       content="Approved vendor payment instruction (mem-justify-idem).", trust_state=TrustState.TRUSTED)
     token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -717,7 +775,7 @@ async def test_idempotent_duplicate_returns_identical_cached_result_without_reex
         "tool_name": "sandbox_transfer",
         "operation": "transfer_funds",
         "parameters": {"destination_account": "ACC-LEGIT-123", "amount": 50.00},
-        "memory_refs": [],
+        "memory_refs": ["mem-justify-idem"],
         "idempotency_key": "idemp-repeat-001",
         "trace_id": "tr-rep-001",
     }
@@ -868,11 +926,15 @@ async def test_sensitive_parameters_are_redacted_in_audit_events(
 @pytest.mark.asyncio
 async def test_get_proposal_detail_and_cross_tenant_isolation(
     client: httpx.AsyncClient,
+    isolated_memory_repo: InMemoryMemoryRepository,
     test_settings: Settings,
     isolated_agent_repo: InMemoryAgentRepository,
 ):
     """Verify proposal detail endpoint returns full audit view and enforces cross-tenant 404."""
     await seed_agents(isolated_agent_repo)
+    # M4 policy: a financial transfer must be justified by eligible TRUSTED memory (PRD SEC-002).
+    seed_memory_record(isolated_memory_repo, record_id="mem-justify-detail", tenant_id=TENANT_A_ID,
+                       content="Approved vendor payment instruction (mem-justify-detail).", trust_state=TrustState.TRUSTED)
     token_a = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
     token_b = create_token_for(USER_B_DEV_ID, "developer@company-b.com", TENANT_B_ID, "AI_DEVELOPER", test_settings)
 
@@ -882,7 +944,7 @@ async def test_get_proposal_detail_and_cross_tenant_isolation(
         "tool_name": "sandbox_transfer",
         "operation": "transfer_funds",
         "parameters": {"amount": 50.00},
-        "memory_refs": [],
+        "memory_refs": ["mem-justify-detail"],
         "idempotency_key": "idemp-detail-001",
         "trace_id": "tr-detail-001",
     }
@@ -989,7 +1051,7 @@ async def test_memory_toctou_trust_revocation_before_dispatch_blocks_execution(
     # The action MUST be blocked because trust was revoked before dispatch!
     assert data["decision"] == "BLOCK"
     assert data["execution_status"] == "NOT_EXECUTED"
-    assert any("trust revoked" in r for r in data["reasons"])
+    assert {"REFERENCED_UNTRUSTED_MEMORY", "PRE_EXECUTION_REVALIDATION_FAILED"} & set(data["reason_codes"])
     # Adapter must NEVER have executed!
     assert spy.invoked is False
 
@@ -1005,6 +1067,9 @@ async def test_adapter_timeout_records_unknown_outcome_and_no_retry(
     """SEC-GW-010 / GAP-023: Adapter timeout records UNKNOWN execution status (504) and halts blind retries."""
     import asyncio
     await seed_agents(isolated_agent_repo)
+    # M4 policy: a financial transfer must be justified by eligible TRUSTED memory (PRD SEC-002).
+    seed_memory_record(isolated_memory_repo, record_id="mem-justify-timeout", tenant_id=TENANT_A_ID,
+                       content="Approved vendor payment instruction (mem-justify-timeout).", trust_state=TrustState.TRUSTED)
 
     class TimeoutAdapter:
         async def execute(self, operation: str, parameters: Dict[str, Any], context: Dict[str, Any]) -> ToolExecutionResult:
@@ -1024,7 +1089,7 @@ async def test_adapter_timeout_records_unknown_outcome_and_no_retry(
         "tool_name": "sandbox_transfer",
         "operation": "transfer_funds",
         "parameters": {"destination_account": "ACC-LEGIT-123", "amount": 50.00},
-        "memory_refs": [],
+        "memory_refs": ["mem-justify-timeout"],
         "idempotency_key": "idemp-timeout-001",
         "trace_id": "tr-timeout-001",
     }
@@ -1195,3 +1260,107 @@ async def test_sqlalchemy_gateway_repository_protocol():
     assert repo.is_persistent is True
     assert repo.is_in_memory is False
 
+
+
+# ============================================================================
+# M4 integration regressions: the gateway decides only through M4's PolicyEngine and
+# dispatches only through ProtectedExecutionGuard.
+# ============================================================================
+
+def _wire_payload(mem_id: str, key: str, agent: str = AGENT_A_ACTIVE_ID, amount: float = 100.0) -> Dict[str, Any]:
+    return {
+        "action_id": f"act-{key}", "agent_id": agent, "tool_name": "sandbox_transfer",
+        "operation": "transfer_funds",
+        "parameters": {"destination_account": "ACC-LEGIT-123", "amount": amount, "currency": "USD"},
+        "memory_refs": [mem_id], "idempotency_key": key, "trace_id": f"tr-{key}",
+    }
+
+
+def test_gateway_module_has_no_competing_policy_evaluator():
+    import backend.app.api.gateway as gw
+    for name in ("DeterministicPolicyEvaluator", "PolicyEvaluationInput", "get_default_policy_evaluator"):
+        assert not hasattr(gw, name), name
+    assert "REVIEW" not in {d.value for d in GatewayDecision}
+
+
+@pytest.mark.asyncio
+async def test_decision_audit_carries_m4_policy_evidence(
+    client: httpx.AsyncClient, test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository, isolated_memory_repo: InMemoryMemoryRepository,
+    isolated_gateway_repo: InMemoryGatewayRepository,
+):
+    await seed_agents(isolated_agent_repo)
+    seed_memory_record(isolated_memory_repo, record_id="mem-m4-ev", tenant_id=TENANT_A_ID,
+                       content="Trusted instruction", trust_state=TrustState.TRUSTED)
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    resp = await client.post("/api/v1/gateway/actions/propose", json=_wire_payload("mem-m4-ev", "idemp-m4-ev"),
+                             headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200 and resp.json()["decision"] == "ALLOW"
+    details = isolated_gateway_repo.get_audit_events(TENANT_A_ID)[0].details_json
+    assert details["policy_version"].startswith("amsc-policy/")
+    assert details["reason_codes"] == ["ALL_CHECKS_PASSED"]
+    assert details["memory_evidence"][0]["trust_decision_id"]
+
+
+@pytest.mark.asyncio
+async def test_agent_without_tool_grant_is_blocked_and_adapter_not_called(
+    client: httpx.AsyncClient, test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository, isolated_memory_repo: InMemoryMemoryRepository,
+):
+    await seed_agents(isolated_agent_repo)
+    isolated_agent_repo._tool_permissions[AGENT_A_ACTIVE_ID] = []          # no grant
+    seed_memory_record(isolated_memory_repo, record_id="mem-nogrant", tenant_id=TENANT_A_ID,
+                       content="Trusted instruction", trust_state=TrustState.TRUSTED)
+    calls = []
+
+    class SpyAdapter:
+        async def execute(self, operation, parameters, context):
+            calls.append(operation)
+            return ToolExecutionResult(status="SUCCESS", status_code=200, result_payload={}, duration_ms=0)
+
+    from backend.app.api.gateway import ToolAdapterRegistry
+    reg = ToolAdapterRegistry()
+    reg.register("sandbox_transfer", SpyAdapter())
+    client._transport.app.state.tool_registry = reg
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    resp = await client.post("/api/v1/gateway/actions/propose", json=_wire_payload("mem-nogrant", "idemp-nogrant"),
+                             headers={"Authorization": f"Bearer {token}"})
+    data = resp.json()
+    assert data["decision"] == "BLOCK" and "TOOL_NOT_ASSIGNED" in data["reason_codes"] and calls == []
+
+
+@pytest.mark.asyncio
+async def test_memory_marked_trusted_without_m4_evidence_is_blocked(
+    client: httpx.AsyncClient, test_settings: Settings,
+    isolated_agent_repo: InMemoryAgentRepository, isolated_memory_repo: InMemoryMemoryRepository,
+):
+    """A stored TRUSTED flag alone (written outside M4) never justifies an action."""
+    await seed_agents(isolated_agent_repo)
+    seed_memory_record(isolated_memory_repo, record_id="mem-flag-only", tenant_id=TENANT_A_ID,
+                       content="Looks trusted", trust_state=TrustState.UNVERIFIED)
+    rec = isolated_memory_repo.get_record("mem-flag-only", TENANT_A_ID)
+    rec.trust_state = TrustState.TRUSTED
+    isolated_memory_repo.update_record(rec)
+    token = create_token_for(USER_A_DEV_ID, "developer@company-a.com", TENANT_A_ID, "AI_DEVELOPER", test_settings)
+    resp = await client.post("/api/v1/gateway/actions/propose", json=_wire_payload("mem-flag-only", "idemp-flag"),
+                             headers={"Authorization": f"Bearer {token}"})
+    data = resp.json()
+    assert data["decision"] == "BLOCK" and data["execution_status"] == "NOT_EXECUTED"
+    assert "REFERENCED_UNTRUSTED_MEMORY" in data["reason_codes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["SECURITY_ANALYST", "TENANT_ADMIN"])
+async def test_non_proposer_roles_are_blocked_by_m4(
+    client: httpx.AsyncClient, test_settings: Settings, role: str,
+    isolated_agent_repo: InMemoryAgentRepository, isolated_memory_repo: InMemoryMemoryRepository,
+):
+    await seed_agents(isolated_agent_repo)
+    seed_memory_record(isolated_memory_repo, record_id=f"mem-role-{role}", tenant_id=TENANT_A_ID,
+                       content="Trusted instruction", trust_state=TrustState.TRUSTED)
+    token = create_token_for(USER_A_ANALYST_ID, "analyst@company-a.com", TENANT_A_ID, role, test_settings)
+    resp = await client.post("/api/v1/gateway/actions/propose",
+                             json=_wire_payload(f"mem-role-{role}", f"idemp-role-{role}"),
+                             headers={"Authorization": f"Bearer {token}"})
+    data = resp.json()
+    assert data["decision"] == "BLOCK" and "PRINCIPAL_ROLE_NOT_AUTHORIZED" in data["reason_codes"]

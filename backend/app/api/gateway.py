@@ -13,7 +13,6 @@ Canonical References:
 - AMSC-DOC-008: GAPs 001-004, 006, 010, 015, 018-028 (Security Gap Register)
 """
 
-import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,8 +48,8 @@ from backend.app.core.exceptions import (
     SecurityDependencyError,
     ValidationError,
 )
-from backend.app.memory.hashing import sha256_hex
-from backend.app.memory.models import TrustState
+from backend.app.security.policy import decision_is_executable
+from backend.app.security.runtime import get_gateway_enforcement
 from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.api.gateway")
@@ -71,19 +70,10 @@ MAX_MEMORY_REFS_COUNT = 50
 # ============================================================================
 
 class GatewayDecision(str, Enum):
-    """Deterministic policy outcomes per AMSC-DOC-005 Table 17."""
+    """Policy outcomes per AMSC-DOC-005 Table 17 (OD-1). Decided only by M4's PolicyEngine."""
     ALLOW = "ALLOW"
     BLOCK = "BLOCK"
-    REVIEW = "REVIEW"  # Also known as REQUIRES_APPROVAL
-
-
-class MemoryTrustDecision(str, Enum):
-    """Memory trust classification per AMSC-DOC-005 Table 17."""
-    TRUSTED = "TRUSTED"
-    SUSPICIOUS = "SUSPICIOUS"
-    QUARANTINED = "QUARANTINED"
-    UNVERIFIED = "UNVERIFIED"
-    NOT_REFERENCED = "NOT_REFERENCED"
+    REQUIRES_APPROVAL = "REQUIRES_APPROVAL"
 
 
 class PolicyResult(str, Enum):
@@ -187,10 +177,11 @@ class ActionProposalResponse(BaseModel):
 
     action_id: str
     proposal_id: str
-    decision: str  # ALLOW, BLOCK, REVIEW
-    memory_trust: str  # TRUSTED, SUSPICIOUS, QUARANTINED, NOT_REFERENCED, UNVERIFIED
+    decision: str  # ALLOW, BLOCK, REQUIRES_APPROVAL (M4 PolicyEngine)
+    memory_trust: str  # worst memory label from M4 (OD-2)
     policy_result: str  # PERMITTED, DENIED, ELEVATED
     reasons: List[str] = Field(default_factory=list)
+    reason_codes: List[str] = Field(default_factory=list)
     execution_status: str  # EXECUTED, NOT_EXECUTED, PENDING_APPROVAL, PENDING_EXECUTION, FAILED, UNKNOWN
     result: Optional[Dict[str, Any]] = None
 
@@ -1017,111 +1008,9 @@ def get_default_tool_registry() -> ToolAdapterRegistry:
 # 7. M4 Policy Engine Boundary & Deterministic Evaluator
 # ============================================================================
 
-@dataclass
-class PolicyEvaluationInput:
-    tenant_id: str
-    agent_id: str
-    agent_status: str
-    tool_name: str
-    operation: str
-    parameters: Dict[str, Any]
-    memory_refs: List[str]
-    memory_trust_state: str  # TRUSTED, SUSPICIOUS, QUARANTINED, NOT_REFERENCED, UNVERIFIED
-    memory_reasons: List[str]
-
-
-@dataclass
-class PolicyEvaluationOutput:
-    decision: GatewayDecision
-    memory_trust: MemoryTrustDecision
-    policy_result: PolicyResult
-    reasons: List[str]
-
-
-class DeterministicPolicyEvaluator:
-    """Deterministic policy engine implementing AMSC-DOC-002, 005, and 006 rules.
-
-    Rules:
-    1. Fail-closed: If memory is tainted (SUSPICIOUS, QUARANTINED, UNVERIFIED, REJECTED), decision is BLOCK.
-    2. Tool validation: Tool must be registered.
-    3. Ceilings: For sandbox_transfer, amount > 300.00 requires dual custody / exceeds threshold -> BLOCK.
-    """
-
-    DUAL_CUSTODY_THRESHOLD_USD = 300.00
-    MAX_ALLOWABLE_TRANSFER_USD = 50000.00
-
-    def evaluate(self, inp: PolicyEvaluationInput) -> PolicyEvaluationOutput:
-        reasons: List[str] = list(inp.memory_reasons)
-
-        # 1. Memory Trust Enforcement (Absolute fail-closed rule)
-        if inp.memory_trust_state in ("SUSPICIOUS", "QUARANTINED", "REJECTED"):
-            return PolicyEvaluationOutput(
-                decision=GatewayDecision.BLOCK,
-                memory_trust=MemoryTrustDecision(inp.memory_trust_state),
-                policy_result=PolicyResult.DENIED,
-                reasons=reasons,
-            )
-        elif inp.memory_trust_state == "UNVERIFIED":
-            reasons.append("Unverified memory cannot back protected tool actions.")
-            return PolicyEvaluationOutput(
-                decision=GatewayDecision.BLOCK,
-                memory_trust=MemoryTrustDecision.UNVERIFIED,
-                policy_result=PolicyResult.DENIED,
-                reasons=reasons,
-            )
-
-        resolved_trust = (
-            MemoryTrustDecision.NOT_REFERENCED
-            if inp.memory_trust_state == "NOT_REFERENCED"
-            else MemoryTrustDecision.TRUSTED
-        )
-
-        # 2. Tool-Specific Ceilings & Rules
-        if inp.tool_name == "sandbox_transfer" and inp.operation == "transfer_funds":
-            amount = float(inp.parameters.get("amount", 0.0))
-            if amount < 0:
-                reasons.append("Negative transfer amounts are forbidden.")
-                return PolicyEvaluationOutput(
-                    decision=GatewayDecision.BLOCK,
-                    memory_trust=resolved_trust,
-                    policy_result=PolicyResult.DENIED,
-                    reasons=reasons,
-                )
-            if amount > self.MAX_ALLOWABLE_TRANSFER_USD:
-                reasons.append(
-                    f"Action amount (${amount:.2f}) exceeds absolute ceiling (${self.MAX_ALLOWABLE_TRANSFER_USD:.2f})."
-                )
-                return PolicyEvaluationOutput(
-                    decision=GatewayDecision.BLOCK,
-                    memory_trust=resolved_trust,
-                    policy_result=PolicyResult.DENIED,
-                    reasons=reasons,
-                )
-            if amount > self.DUAL_CUSTODY_THRESHOLD_USD:
-                reasons.append(
-                    f"Action amount (${amount:.2f}) exceeds dual-custody threshold (${self.DUAL_CUSTODY_THRESHOLD_USD:.2f})."
-                )
-                return PolicyEvaluationOutput(
-                    decision=GatewayDecision.BLOCK,
-                    memory_trust=resolved_trust,
-                    policy_result=PolicyResult.DENIED,
-                    reasons=reasons,
-                )
-
-        # 3. All checks passed
-        return PolicyEvaluationOutput(
-            decision=GatewayDecision.ALLOW,
-            memory_trust=resolved_trust,
-            policy_result=PolicyResult.PERMITTED,
-            reasons=["All authorization, trust-state, and operational ceiling checks passed."],
-        )
-
-
-_default_policy_evaluator = DeterministicPolicyEvaluator()
-
-
-def get_default_policy_evaluator() -> DeterministicPolicyEvaluator:
-    return _default_policy_evaluator
+# Policy decisions are made exclusively by M4: backend.app.security.policy.PolicyEngine, executed
+# only through ProtectedExecutionGuard (obtained via backend.app.security.runtime). The former
+# DeterministicPolicyEvaluator in this module was a competing decision path and has been removed.
 
 
 # ============================================================================
@@ -1145,7 +1034,7 @@ UNAUTHORIZED_PROPOSAL_ROLES = frozenset({"AUDITOR", "READ_ONLY", "GUEST"})
         "durable idempotency, and fail-closed blocking before tool execution."
     ),
     responses={
-        200: {"description": "Action proposal evaluated successfully (decision may be ALLOW, BLOCK, or REVIEW)"},
+        200: {"description": "Action proposal evaluated successfully (decision may be ALLOW, BLOCK, or REQUIRES_APPROVAL)"},
         400: {"description": "Malformed request or parameter ceiling violation"},
         401: {"description": "Missing or invalid bearer token"},
         403: {"description": "Agent not active, cross-tenant agent access, or unauthorized caller role"},
@@ -1261,122 +1150,27 @@ async def propose_tool_action(
             result=existing_exec.result_payload_json if existing_exec else None,
         )
 
-    # 5. Memory Trust & Cryptographic Integrity Verification (M3 Memory Systems)
+    # 5. Authoritative M4 decision (policy, tool grant, ceilings, approval, memory trust).
     memory_repo = getattr(request.app.state, "memory_repo", None)
-    if memory_repo is None and body.memory_refs:
+    if memory_repo is None:
         raise SecurityDependencyError("Memory trust verification service unavailable.")
-
-    memory_trust_state = "NOT_REFERENCED"
-    memory_reasons: List[str] = []
-    verified_memory_evidence: List[Dict[str, Any]] = []
-
-    if body.memory_refs:
-        all_trusted = True
-        tainted_state: Optional[str] = None
-
-        for ref_id in body.memory_refs:
-            record = memory_repo.get_record(ref_id, tenant_id)
-            if record is None:
-                all_trusted = False
-                tainted_state = "QUARANTINED"
-                memory_reasons.append(
-                    f"Referenced memory '{ref_id}' does not exist in the authenticated tenant."
-                )
-                break
-
-            if record.agent_id is not None and record.agent_id != body.agent_id:
-                all_trusted = False
-                tainted_state = "QUARANTINED"
-                memory_reasons.append(
-                    f"Referenced memory '{ref_id}' is bound to agent '{record.agent_id}', not caller agent '{body.agent_id}'."
-                )
-                break
-
-            latest_version = memory_repo.get_latest_version(ref_id, tenant_id)
-            if latest_version is None:
-                all_trusted = False
-                tainted_state = "UNVERIFIED"
-                memory_reasons.append(f"Referenced memory '{ref_id}' has no content versions.")
-                break
-
-            computed_checksum = sha256_hex(latest_version.content)
-            if computed_checksum != latest_version.checksum:
-                logger.error(
-                    "Cryptographic checksum mismatch for memory '%s': expected %s, got %s",
-                    ref_id,
-                    latest_version.checksum,
-                    computed_checksum,
-                )
-                raise AMSCException(
-                    message=f"Memory integrity violation: Checksum mismatch on record '{ref_id}'.",
-                    code="MEMORY_INTEGRITY_VIOLATION",
-                    status_code=500,
-                )
-
-            # Record verified version & integrity evidence (SEC-GW-006)
-            verified_memory_evidence.append({
-                "record_id": ref_id,
-                "version": latest_version.version,
-                "checksum": computed_checksum,
-                "trust_state": record.trust_state,
-            })
-
-            if record.trust_state != TrustState.TRUSTED.value:
-                all_trusted = False
-                tainted_state = record.trust_state
-                memory_reasons.append(
-                    f"Referenced memory '{ref_id}' is marked {record.trust_state} and cannot back protected financial tools."
-                )
-
-        if all_trusted:
-            memory_trust_state = "TRUSTED"
-        else:
-            memory_trust_state = tainted_state or "SUSPICIOUS"
-
-    # 6. Deterministic Policy Evaluation (M4 Security Policy Engine)
-    policy_evaluator = getattr(request.app.state, "policy_evaluator", None) or get_default_policy_evaluator()
-    eval_input = PolicyEvaluationInput(
-        tenant_id=tenant_id,
-        agent_id=body.agent_id,
-        agent_status=agent.status,
-        tool_name=body.tool_name,
-        operation=body.operation,
-        parameters=body.parameters,
-        memory_refs=body.memory_refs,
-        memory_trust_state=memory_trust_state,
-        memory_reasons=memory_reasons,
-    )
-
-    try:
-        policy_output = policy_evaluator.evaluate(eval_input)
-    except Exception as exc:
-        logger.exception("Policy evaluation failed closed with unexpected error: %s", exc)
-        raise SecurityDependencyError("Policy evaluation failed closed.") from exc
-
-    # 7. Check Tool Registration & Determine Initial Execution Status
-    proposal_id = str(uuid.uuid4())
-    decision_id = str(uuid.uuid4())
     tool_registry = getattr(request.app.state, "tool_registry", None) or get_default_tool_registry()
+    engine, guard = get_gateway_enforcement(request.app.state, memory_repo, agent_repo, tool_registry)
 
-    execution_status = ExecutionStatus.NOT_EXECUTED.value
-    adapter = None
+    proposal: Dict[str, Any] = {
+        "action_id": body.action_id,
+        "agent_id": body.agent_id,
+        "tool_name": body.tool_name,
+        "operation": body.operation,
+        "parameters": body.parameters,
+        "memory_refs": list(body.memory_refs),
+        "idempotency_key": body.idempotency_key,
+        "trace_id": body.trace_id,
+    }
+    decision = await engine.evaluate(proposal, context)
+    record = decision.to_persistence_record()
 
-    if policy_output.decision == GatewayDecision.ALLOW:
-        adapter = tool_registry.get_adapter(body.tool_name)
-        if adapter is None:
-            policy_output.decision = GatewayDecision.BLOCK
-            policy_output.policy_result = PolicyResult.DENIED
-            policy_output.reasons.append(f"Tool '{body.tool_name}' is not registered in Gateway adapter registry.")
-            execution_status = ExecutionStatus.NOT_EXECUTED.value
-        else:
-            # Policy allows and adapter exists: set execution_status to PENDING_EXECUTION
-            execution_status = ExecutionStatus.PENDING_EXECUTION.value
-    elif policy_output.decision == GatewayDecision.REVIEW:
-        execution_status = ExecutionStatus.PENDING_APPROVAL.value
-    else:  # BLOCK
-        execution_status = ExecutionStatus.NOT_EXECUTED.value
-
-    # 8. Durable Persistence of Proposal & Decision BEFORE Dispatch (Part 9 & Part 13)
+    proposal_id = str(uuid.uuid4())
     proposal_entity = ToolProposalEntity(
         id=proposal_id,
         tenant_id=tenant_id,
@@ -1391,21 +1185,18 @@ async def propose_tool_action(
         payload_fingerprint=payload_fingerprint,
         created_at=datetime.now(timezone.utc),
     )
-
     decision_entity = PolicyDecisionEntity(
-        id=decision_id,
+        id=decision.decision_id,
         tenant_id=tenant_id,
         proposal_id=proposal_id,
-        decision=policy_output.decision.value,
-        memory_trust=policy_output.memory_trust.value,
-        policy_result=policy_output.policy_result.value,
-        reasons_json=policy_output.reasons,
+        decision=record["decision"],
+        memory_trust=record["memory_trust"],
+        policy_result=record["policy_result"],
+        reasons_json=list(record["reasons_json"]),
         incident_id=None,
-        execution_status=execution_status,
+        execution_status=record["execution_status"],
         created_at=datetime.now(timezone.utc),
     )
-
-    redacted_parameters = redact_sensitive_payload(body.parameters)
     audit_entity = AuditEventEntity(
         id=str(uuid.uuid4()),
         tenant_id=tenant_id,
@@ -1413,165 +1204,136 @@ async def propose_tool_action(
         event_type="TOOL_POLICY_DECIDED",
         resource_id=proposal_id,
         action=f"{body.tool_name}:{body.operation}",
-        outcome=policy_output.decision.value,
+        outcome=record["decision"],
         trace_id=body.trace_id,
         details_json={
             "action_id": body.action_id,
             "agent_id": body.agent_id,
             "tool_name": body.tool_name,
             "operation": body.operation,
-            "decision": policy_output.decision.value,
-            "memory_trust": policy_output.memory_trust.value,
-            "execution_status": execution_status,
-            "reasons": policy_output.reasons,
-            "parameters": redacted_parameters,
+            "decision": record["decision"],
+            "memory_trust": record["memory_trust"],
+            "execution_status": record["execution_status"],
+            "reasons": list(record["reasons_json"]),
+            "parameters": redact_sensitive_payload(body.parameters),
             "memory_refs": body.memory_refs,
-            "verified_memory_versions": verified_memory_evidence,
             "payload_fingerprint": payload_fingerprint,
+            **record["details_json"],          # policy version, checks, reason codes, memory evidence
         },
         occurred_at=datetime.now(timezone.utc),
     )
 
-    try:
-        await gateway_repo.save_proposal_atomic(
-            proposal=proposal_entity,
-            decision=decision_entity,
-            execution=None,  # Not executed yet!
-            audit_event=audit_entity,
+    async def persist_decision(_decision: Any) -> None:
+        try:
+            await gateway_repo.save_proposal_atomic(
+                proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
+            )
+        except (HTTPException, AMSCException):
+            raise
+        except Exception as exc:
+            logger.exception("Failed to persist gateway proposal and security decision: %s", exc)
+            raise
+
+    def response(decision_value: str, execution_status: str, reason_codes: List[str],
+                 result: Optional[Dict[str, Any]] = None) -> ActionProposalResponse:
+        return ActionProposalResponse(
+            action_id=body.action_id,
+            proposal_id=proposal_id,
+            decision=decision_value,
+            memory_trust=record["memory_trust"],
+            policy_result=record["policy_result"],
+            reasons=list(record["reasons_json"]),
+            reason_codes=reason_codes,
+            execution_status=execution_status,
+            result=result,
         )
-    except HTTPException:
-        raise
-    except AMSCException:
-        raise
-    except Exception as exc:
-        logger.exception("Failed to persist gateway proposal and decision atomically before dispatch: %s", exc)
-        raise AMSCException(
-            message="Failed to persist action proposal and security decision.",
-            code="PERSISTENCE_FAILURE",
-            status_code=500,
-        ) from exc
 
-    # 9. Adapter Dispatch (Only for ALLOW with PENDING_EXECUTION)
-    execution_result_payload: Optional[Dict[str, Any]] = None
+    # 6. BLOCK / REQUIRES_APPROVAL: persist the decision; the adapter is never reached.
+    if not decision_is_executable(decision):
+        try:
+            await persist_decision(decision)
+        except (HTTPException, AMSCException):
+            raise
+        except Exception as exc:
+            raise AMSCException(
+                message="Failed to persist action proposal and security decision.",
+                code="PERSISTENCE_FAILURE",
+                status_code=500,
+            ) from exc
+        return response(record["decision"], record["execution_status"], list(decision.reason_codes))
 
-    if policy_output.decision == GatewayDecision.ALLOW and adapter is not None:
-        # 9a. Memory TOCTOU Revalidation (SEC-GW-007)
-        toctou_violation = False
-        toctou_reason = ""
-        if body.memory_refs and memory_repo is not None:
-            for ref_id in body.memory_refs:
-                cur_rec = memory_repo.get_record(ref_id, tenant_id)
-                if cur_rec is None or cur_rec.trust_state != TrustState.TRUSTED.value:
-                    toctou_violation = True
-                    cur_st = cur_rec.trust_state if cur_rec else "DELETED"
-                    toctou_reason = f"Memory trust revoked for '{ref_id}' (state: {cur_st}) before adapter dispatch."
-                    break
-                cur_ver = memory_repo.get_latest_version(ref_id, tenant_id)
-                if cur_ver is None or sha256_hex(cur_ver.content) != cur_ver.checksum:
-                    toctou_violation = True
-                    toctou_reason = f"Memory integrity invalidated for '{ref_id}' before adapter dispatch."
-                    break
+    # 7. ALLOW: only M4's guard may dispatch (persist -> revalidate -> single-use grant -> adapter).
+    adapter = tool_registry.get_adapter(body.tool_name)
+    if adapter is None:   # cannot happen for an executable decision (grant requires a registered tool)
+        raise SecurityDependencyError("Protected tool adapter is not registered.")
 
-        if toctou_violation:
-            logger.warning("TOCTOU protection triggered: %s", toctou_reason)
-            execution_status = ExecutionStatus.NOT_EXECUTED.value
-            policy_output.decision = GatewayDecision.BLOCK
-            policy_output.policy_result = PolicyResult.DENIED
-            policy_output.reasons.append(toctou_reason)
+    async def executor(_grant: Any) -> ToolExecutionResult:
+        return await adapter.execute(
+            operation=body.operation,
+            parameters=body.parameters,
+            context={"tenant_id": tenant_id, "agent_id": body.agent_id, "trace_id": body.trace_id},
+        )
 
-            abort_exec = ToolExecutionEntity(
-                id=str(uuid.uuid4()),
-                tenant_id=tenant_id,
-                proposal_id=proposal_id,
-                decision_id=decision_id,
-                status="BLOCKED_BY_TOCTOU",
-                status_code=403,
-                result_payload_json={"error": toctou_reason},
-                duration_ms=0,
-                executed_at=datetime.now(timezone.utc),
+    outcome = await guard.execute(decision, proposal, context, persist_decision=persist_decision, executor=executor)
+
+    if not outcome.executed:
+        codes = list(outcome.reason_codes)
+        if "AUDIT_PERSISTENCE_FAILED" in codes:
+            raise AMSCException(
+                message="Failed to persist action proposal and security decision.",
+                code="PERSISTENCE_FAILURE",
+                status_code=500,
             )
-            await gateway_repo.record_execution_outcome(
-                tenant_id=tenant_id,
-                proposal_id=proposal_id,
-                decision_id=decision_id,
-                execution=abort_exec,
-                execution_status=execution_status,
-            )
-        else:
-            # 9b. Execute protected adapter
-            execution_entity: Optional[ToolExecutionEntity] = None
-            try:
-                exec_res = await adapter.execute(
-                    operation=body.operation,
-                    parameters=body.parameters,
-                    context={"tenant_id": tenant_id, "agent_id": body.agent_id, "trace_id": body.trace_id},
-                )
-                execution_status = ExecutionStatus.EXECUTED.value
-                execution_result_payload = exec_res.result_payload
-                execution_entity = ToolExecutionEntity(
-                    id=str(uuid.uuid4()),
-                    tenant_id=tenant_id,
-                    proposal_id=proposal_id,
-                    decision_id=decision_id,
-                    status=exec_res.status,
-                    status_code=exec_res.status_code,
-                    result_payload_json=exec_res.result_payload,
-                    duration_ms=exec_res.duration_ms,
-                    executed_at=datetime.now(timezone.utc),
-                )
-            except (TimeoutError, asyncio.TimeoutError):
-                logger.error("Adapter timed out for tool '%s'. Side effect outcome is UNKNOWN.", body.tool_name)
-                execution_status = ExecutionStatus.UNKNOWN.value
-                execution_result_payload = {
-                    "error": "Tool execution timed out. Outcome is ambiguous and requires reconciliation."
-                }
-                execution_entity = ToolExecutionEntity(
-                    id=str(uuid.uuid4()),
-                    tenant_id=tenant_id,
-                    proposal_id=proposal_id,
-                    decision_id=decision_id,
-                    status="UNKNOWN",
-                    status_code=504,
-                    result_payload_json=execution_result_payload,
-                    duration_ms=0,
-                    executed_at=datetime.now(timezone.utc),
-                )
-            except Exception as exc:
-                logger.exception("Tool execution failed for tool '%s': %s", body.tool_name, exc)
-                execution_status = ExecutionStatus.FAILED.value
-                execution_result_payload = {"error": "Tool execution exception occurred."}
-                execution_entity = ToolExecutionEntity(
-                    id=str(uuid.uuid4()),
-                    tenant_id=tenant_id,
-                    proposal_id=proposal_id,
-                    decision_id=decision_id,
-                    status="FAILED",
-                    status_code=500,
-                    result_payload_json=execution_result_payload,
-                    duration_ms=0,
-                    executed_at=datetime.now(timezone.utc),
-                )
+        # Persisted ALLOW that the guard refused before dispatch (revalidation / replay / control).
+        abort_exec = ToolExecutionEntity(
+            id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            proposal_id=proposal_id,
+            decision_id=decision.decision_id,
+            status="BLOCKED_BY_TOCTOU",
+            status_code=403,
+            result_payload_json={"error": "Pre-execution security revalidation refused dispatch.",
+                                 "reason_codes": codes},
+            duration_ms=0,
+            executed_at=datetime.now(timezone.utc),
+        )
+        await gateway_repo.record_execution_outcome(
+            tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
+            execution=abort_exec, execution_status=ExecutionStatus.NOT_EXECUTED.value,
+        )
+        return response(GatewayDecision.BLOCK.value, ExecutionStatus.NOT_EXECUTED.value, codes)
 
-            # Record final execution outcome
-            await gateway_repo.record_execution_outcome(
-                tenant_id=tenant_id,
-                proposal_id=proposal_id,
-                decision_id=decision_id,
-                execution=execution_entity,
-                execution_status=execution_status,
-            )
-
-    # 10. Return Canonical Action Proposal Response
-    return ActionProposalResponse(
-        action_id=body.action_id,
-        proposal_id=proposal_id,
-        decision=policy_output.decision.value,
-        memory_trust=policy_output.memory_trust.value,
-        policy_result=policy_output.policy_result.value,
-        reasons=policy_output.reasons,
-        execution_status=execution_status,
-        result=execution_result_payload,
+    # 8. Adapter was invoked: record the honest outcome (a timeout is UNKNOWN, never success).
+    if outcome.status == "EXECUTED" and isinstance(outcome.result, ToolExecutionResult):
+        exec_res = outcome.result
+        execution_status = ExecutionStatus.EXECUTED.value
+        result_payload = exec_res.result_payload
+        execution_entity = ToolExecutionEntity(
+            id=str(uuid.uuid4()), tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
+            status=exec_res.status, status_code=exec_res.status_code, result_payload_json=exec_res.result_payload,
+            duration_ms=exec_res.duration_ms, executed_at=datetime.now(timezone.utc),
+        )
+    elif outcome.status == "UNKNOWN":
+        execution_status = ExecutionStatus.UNKNOWN.value
+        result_payload = {"error": "Tool execution timed out. Outcome is ambiguous and requires reconciliation."}
+        execution_entity = ToolExecutionEntity(
+            id=str(uuid.uuid4()), tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
+            status="UNKNOWN", status_code=504, result_payload_json=result_payload, duration_ms=0,
+            executed_at=datetime.now(timezone.utc),
+        )
+    else:
+        execution_status = ExecutionStatus.FAILED.value
+        result_payload = {"error": "Tool execution exception occurred."}
+        execution_entity = ToolExecutionEntity(
+            id=str(uuid.uuid4()), tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
+            status="FAILED", status_code=500, result_payload_json=result_payload, duration_ms=0,
+            executed_at=datetime.now(timezone.utc),
+        )
+    await gateway_repo.record_execution_outcome(
+        tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
+        execution=execution_entity, execution_status=execution_status,
     )
+    return response(record["decision"], execution_status, list(outcome.reason_codes), result_payload)
 
 
 @router.get(

@@ -9,9 +9,9 @@ M1 routes must obtain M4 services from here instead of constructing their own lo
   repository. Sharing matters: its per-record lock (M4-F5) only serialises transitions that go
   through the same instance.
 - ``get_quarantine_workflow(app_state, memory_repo)``: the authoritative ``QuarantineWorkflow``.
-- ``get_policy_engine(app_state, memory_repo)`` / ``get_execution_guard(...)``: the authoritative
-  ``PolicyEngine`` and ``ProtectedExecutionGuard`` (one per trust evaluator, so the execution
-  ledger and issued-grant registry are shared across requests).
+- ``get_gateway_enforcement(app_state, memory_repo, agent_repo, tool_registry)``: the authoritative
+  ``PolicyEngine`` and ``ProtectedExecutionGuard`` for the gateway, cached so the execution ledger
+  and issued-grant registry (M4-F1) are shared across requests.
 
 The trust decision store comes from ``app_state.trust_decision_store``. When it is absent, an
 in-memory store is created; ``TrustEvaluator`` itself refuses a non-durable store outside
@@ -25,7 +25,7 @@ import threading
 from typing import Any, Optional
 
 from backend.app.core.exceptions import SecurityDependencyError
-from backend.app.security.policy import PolicyEngine, ProtectedExecutionGuard
+from backend.app.security.policy import PolicyEngine, ProtectedExecutionGuard, ToolGrant
 from backend.app.security.quarantine import QuarantineWorkflow
 from backend.app.security.trust import InMemoryTrustDecisionStore, TrustEvaluator
 
@@ -55,8 +55,6 @@ def get_trust_evaluator(app_state: Any, memory_repo: Any) -> TrustEvaluator:
             # A non-durable trust store/repository outside development/test: refuse, never degrade.
             raise SecurityDependencyError("Durable trust decision persistence is not configured.") from exc
         app_state.trust_evaluator = evaluator
-        app_state.policy_engine = None          # bound to the previous evaluator
-        app_state.execution_guard = None
         return evaluator
 
 
@@ -64,22 +62,63 @@ def get_quarantine_workflow(app_state: Any, memory_repo: Any) -> QuarantineWorkf
     return QuarantineWorkflow(get_trust_evaluator(app_state, memory_repo), memory_repo)
 
 
-def get_policy_engine(app_state: Any, memory_repo: Any, tool_grants: Any) -> PolicyEngine:
+class AgentRegistryDirectory:
+    """M4 ``AgentDirectory`` port over M1's agent registry (``get_agent_by_id``, async)."""
+
+    def __init__(self, agent_repo: Any) -> None:
+        self._repo = agent_repo
+
+    async def get_agent(self, agent_id: str, tenant_id: str) -> Any:
+        return await self._repo.get_agent_by_id(agent_id, tenant_id)
+
+
+class AgentRegistryToolGrants:
+    """M4 ``ToolGrantDirectory`` port over M1's agent registry and tool adapter registry.
+
+    Permission records (``agent_repo.get_agent_tool_permissions``) must be mappings with
+    ``tool_name``, ``allowed_operations`` (list of operation names) and optional ``constraints``
+    (M4 keys: ``max_*``, ``min_*``, ``approval_threshold_*``, ``allowed_*``). No record, or a
+    malformed one, means no grant: the engine blocks with TOOL_NOT_ASSIGNED (fail closed). A tool
+    without a server-side adapter is reported as not registered.
+    """
+
+    def __init__(self, agent_repo: Any, tool_registry: Any) -> None:
+        self._repo, self._tools = agent_repo, tool_registry
+
+    async def get_tool_grant(self, tenant_id: str, agent_id: str, tool_name: str) -> Optional[ToolGrant]:
+        permissions = await self._repo.get_agent_tool_permissions(agent_id, tenant_id)
+        for perm in permissions or ():
+            if not isinstance(perm, dict) or perm.get("tool_name") != tool_name:
+                continue
+            ops = perm.get("allowed_operations")
+            constraints = perm.get("constraints") or {}
+            if not isinstance(ops, (list, tuple)) or not isinstance(constraints, dict):
+                return None
+            registered = bool(self._tools is not None and self._tools.get_adapter(tool_name) is not None)
+            return ToolGrant(tool_name=tool_name, allowed_operations=tuple(ops), constraints=dict(constraints),
+                             tool_registered=registered)
+        return None
+
+
+def get_gateway_enforcement(app_state: Any, memory_repo: Any, agent_repo: Any,
+                            tool_registry: Any) -> "tuple[PolicyEngine, ProtectedExecutionGuard]":
+    """The authoritative engine and guard for the M1 gateway, cached per (memory, agents, tools).
+
+    Caching keeps M4's issued-grant registry and execution ledger (M4-F1) across requests.
+    """
+    if agent_repo is None:
+        raise SecurityDependencyError("Agent registry is not configured.")
     trust = get_trust_evaluator(app_state, memory_repo)
+    key = (id(trust), id(agent_repo), id(tool_registry))
     with _lock:
-        engine = getattr(app_state, "policy_engine", None)
-        if isinstance(engine, PolicyEngine) and getattr(app_state, "_policy_engine_grants", None) is tool_grants:
-            return engine
-        engine = PolicyEngine(trust, memory_repo, tool_grants)
-        app_state.policy_engine = engine
-        app_state._policy_engine_grants = tool_grants
-        app_state.execution_guard = ProtectedExecutionGuard(engine)
-        return engine
+        cached = getattr(app_state, "_gateway_enforcement", None)
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        engine = PolicyEngine(trust, AgentRegistryDirectory(agent_repo), AgentRegistryToolGrants(agent_repo, tool_registry))
+        guard = ProtectedExecutionGuard(engine)
+        app_state._gateway_enforcement = (key, engine, guard)
+        return engine, guard
 
 
-def get_execution_guard(app_state: Any, memory_repo: Any, tool_grants: Any) -> ProtectedExecutionGuard:
-    get_policy_engine(app_state, memory_repo, tool_grants)
-    return app_state.execution_guard
-
-
-__all__ = ["get_execution_guard", "get_policy_engine", "get_quarantine_workflow", "get_trust_evaluator"]
+__all__ = ["AgentRegistryDirectory", "AgentRegistryToolGrants", "get_gateway_enforcement",
+           "get_quarantine_workflow", "get_trust_evaluator"]
