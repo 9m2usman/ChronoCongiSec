@@ -33,6 +33,7 @@ class TenantContext:
     """Immutable, request-scoped tenant execution context.
 
     Bound per-request to prevent context leakage across concurrent requests.
+    Includes trusted branch_id resolved from persistent membership (GAP-028).
     """
     tenant_id: str
     tenant_slug: str
@@ -40,6 +41,7 @@ class TenantContext:
     user_id: str
     role: str
     is_active: bool = True
+    branch_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class MembershipRecord:
     user_id: str
     role: str
     status: str = "ACTIVE"
+    branch_id: Optional[str] = None
 
 
 # ============================================================================
@@ -266,10 +269,41 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
         full_name="Iris InactiveMembership",
         status="ACTIVE",
     )
+    u_dev_a = UserRecord(
+        id="user-a-dev-009",
+        email="developer@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Dave Developer",
+        status="ACTIVE",
+    )
+    u_dev_b = UserRecord(
+        id="user-b-dev-010",
+        email="developer@company-b.com",
+        hashed_password=seed_hash,
+        full_name="Diana Developer",
+        status="ACTIVE",
+    )
+    # Branch-specific users for trusted branch authorization testing (GAP-028)
+    u_branch_karachi = UserRecord(
+        id="user-a-branch-karachi-011",
+        email="karachi-dev@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Khalid Karachi",
+        status="ACTIVE",
+    )
+    u_branch_lahore = UserRecord(
+        id="user-a-branch-lahore-012",
+        email="lahore-dev@company-a.com",
+        hashed_password=seed_hash,
+        full_name="Laila Lahore",
+        status="ACTIVE",
+    )
 
     for u in [
         u_analyst_a, u_admin_a, u_analyst_b, u_analyst_c, u_inactive,
         u_revoked_mem, u_suspended_mem, u_inactive_mem,
+        u_dev_a, u_dev_b,
+        u_branch_karachi, u_branch_lahore,
     ]:
         repo.add_user(u)
 
@@ -344,6 +378,45 @@ def seed_demo_accounts(repo: InMemoryAuthRepository) -> InMemoryAuthRepository:
             user_id=u_inactive_mem.id,
             role="SECURITY_ANALYST",
             status="INACTIVE",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-009",
+            tenant_id=t_a.id,
+            user_id=u_dev_a.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-010",
+            tenant_id=t_b.id,
+            user_id=u_dev_b.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
+        )
+    )
+    # Branch-scoped memberships for branch authorization testing (GAP-028)
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-011",
+            tenant_id=t_a.id,
+            user_id=u_branch_karachi.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
+            branch_id="branch-karachi-99",
+        )
+    )
+    repo.add_membership(
+        MembershipRecord(
+            id="mem-012",
+            tenant_id=t_a.id,
+            user_id=u_branch_lahore.id,
+            role="AI_DEVELOPER",
+            status="ACTIVE",
+            branch_id="branch-lahore-88",
         )
     )
     return repo
@@ -436,6 +509,21 @@ async def resolve_tenant_context_from_request(
                 "Cross-tenant access forbidden: X-Tenant-ID does not match authorized token tenant."
             )
 
+    # Token and session revocation check (GAP-007 / Finding B)
+    revocation_store = getattr(request.app.state, "revocation_store", None)
+    if revocation_store is not None:
+        jti = payload.get("jti")
+        iat = payload.get("iat", 0)
+        try:
+            if jti and await revocation_store.is_token_revoked(jti):
+                raise AuthenticationError("Authentication token has been revoked.")
+            if user_id and token_tenant_id and await revocation_store.is_user_revoked(user_id, token_tenant_id, iat):
+                raise AuthenticationError("User session has been revoked.")
+        except AuthenticationError:
+            raise
+        except Exception as exc:
+            raise SecurityDependencyError("Revocation verification service is unavailable.") from exc
+
     # Re-verify against database repository
     repository = repo or getattr(request.app.state, "auth_repo", None)
     if repository is None:
@@ -482,6 +570,11 @@ async def resolve_tenant_context_from_request(
     if mem_status is None or str(mem_status).strip().upper() != "ACTIVE":
         raise TenantAccessForbiddenError("User is not an active member of the requested tenant.")
 
+    # Resolve trusted branch membership (GAP-028 / Finding E)
+    branch_id = getattr(membership, "branch_id", None)
+    if branch_id is not None:
+        branch_id = str(branch_id).strip() or None
+
     # Return immutable request-scoped context
     return TenantContext(
         tenant_id=tenant.id,
@@ -490,4 +583,5 @@ async def resolve_tenant_context_from_request(
         user_id=user.id,
         role=membership.role,
         is_active=True,
+        branch_id=branch_id,
     )

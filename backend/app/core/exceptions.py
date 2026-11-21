@@ -9,11 +9,13 @@ Follows:
 """
 
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Union
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger("amsc.exceptions")
@@ -195,6 +197,76 @@ SAFE_PUBLIC_MESSAGES: Dict[str, str] = {
 
 DEFAULT_SAFE_PUBLIC_MESSAGE = "An application error occurred. The incident has been recorded."
 
+# Explicit allowlist for HTTP protocol response headers
+SAFE_PROTOCOL_HEADERS = {"www-authenticate", "allow", "retry-after"}
+
+
+def sanitize_details(details: Any) -> Any:
+    """Recursively scrub sensitive keys and credential patterns from error details."""
+    if details is None:
+        return None
+    sensitive_markers = ("password", "token", "secret", "api_key", "api-key", "authorization", "bearer", "credential", "priv_key")
+    if isinstance(details, dict):
+        sanitized = {}
+        for k, v in details.items():
+            k_lower = str(k).lower()
+            if any(marker in k_lower for marker in sensitive_markers):
+                sanitized[k] = "[REDACTED]"
+            else:
+                sanitized[k] = sanitize_details(v)
+        return sanitized
+    elif isinstance(details, (list, tuple)):
+        return [sanitize_details(item) for item in details]
+    elif isinstance(details, str):
+        lower = details.lower()
+        if any(marker in lower for marker in sensitive_markers):
+            return "[REDACTED]"
+        return details
+    return details
+
+
+# --- OpenAPI Reusable Error Response Schemas ---
+
+class ErrorDetail(BaseModel):
+    """Canonical error payload matching AMSC-DOC-005 Section 7."""
+
+    code: str = Field(
+        description="Stable machine-readable error code",
+        examples=["POLICY_EVALUATION_DENIED"],
+    )
+    message: str = Field(
+        description="Sanitized human-readable error description",
+        examples=["The proposed action was blocked by security policy."],
+    )
+    request_id: str = Field(
+        description="Correlation identifier for request tracing",
+        examples=["req-991204"],
+    )
+    details: Optional[Union[Dict[str, Any], List[Any], str]] = Field(
+        default=None,
+        description="Optional sanitized error details (e.g. validation error list)",
+    )
+
+
+class ErrorResponse(BaseModel):
+    """Canonical error response envelope matching AMSC-DOC-005 Section 7."""
+
+    error: ErrorDetail = Field(description="Standardized error body")
+
+
+API_ERROR_RESPONSES: Dict[int | str, Dict[str, Any]] = {
+    400: {"model": ErrorResponse, "description": "Bad Request: Schema validation failed or malformed parameters."},
+    401: {"model": ErrorResponse, "description": "Unauthorized: Missing, invalid, or expired Bearer authentication token."},
+    403: {"model": ErrorResponse, "description": "Forbidden: Tenant boundary violation, insufficient role, or blocked by security policy."},
+    404: {"model": ErrorResponse, "description": "Not Found: The requested resource does not exist within the tenant scope."},
+    405: {"model": ErrorResponse, "description": "Method Not Allowed: The HTTP method is not supported for this endpoint."},
+    409: {"model": ErrorResponse, "description": "Conflict: Resource conflict, duplicate proposal, or idempotency fingerprint mismatch."},
+    422: {"model": ErrorResponse, "description": "Unprocessable Content: Semantic validation or parameter constraint violation."},
+    429: {"model": ErrorResponse, "description": "Too Many Requests: Rate limit exceeded for IP, account, or tenant."},
+    500: {"model": ErrorResponse, "description": "Internal Server Error: Unexpected internal server failure (generic sanitized response)."},
+    503: {"model": ErrorResponse, "description": "Service Unavailable: Mandatory security verification or database service offline."},
+}
+
 
 # --- Helper: Build Canonical Error Envelope & Headers ---
 
@@ -236,7 +308,6 @@ def get_trace_context(request: Request) -> tuple[str, Optional[str]]:
             or request.headers.get("x-correlation-id")
         )
         if raw_req:
-            import re
             if re.match(r"^[a-zA-Z0-9_\-\.]{1,128}$", str(raw_req).strip()):
                 req_id = str(raw_req).strip()
         if not req_id:
@@ -246,7 +317,6 @@ def get_trace_context(request: Request) -> tuple[str, Optional[str]]:
     if not trace_id:
         raw_trace = request.headers.get("x-trace-id") or request.headers.get("x-correlation-id")
         if raw_trace:
-            import re
             if re.match(r"^[a-zA-Z0-9_\-\.]{1,128}$", str(raw_trace).strip()):
                 trace_id = str(raw_trace).strip()
 
@@ -274,27 +344,30 @@ async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONRe
     """Handler for domain-specific AMSCException instances.
 
     Strictly returns allowlisted public error messages. Never exposes arbitrary exc.message or exc.details to clients.
+    Logs safe event code, HTTP status, and correlation metadata without appending raw exception message text.
     """
     req_id, _ = get_trace_context(request)
     headers = build_response_headers(request, req_id)
 
-    # Attach Retry-After header if present on the exception (e.g. for rate limiting)
+    # Attach validated Retry-After header if present on the exception (e.g. for rate limiting)
     retry_after = getattr(exc, "retry_after", None)
     if retry_after is not None:
-        headers["Retry-After"] = str(retry_after)
+        val_str = str(retry_after).strip()
+        if re.match(r"^\d{1,6}$", val_str):
+            headers["Retry-After"] = val_str
 
-    # Internal diagnostic logging preserves detailed exception message in redacted logs
+    # Production-safe logging: log safe event code and correlation ID without echoing raw exception message text
     logger.warning(
-        f"Domain exception [{exc.code}] HTTP {exc.status_code} for {request.method} {request.url.path} (request_id={req_id}): {exc.message}"
+        f"Domain exception [{exc.code}] HTTP {exc.status_code} for {request.method} {request.url.path} (request_id={req_id})"
     )
 
     # Strict allowlist mapping
     safe_message = SAFE_PUBLIC_MESSAGES.get(exc.code, DEFAULT_SAFE_PUBLIC_MESSAGE)
 
-    # Strictly disallow arbitrary details to leak
+    # Strictly disallow arbitrary or unredacted details to leak
     safe_details = None
     if exc.code == "VALIDATION_ERROR" and isinstance(exc.details, dict):
-        safe_details = exc.details
+        safe_details = sanitize_details(exc.details)
 
     envelope = build_error_envelope(
         code=exc.code,
@@ -305,13 +378,50 @@ async def amsc_exception_handler(request: Request, exc: AMSCException) -> JSONRe
     return JSONResponse(status_code=exc.status_code, content=envelope, headers=headers)
 
 
+def sanitize_validation_message(msg: str, input_val: Any = None) -> str:
+    """Ensure validation error message does not reflect raw sensitive inputs or credentials."""
+    sanitized = msg
+    if input_val is not None:
+        if isinstance(input_val, (str, int, float)):
+            s_input = str(input_val)
+            if s_input and len(s_input) >= 3 and s_input in sanitized:
+                sanitized = sanitized.replace(s_input, "[REDACTED]")
+        elif isinstance(input_val, (dict, list)):
+            s_input = str(input_val)
+            if s_input in sanitized:
+                sanitized = sanitized.replace(s_input, "[REDACTED]")
+
+    lower = sanitized.lower()
+    sensitive_markers = ["password", "token", "secret", "api_key", "bearer", "authorization"]
+    if any(marker in lower for marker in sensitive_markers):
+        if "'" in sanitized or '"' in sanitized:
+            sanitized = re.sub(r"['\"][^'\"]*['\"]", "'[REDACTED]'", sanitized)
+        # Redact unquoted credentials following key: value patterns
+        sanitized = re.sub(r"(?i)\b(password|token|secret|api[_-]?key|bearer|authorization)\s*[:=]\s*\S+", r"\1: [REDACTED]", sanitized)
+    return sanitized
+
+
 async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """Handler for Starlette/FastAPI HTTPException instances.
 
     Strictly maps HTTP status codes to allowlisted error codes and safe messages. Never exposes arbitrary exc.detail.
+    Preserves allowlisted protocol headers (WWW-Authenticate, Allow, Retry-After).
     """
     req_id, _ = get_trace_context(request)
     headers = build_response_headers(request, req_id)
+
+    # Safely copy explicitly allowlisted protocol headers only
+    if getattr(exc, "headers", None):
+        for k, v in exc.headers.items():
+            k_lower = k.lower()
+            if k_lower in SAFE_PROTOCOL_HEADERS:
+                val = str(v).strip()
+                if k_lower == "retry-after":
+                    if re.match(r"^\d{1,6}$", val):
+                        headers[k] = val
+                else:
+                    # Scrub CR/LF from any header values to prevent header injection
+                    headers[k] = val.replace("\r", "").replace("\n", "")
 
     # Map common status codes to standardized codes
     code_map = {
@@ -329,7 +439,7 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
     error_code = code_map.get(exc.status_code, f"HTTP_{exc.status_code}")
 
     logger.warning(
-        f"HTTP error [{error_code}] status {exc.status_code} for {request.method} {request.url.path} (request_id={req_id}): {exc.detail}"
+        f"HTTP error [{error_code}] status {exc.status_code} for {request.method} {request.url.path} (request_id={req_id})"
     )
 
     safe_msg = SAFE_PUBLIC_MESSAGES.get(error_code, DEFAULT_SAFE_PUBLIC_MESSAGE)
@@ -347,21 +457,22 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     """Handler for Pydantic schema validation failures.
 
     Returns HTTP 400 Bad Request matching AMSC-DOC-005 Section 7.
+    Sanitizes field locations, stable error codes, and messages; strictly prevents raw input reflection.
     """
     req_id, _ = get_trace_context(request)
     headers = build_response_headers(request, req_id)
 
-    # Sanitize and simplify error entries to avoid exposing sensitive internal details
+    # Sanitize and simplify error entries to avoid exposing sensitive internal details or reflected credentials
     sanitized_errors = []
     for err in exc.errors():
         sanitized_errors.append({
             "loc": [str(loc) for loc in err.get("loc", [])],
-            "msg": err.get("msg", "Invalid value"),
-            "type": err.get("type", "value_error"),
+            "msg": sanitize_validation_message(err.get("msg", "Invalid value"), err.get("input")),
+            "type": str(err.get("type", "value_error")),
         })
 
     logger.info(
-        f"Validation error for {request.method} {request.url.path} (request_id={req_id}): {sanitized_errors}"
+        f"Validation error for {request.method} {request.url.path} (request_id={req_id}): {len(sanitized_errors)} field error(s)"
     )
 
     envelope = build_error_envelope(
@@ -378,22 +489,40 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
     CRITICAL SECURITY INVARIANT:
     Never expose Python tracebacks, internal file system paths, or infrastructure
-    credentials to API clients. Always log full error server-side and return safe generic message.
+    credentials to API clients. Always log safe structured error server-side and return safe generic message.
+    The exception handler itself must never fail.
     """
-    req_id, _ = get_trace_context(request)
-    headers = build_response_headers(request, req_id)
+    try:
+        req_id, _ = get_trace_context(request)
+        headers = build_response_headers(request, req_id)
+        exc_class = exc.__class__.__name__
 
-    logger.exception(
-        f"Unhandled server error on {request.method} {request.url.path} (request_id={req_id}): {exc}"
-    )
+        # Production-safe logging: log structured error without raw traceback or raw exception text
+        logger.error(
+            f"Unhandled server error [{exc_class}] on {request.method} {request.url.path} (request_id={req_id})",
+            exc_info=False,
+        )
 
-    envelope = build_error_envelope(
-        code="INTERNAL_SERVER_ERROR",
-        message="An unexpected server error occurred. The incident has been recorded.",
-        request_id=req_id,
-        details=None,
-    )
-    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=envelope, headers=headers)
+        envelope = build_error_envelope(
+            code="INTERNAL_SERVER_ERROR",
+            message="An unexpected server error occurred. The incident has been recorded.",
+            request_id=req_id,
+            details=None,
+        )
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=envelope, headers=headers)
+    except Exception:
+        # Emergency fail-closed static response to guarantee the handler itself never crashes ASGI
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": "An unexpected server error occurred. The incident has been recorded.",
+                    "request_id": f"req-{uuid.uuid4().hex[:8]}",
+                    "details": None,
+                }
+            },
+        )
 
 
 def register_exception_handlers(app: FastAPI) -> None:

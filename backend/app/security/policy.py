@@ -1239,3 +1239,19 @@ def _number(value: Any) -> Optional[Decimal]:
     if not number.is_finite():
         return None
     return number
+
+
+# --- Compatibility exports for M1 / gateway callers ---
+def _load_gateway_compat():
+    try:
+        from backend.app.api.gateway import (
+            DeterministicPolicyEvaluator as _DPE,
+            GatewayDecision as _GD,
+            PolicyEvaluationInput as _PEI,
+        )
+        return _DPE, _GD, _PEI
+    except Exception:
+        return None, None, None
+
+DeterministicPolicyEvaluator, GatewayDecision, PolicyEvaluationInput = _load_gateway_compat()
+

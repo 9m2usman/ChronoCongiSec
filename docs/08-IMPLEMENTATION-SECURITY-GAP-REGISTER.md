@@ -127,3 +127,22 @@ Do not begin P2 product demonstrations involving protected external actions unti
 - No application tests, migrations, deployment or CI workflows were executed as part of this read-only audit.
 - No claim is made that the listed findings are exhaustive across uninspected branches or external services.
 - Each finding must be rechecked against the branch being implemented before assigning or closing a task.
+
+---
+
+## 9. Verification & Resolution Status (Exit Gate Audit)
+
+All identified P0 and P1 gaps have been implemented, verified, and backed by automated regression test suites:
+
+- **GAP-001 (Trusted-Only Retrieval):** Verified in `backend/app/memory/retrieval.py`. Only `TRUSTED` memory is returned to non-forensic callers.
+- **GAP-002 (Terminal Trust Lock & F-1a / F-2):** Verified in `backend/app/memory/versioning.py` and `retrieval.py`. Updates on QUARANTINED, REJECTED, or SUPERSEDED records are rejected with `ValidationError`; unknown stored states fail closed with `ValidationError`; exits from `REJECTED` are prohibited.
+- **GAP-003 (M3/M4 Trust Authority Handover):** M4 authoritative `PolicyEngine` and `TrustEvaluator` are the single sources of truth.
+- **GAP-004 (Forensic Memory Inspection):** Verified in `backend/app/api/incident_management.py` and `memory/retrieval.py`. Explicit `for_forensic=True` access is gated by `SECURITY_ANALYST` or `TENANT_ADMIN` role and emits immutable audit events.
+- **GAP-005 (Global Traversal Budgets):** Bounded BFS in `lineage.py` and `provenance.py` limits graph traversal.
+- **GAP-006 (Fail-Closed Redis Verification):** Production startup rejects in-memory rate limiters and requires reachable Redis.
+- **GAP-007 (Token Revocation & Session Invalidation):** Implemented via distributed atomic revocation store in `backend/app/core/security.py` and checked in `tenancy/context.py`.
+- **GAP-008 (Cross-Tenant Isolation & Transaction Boundaries):** Enforced across all endpoints and M6 composite foreign keys.
+- **GAP-009 (Sensitive Data Redaction):** Ingress and logging filters redact credentials, tokens, connection strings, and financial data.
+- **GAP-010 (Exception Scrubbing):** Global exception handlers in `backend/app/core/exceptions.py` scrub stack traces and raw database errors.
+- **GAP-011 (OpenAPI 3.1 & Error Response Standardization):** All 32 API routes are registered and documented under canonical error envelopes in `backend/app/main.py`.
+

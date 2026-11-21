@@ -69,8 +69,10 @@ def update_memory(
     elif record_state == TrustState.SUSPICIOUS.value:
         next_trust_state = TrustState.SUSPICIOUS.value
     else:
-        # Fallback safeguard: default to UNVERIFIED
-        next_trust_state = TrustState.UNVERIFIED.value
+        # F-1a: Refuse updates if stored trust state is unrecognized/unknown (fail closed)
+        raise ValidationError(
+            f"Cannot update memory record '{record_id}' with invalid or unknown trust state '{record_state}'."
+        )
 
     now = datetime.now(timezone.utc)
     new_version_num = record.current_version + 1

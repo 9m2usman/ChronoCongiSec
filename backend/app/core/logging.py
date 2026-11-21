@@ -8,9 +8,10 @@ Follows:
 - Master Prompt Section 9.6: Logging Security (No secrets, passwords, or complete tokens)
 """
 
+import json
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 
 # Regular expressions for identifying sensitive data in log streams
@@ -29,6 +30,11 @@ SENSITIVE_PATTERNS = [
     (re.compile(r"((?:password|passwd|hashed_password|current_password|new_password|client_secret|secret_key|api[_-]?key|access_token|refresh_token|private_key)['\"]?\s*[:=]\s*)(?!['\"])[^\s,;}{)\]&]+", re.IGNORECASE), r"\1[REDACTED]"),
     # Query / URL parameters with passwords, tokens, or keys
     (re.compile(r"((?:token|secret|password|passwd|api[_-]?key|client[_-]?secret)\s*=\s*)[^\s&]+", re.IGNORECASE), r"\1[REDACTED]"),
+    # Private cryptographic keys (PEM format)
+    (re.compile(r"-----BEGIN\s+[A-Z\s]+PRIVATE\s+KEY-----[\s\S]*?-----END\s+[A-Z\s]+PRIVATE\s+KEY-----", re.IGNORECASE), "[PRIVATE_KEY_REDACTED]"),
+    # Sensitive prompt disclosures in logs
+    (re.compile(r"((?:system_prompt|prompt)['\"]?\s*[:=]\s*['\"])(?:\\.|[^'\"])*(['\"])", re.IGNORECASE), r"\1[PROMPT_REDACTED]\2"),
+    (re.compile(r"((?:system_prompt|prompt)['\"]?\s*[:=]\s*)(?!['\"])[^\s,;}{)\]&]+", re.IGNORECASE), r"\1[PROMPT_REDACTED]"),
 ]
 
 
@@ -73,11 +79,55 @@ class RedactingFormatter(logging.Formatter):
         return SensitiveDataFilter.redact(s)
 
 
-def setup_logging(log_level: str = "INFO") -> logging.Logger:
+class StructuredJsonFormatter(logging.Formatter):
+    """Structured allowlisted JSON log formatter (Finding G / GAP-034).
+
+    Strictly logs allowlisted safe fields: timestamp, level, logger, message,
+    correlation_id, event_id, error_category, tenant_id, record_id.
+    Prevents raw tracebacks, unvetted extras, secrets, tokens, and sensitive memory from leaking.
+    """
+    ALLOWLISTED_FIELDS = {
+        "event_id",
+        "error_category",
+        "correlation_id",
+        "tenant_id",
+        "record_id",
+        "span_id",
+        "service",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        base_msg = record.getMessage()
+        sanitized_msg = SensitiveDataFilter.redact(base_msg)
+
+        payload: dict[str, Any] = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%SZ"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": sanitized_msg,
+        }
+
+        # Include allowlisted structured extras
+        for field in self.ALLOWLISTED_FIELDS:
+            val = getattr(record, field, None)
+            if val is not None:
+                payload[field] = SensitiveDataFilter.redact(str(val))
+
+        # Include safe sanitized exception summary if present (never raw dump)
+        if record.exc_info and record.exc_info[0]:
+            payload["exception_class"] = record.exc_info[0].__name__
+            if record.exc_info[1]:
+                payload["error_summary"] = SensitiveDataFilter.redact(str(record.exc_info[1]))
+
+        return json.dumps(payload)
+
+
+def setup_logging(log_level: str = "INFO", structured_json: bool = False) -> logging.Logger:
     """Configure centralized application logger.
 
     Args:
         log_level: Logging level name ('DEBUG', 'INFO', 'WARNING', 'ERROR')
+        structured_json: Flag to format output as structured allowlisted JSON (Finding G)
 
     Returns:
         Configured logger instance.
@@ -87,10 +137,13 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
-    formatter = RedactingFormatter(
-        fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    if structured_json:
+        formatter: logging.Formatter = StructuredJsonFormatter()
+    else:
+        formatter = RedactingFormatter(
+            fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
     data_filter = SensitiveDataFilter()
 
     # Avoid duplicate handlers if setup_logging is called multiple times

@@ -917,8 +917,8 @@ def test_gap_004_detail_hidden_for_non_trusted_evaluator_states(h, state):
 # Known M3 bypasses outside M4 ownership (tracked; strict xfail flips when fixed)
 # =============================================================================
 
-@pytest.mark.xfail(strict=True, reason="F-2: M3 transition_memory_trust_state does not delegate to the M4 evaluator yet")
 def test_m3_direct_transition_path_enforces_matrix(h):
+    """F-2 regression (fixed): direct trust transition path enforces matrix and refuses exits from REJECTED."""
     rid = h.drive(R)
     with pytest.raises(Exception):
         transition_memory_trust_state(T_A, rid, "TRUSTED", repository=h.repo)
@@ -938,9 +938,8 @@ def test_m3_update_refused_for_quarantined_record(h, state):
     assert rid not in [r.id for r in retrieve_memory(T_A, repository=h.repo)]
 
 
-@pytest.mark.xfail(strict=True, reason="F-1a (M3): update_memory maps an unknown stored trust state to "
-                                       "UNVERIFIED (versioning.py fallback) instead of refusing it")
 def test_m3_update_refused_for_unknown_stored_state(h):
+    """F-1a regression (fixed): update_memory refuses records with unknown stored trust state (fails closed)."""
     rid = h.new()
     h.repo._records[rid].trust_state = "MOSTLY_TRUSTED"
     with pytest.raises(ValidationError):
