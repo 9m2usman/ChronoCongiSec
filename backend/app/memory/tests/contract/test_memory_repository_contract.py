@@ -14,6 +14,7 @@ refusal, and production guards.
 """
 
 from datetime import datetime, timezone
+import asyncio
 import os
 from unittest.mock import AsyncMock
 import pytest
@@ -73,9 +74,9 @@ async def contract_repo(request):
             pytest.skip("TEST_DATABASE_URL not set")
 
         from backend.tests.database import helpers
-        db_name = helpers.create_temp_database()
+        db_name = await asyncio.to_thread(helpers.create_temp_database)
         try:
-            helpers.upgrade(db_name, "head")
+            await asyncio.to_thread(helpers.upgrade, db_name, "head")
             engine = create_async_engine(helpers.sqlalchemy_url(db_name), poolclass=NullPool)
             async with engine.connect() as conn:
                 outer = await conn.begin()
@@ -87,7 +88,7 @@ async def contract_repo(request):
                 await outer.rollback()
             await engine.dispose()
         finally:
-            helpers.drop_temp_database(db_name)
+            await asyncio.to_thread(helpers.drop_temp_database, db_name)
 
 
 # --- Contract Test Cases ---
