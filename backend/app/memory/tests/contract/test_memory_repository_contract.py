@@ -14,25 +14,19 @@ refusal, and production guards.
 """
 
 from datetime import datetime, timezone
+import asyncio
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
+from backend.app.database.models.identity import Tenant
 
-from backend.app.database.models.agents import Agent as OrmAgent
-from backend.app.database.models.memory import (
-    MemoryRecord as OrmMemoryRecord,
-    MemoryVersion as OrmMemoryVersion,
-    ProvenanceEdge as OrmProvenanceEdge,
-    Source as OrmSource,
-)
 from backend.app.database.repositories.base import TenantScopeError
 from backend.app.memory.adapters import (
     SqlAlchemyMemoryRepository,
-    sanitize_integrity_error,
     to_orm_agent,
     to_orm_memory_record,
     to_orm_memory_version,
@@ -54,7 +48,7 @@ from backend.app.memory.models import (
     SourceRecord,
     TrustState,
 )
-from backend.app.memory.repository import InMemoryMemoryRepository, MemoryRepository
+from backend.app.memory.repository import InMemoryMemoryRepository
 
 VALID_CHECKSUM = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 VALID_CHECKSUM_2 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -81,21 +75,32 @@ async def contract_repo(request):
             pytest.skip("TEST_DATABASE_URL not set")
 
         from backend.tests.database import helpers
-        db_name = helpers.create_temp_database()
+        db_name = await asyncio.to_thread(helpers.create_temp_database)
         try:
-            helpers.upgrade(db_name, "head")
+            await asyncio.to_thread(helpers.upgrade, db_name, "head")
             engine = create_async_engine(helpers.sqlalchemy_url(db_name), poolclass=NullPool)
             async with engine.connect() as conn:
                 outer = await conn.begin()
                 async with AsyncSession(
                     bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint"
                 ) as session:
+                    # The memory tables enforce tenant_id -> tenants.id. Seed the
+                    # parent tenant in this isolated database before exercising the
+                    # tenant-scoped repository contract.
+                    session.add(
+                        Tenant(
+                            id=tenant_id,
+                            name="Memory Repository Contract Tenant",
+                            slug="memory-repository-contract",
+                        )
+                    )
+                    await session.flush()
                     repo = SqlAlchemyMemoryRepository(session=session, tenant_id=tenant_id)
                     yield repo, tenant_id
                 await outer.rollback()
             await engine.dispose()
         finally:
-            helpers.drop_temp_database(db_name)
+            await asyncio.to_thread(helpers.drop_temp_database, db_name)
 
 
 # --- Contract Test Cases ---

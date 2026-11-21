@@ -1,0 +1,17 @@
+# Backend lint configuration (used by CI: `ruff check backend/app`).
+#
+# Without a config, CI inherited whatever the newest ruff release enables by default (1,478 mostly
+# stylistic findings on 2026-11-21: pyupgrade, bugbear, bandit...), so the lint step could never
+# pass and protected nothing. This pins ruff's classic correctness set: pyflakes (F: undefined
+# names, unused imports/variables, redefinitions) and pycodestyle's statement/syntax errors
+# (E4, E7, E9). Every finding under these rules is fixed, not ignored. Stricter rule families can
+# be added deliberately, one at a time, with their findings fixed in the same change.
+target-version = "py312"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# Test modules and conftests set up sys.path / platform patches before importing the app.
+"**/tests/**" = ["E402"]
+"**/conftest.py" = ["E402"]

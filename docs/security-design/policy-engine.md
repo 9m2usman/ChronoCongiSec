@@ -1,5 +1,7 @@
 # M4 Day 4 — Deterministic Policy Engine & Fail-Closed Enforcement
 
+> **Update 2026-11-19 (finding M4-F1):** the guard also keeps a process-local execution ledger. Each (tenant, idempotency key) and each (tenant, approval id) dispatches at most once, whatever the outcome; a consumed approval blocks at evaluation (`APPROVAL_ALREADY_CONSUMED`). Durable cross-process protection remains M6's UNIQUE `tool_executions.proposal_id` plus a Redis lock (M2/M7). The default proposer role is now `AI_DEVELOPER`. See [m4-security-assessment.md](m4-security-assessment.md).
+
 **Document ID:** AMSC-SEC-004
 **Owner:** M4 — Security Engine & Incident Response Lead
 **Status:**

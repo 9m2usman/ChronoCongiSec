@@ -405,3 +405,20 @@ The following boundaries are mandatory:
 - M5 cannot make frontend-only authorization decisions.
 - M6 exclusively manages database migrations.
 - M7 manages deployment and test infrastructure.
+
+
+---
+
+## 15. Simulated Company Integration Ownership Addendum
+
+The implementation scope, cross-member handoffs and detailed prompts are defined in [docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md](docs/09-SIMULATED-COMPANY-INTEGRATION-PLAN.md). That document supplements this ownership map; it does not transfer core ownership.
+
+- **M1:** company/branch request context, authz integration, shared API/OpenAPI and event contracts.
+- **M2:** existing runtime, proposal/Gateway and protected adapters remain M2-owned. No new M2 task is assigned by this addendum.
+- **M3:** synthetic company knowledge pack, ingestion, branch-aware trusted retrieval, provenance and lineage using existing memory services.
+- **M4:** existing policy/trust engine governs company/branch/agent actions and demo threat scenarios.
+- **M5:** integrate actual backend data into the existing 11-screen React 19/TypeScript/Vite/Tailwind workstation; preserve current component system and visual language.
+- **M6:** minimum required schema/repository/migration support for company/branch-scoped demo data and durable evidence.
+- **M7:** deterministic safe seed/reset, local orchestration, demo runner and end-to-end/security verification.
+
+**Boundary:** no member may create a parallel runtime, memory store, policy engine, database schema, event store or frontend. Cross-owner changes require the owning member's review. The product demo is one fictional company with multiple branches; multiple tenants are retained for isolation testing, not as separate demo branches.

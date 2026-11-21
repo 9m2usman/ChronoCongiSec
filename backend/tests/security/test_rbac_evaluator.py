@@ -14,7 +14,10 @@ import pytest
 from backend.app.core.exceptions import ForbiddenError
 from backend.app.security import authorization as authz
 from backend.app.security.authorization import (
+    PROPOSER_ROLES,
+    READER_ROLES,
     RECOGNIZED_ROLES,
+    SECURITY_OPERATOR_ROLES,
     AuthorizationPolicyError,
     AuthorizationReason,
     Role,
@@ -27,7 +30,7 @@ from backend.app.tenancy.context import TenantContext
 
 TENANT_A = "tenant-a-uuid-001"
 TENANT_B = "tenant-b-uuid-002"
-ALL_DAY2_ROLES = (Role.TENANT_ADMIN, Role.SECURITY_ANALYST, Role.DEVELOPER)
+ALL_ROLES = (Role.TENANT_ADMIN, Role.SECURITY_ANALYST, Role.AI_DEVELOPER, Role.AUDITOR)
 
 
 def make_ctx(**overrides) -> TenantContext:
@@ -47,12 +50,24 @@ def make_ctx(**overrides) -> TenantContext:
 # A. Valid roles
 # ---------------------------------------------------------------------------
 
-def test_recognized_roles_are_exactly_the_three_day2_roles():
-    assert RECOGNIZED_ROLES == {"TENANT_ADMIN", "SECURITY_ANALYST", "DEVELOPER"}
+def test_recognized_roles_are_exactly_the_four_canonical_roles():
+    """PRD FR-003 / TRD §11 (M4-F2): DEVELOPER is not recognized and not an alias."""
+    assert RECOGNIZED_ROLES == {"TENANT_ADMIN", "SECURITY_ANALYST", "AI_DEVELOPER", "AUDITOR"}
+    assert "DEVELOPER" not in RECOGNIZED_ROLES
 
 
-@pytest.mark.parametrize("role", ["TENANT_ADMIN", "SECURITY_ANALYST", "DEVELOPER"])
-def test_each_day2_role_allowed_when_explicitly_permitted(role):
+def test_shared_allow_lists_follow_least_privilege():
+    assert set(SECURITY_OPERATOR_ROLES) == {Role.SECURITY_ANALYST, Role.TENANT_ADMIN}
+    assert set(PROPOSER_ROLES) == {Role.AI_DEVELOPER}
+    assert set(READER_ROLES) == set(Role)
+    # AUDITOR is read-only: never a security operator, never a proposer.
+    assert Role.AUDITOR not in SECURITY_OPERATOR_ROLES and Role.AUDITOR not in PROPOSER_ROLES
+    # AI_DEVELOPER performs no security operations.
+    assert Role.AI_DEVELOPER not in SECURITY_OPERATOR_ROLES
+
+
+@pytest.mark.parametrize("role", ["TENANT_ADMIN", "SECURITY_ANALYST", "AI_DEVELOPER", "AUDITOR"])
+def test_each_canonical_role_allowed_when_explicitly_permitted(role):
     decision = evaluate_role_access(make_ctx(role=role), [role])
     assert decision.allowed is True
     assert decision.reason is AuthorizationReason.ROLE_PERMITTED
@@ -61,17 +76,19 @@ def test_each_day2_role_allowed_when_explicitly_permitted(role):
 
 
 def test_role_enum_members_and_strings_are_equivalent_in_policy():
-    assert evaluate_role_access(make_ctx(role="DEVELOPER"), [Role.DEVELOPER]).allowed
-    assert evaluate_role_access(make_ctx(role=Role.DEVELOPER), ["DEVELOPER"]).allowed
+    assert evaluate_role_access(make_ctx(role="AI_DEVELOPER"), [Role.AI_DEVELOPER]).allowed
+    assert evaluate_role_access(make_ctx(role=Role.AI_DEVELOPER), ["AI_DEVELOPER"]).allowed
 
 
 @pytest.mark.parametrize(
     "role,allowed",
     [
         ("SECURITY_ANALYST", [Role.TENANT_ADMIN]),
-        ("DEVELOPER", [Role.TENANT_ADMIN, Role.SECURITY_ANALYST]),
+        ("AI_DEVELOPER", [Role.TENANT_ADMIN, Role.SECURITY_ANALYST]),
         ("TENANT_ADMIN", [Role.SECURITY_ANALYST]),  # no implicit admin super-role
-        ("TENANT_ADMIN", [Role.DEVELOPER]),
+        ("TENANT_ADMIN", [Role.AI_DEVELOPER]),
+        ("AUDITOR", [Role.SECURITY_ANALYST, Role.TENANT_ADMIN]),   # read-only role cannot operate
+        ("AI_DEVELOPER", [Role.AUDITOR]),
     ],
 )
 def test_recognized_role_not_in_allowed_list_is_denied(role, allowed):
@@ -87,7 +104,7 @@ def test_authorize_returns_same_context_on_allow():
 
 def test_authorize_raises_forbidden_403_on_deny():
     with pytest.raises(ForbiddenError) as exc_info:
-        authorize(make_ctx(role="DEVELOPER"), [Role.TENANT_ADMIN])
+        authorize(make_ctx(role="AI_DEVELOPER"), [Role.TENANT_ADMIN])
     assert exc_info.value.status_code == 403
     assert exc_info.value.code == "FORBIDDEN_ACTION"
 
@@ -99,9 +116,10 @@ def test_authorize_raises_forbidden_403_on_deny():
 @pytest.mark.parametrize(
     "role,reason",
     [
-        # Unsupported roles from Doc 01/02/05 are NOT aliased to Day 2 roles.
-        ("AI_DEVELOPER", AuthorizationReason.ROLE_UNRECOGNIZED),
-        ("AUDITOR", AuthorizationReason.ROLE_UNRECOGNIZED),
+        # Doc 06's Day 2 shorthand is NOT an alias of AI_DEVELOPER; near-miss names are unknown.
+        ("DEVELOPER", AuthorizationReason.ROLE_UNRECOGNIZED),
+        ("AUDIT", AuthorizationReason.ROLE_UNRECOGNIZED),
+        ("ADMIN", AuthorizationReason.ROLE_UNRECOGNIZED),
         ("PLATFORM_ADMIN", AuthorizationReason.ROLE_UNRECOGNIZED),
         ("SUPERUSER", AuthorizationReason.ROLE_UNRECOGNIZED),
         # Missing / empty
@@ -126,7 +144,7 @@ def test_authorize_raises_forbidden_403_on_deny():
     ],
 )
 def test_invalid_roles_are_denied_even_when_every_day2_role_is_allowed(role, reason):
-    decision = evaluate_role_access(make_ctx(role=role), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role=role), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is reason
     assert decision.role is None  # never echo an unrecognized value
@@ -139,7 +157,7 @@ def test_str_subclass_spoofing_equality_is_rejected():
 
         __hash__ = str.__hash__
 
-    decision = evaluate_role_access(make_ctx(role=Sneaky("ANYTHING")), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role=Sneaky("ANYTHING")), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.ROLE_MALFORMED
 
@@ -149,46 +167,46 @@ def test_str_subclass_spoofing_equality_is_rejected():
 # ---------------------------------------------------------------------------
 
 def test_missing_context_denied():
-    decision = evaluate_role_access(None, ALL_DAY2_ROLES)
+    decision = evaluate_role_access(None, ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.CONTEXT_MISSING
 
 
 def test_missing_context_raises_403_via_authorize():
     with pytest.raises(ForbiddenError):
-        authorize(None, ALL_DAY2_ROLES)
+        authorize(None, ALL_ROLES)
 
 
 def test_duck_typed_context_object_is_rejected():
     fake = type("FakeCtx", (), dict(tenant_id=TENANT_A, user_id="u", role="TENANT_ADMIN", is_active=True))()
-    decision = evaluate_role_access(fake, ALL_DAY2_ROLES)
+    decision = evaluate_role_access(fake, ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.CONTEXT_INVALID
 
 
 @pytest.mark.parametrize("is_active", [False, None, 1, "true", "True"])
 def test_inactive_or_non_boolean_active_flag_denied(is_active):
-    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", is_active=is_active), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", is_active=is_active), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.CONTEXT_INACTIVE
 
 
 @pytest.mark.parametrize("tenant_id", ["", "   ", None, 123])
 def test_missing_or_invalid_tenant_identifier_denied(tenant_id):
-    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", tenant_id=tenant_id), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", tenant_id=tenant_id), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.TENANT_MISSING
 
 
 @pytest.mark.parametrize("user_id", ["", "   ", None, 42])
 def test_missing_or_invalid_user_identifier_denied(user_id):
-    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", user_id=user_id), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN", user_id=user_id), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.USER_MISSING
 
 
 def test_context_is_immutable():
-    ctx = make_ctx(role="DEVELOPER")
+    ctx = make_ctx(role="AI_DEVELOPER")
     with pytest.raises(dataclasses.FrozenInstanceError):
         ctx.role = "TENANT_ADMIN"  # type: ignore[misc]
 
@@ -218,7 +236,7 @@ def test_malformed_or_non_exact_expected_tenant_denied(expected):
 
 def test_tenant_check_precedes_role_check_so_admin_gets_no_cross_tenant_bypass():
     # Even a fully privileged role in the allowed list is denied for another tenant's resource.
-    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN"), ALL_DAY2_ROLES, expected_tenant_id=TENANT_B)
+    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN"), ALL_ROLES, expected_tenant_id=TENANT_B)
     assert decision.reason is AuthorizationReason.TENANT_MISMATCH
 
 
@@ -237,8 +255,8 @@ def test_missing_policy_denies_everyone(policy):
     "policy",
     [
         "TENANT_ADMIN",  # bare string would iterate characters
-        ["AI_DEVELOPER"],
-        ["TENANT_ADMIN", "AUDITOR"],
+        ["DEVELOPER"],
+        ["TENANT_ADMIN", "AUDIT"],
         ["*"],
         ["tenant_admin"],
         [None],
@@ -253,19 +271,19 @@ def test_invalid_policy_denies_everyone(policy):
 
 
 def test_generator_policy_is_evaluated_correctly():
-    decision = evaluate_role_access(make_ctx(role="DEVELOPER"), (r for r in ["DEVELOPER"]))
+    decision = evaluate_role_access(make_ctx(role="AI_DEVELOPER"), (r for r in ["AI_DEVELOPER"]))
     assert decision.allowed is True
 
 
-@pytest.mark.parametrize("policy", [(), ("AI_DEVELOPER",), ("TENANT_ADMIN", "nope")])
+@pytest.mark.parametrize("policy", [(), ("DEVELOPER",), ("TENANT_ADMIN", "nope")])
 def test_dependency_factory_rejects_invalid_policy_at_definition_time(policy):
     with pytest.raises(AuthorizationPolicyError):
         require_role_access(*policy)
 
 
 def test_normalize_allowed_roles_returns_immutable_set():
-    policy = normalize_allowed_roles([Role.TENANT_ADMIN, "TENANT_ADMIN", Role.DEVELOPER])
-    assert policy == frozenset({"TENANT_ADMIN", "DEVELOPER"})
+    policy = normalize_allowed_roles([Role.TENANT_ADMIN, "TENANT_ADMIN", Role.AI_DEVELOPER])
+    assert policy == frozenset({"TENANT_ADMIN", "AI_DEVELOPER"})
     assert isinstance(policy, frozenset)
 
 
@@ -274,24 +292,24 @@ def test_unexpected_internal_error_fails_closed(monkeypatch):
         raise RuntimeError("simulated evaluator fault")
 
     monkeypatch.setattr(authz, "_classify_role", boom)
-    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN"), ALL_DAY2_ROLES)
+    decision = evaluate_role_access(make_ctx(role="TENANT_ADMIN"), ALL_ROLES)
     assert decision.allowed is False
     assert decision.reason is AuthorizationReason.EVALUATION_ERROR
     with pytest.raises(ForbiddenError):
-        authorize(make_ctx(role="TENANT_ADMIN"), ALL_DAY2_ROLES)
+        authorize(make_ctx(role="TENANT_ADMIN"), ALL_ROLES)
 
 
 def test_evaluator_never_raises_for_hostile_inputs():
     hostile_inputs = [object(), 3.14, ["x"], {"a": 1}, b"\x00"]
     for ctx in hostile_inputs:
-        for policy in [None, "x", [object()], ALL_DAY2_ROLES]:
+        for policy in [None, "x", [object()], ALL_ROLES]:
             decision = evaluate_role_access(ctx, policy)  # type: ignore[arg-type]
             assert decision.allowed is False
 
 
 def test_decisions_are_deterministic_and_stateless():
     ctx_allow = make_ctx(role="SECURITY_ANALYST")
-    ctx_deny = make_ctx(role="DEVELOPER", tenant_id=TENANT_B, user_id="user-b-1")
+    ctx_deny = make_ctx(role="AI_DEVELOPER", tenant_id=TENANT_B, user_id="user-b-1")
     for _ in range(50):
         assert evaluate_role_access(ctx_allow, [Role.SECURITY_ANALYST]).allowed is True
         assert evaluate_role_access(ctx_deny, [Role.SECURITY_ANALYST]).allowed is False

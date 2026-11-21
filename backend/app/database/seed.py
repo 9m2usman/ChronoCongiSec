@@ -9,25 +9,19 @@ Implements Canonical Architecture:
 """
 
 from datetime import datetime, timezone
-import hashlib
 import logging
-from typing import Any, Dict, List
-import uuid
+from typing import Dict
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.security import get_password_hash
+from backend.app.core.security import hash_password
 from backend.app.database.models.identity import (
     Branch,
     Membership,
     Tenant,
     User,
 )
-from backend.app.database.models.agents import Agent
-from backend.app.database.models.memory import MemoryRecord, MemoryVersion, Source
-from backend.app.database.models.observability import AuditEvent, DriftObservation
-from backend.app.memory.hashing import sha256_hex
 
 logger = logging.getLogger("amsc.database.seed")
 
@@ -142,7 +136,7 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
             stats["tenants"] += 1
 
     # 2. Seed Users
-    default_pw_hash = get_password_hash("CorrectHorseBatteryStaple2026!")
+    default_pw_hash = hash_password("CorrectHorseBatteryStaple2026!")
     for u_data in USERS:
         res = await session.execute(select(User).where(User.id == u_data["id"]))
         if res.scalar_one_or_none() is None:

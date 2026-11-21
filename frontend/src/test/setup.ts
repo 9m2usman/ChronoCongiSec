@@ -11,8 +11,9 @@ import { cleanup } from '@testing-library/react';
 // the global expect so `toBeInTheDocument` and friends resolve for every test.
 expect.extend(matchers);
 // Also extend the global expect injected by vitest's `globals: true`.
-if (typeof globalThis !== 'undefined' && globalThis.expect && typeof globalThis.expect.extend === 'function') {
-  globalThis.expect.extend(matchers);
+const globalExpect = (globalThis as { expect?: typeof expect }).expect;
+if (globalExpect && globalExpect !== expect && typeof globalExpect.extend === 'function') {
+  globalExpect.extend(matchers);
 }
 
 afterEach(() => {

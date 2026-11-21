@@ -15,13 +15,9 @@ from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import (
     InMemoryMemoryRepository,
     MemoryRepository,
-    get_default_repository,
 )
 from backend.app.memory.ingestion import (
-    MAX_PROVENANCE_DEPTH,
-    MAX_TRAVERSAL_BUDGET,
     InvalidProvenanceError,
-    _check_dag_cycle,
     ingest_memory,
 )
 from backend.app.memory.retrieval import (
@@ -31,6 +27,7 @@ from backend.app.memory.retrieval import (
     transition_memory_trust_state,
 )
 from backend.app.memory.versioning import update_memory
+from backend.app.memory.tests.trust_helpers import force_trust_state
 
 
 @pytest.fixture
@@ -153,7 +150,7 @@ def test_tampered_checksum_detected_on_retrieval(repo):
         repository=repo,
     )
     # Transition to TRUSTED so normal retrieval queries it
-    transition_memory_trust_state(tenant_id, record.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_id, record.id, TrustState.TRUSTED.value, repository=repo)
 
     # Verify retrieval succeeds before tampering
     verified = retrieve_memory(tenant_id=tenant_id, repository=repo)
@@ -184,7 +181,7 @@ def test_quarantined_and_rejected_records_excluded_from_normal_retrieval_and_det
 
     # Ingest clean record 1 and transition to TRUSTED
     rec1, _ = ingest_memory(tenant_id=tenant_id, content="Legitimate vendor profile.", repository=repo)
-    transition_memory_trust_state(tenant_id, rec1.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_id, rec1.id, TrustState.TRUSTED.value, repository=repo)
 
     # Ingest record 2 and simulate QUARANTINED state (as applied by M4 Quarantine Engine)
     rec2, _ = ingest_memory(tenant_id=tenant_id, content="Suspicious prompt injection payload.", repository=repo)
@@ -224,7 +221,7 @@ def test_tenant_isolation_cannot_read_other_tenant_records(repo):
         content="Confidential Company A financial strategy.",
         repository=repo,
     )
-    transition_memory_trust_state(tenant_a, rec_a.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_a, rec_a.id, TrustState.TRUSTED.value, repository=repo)
 
     # 1. Tenant B querying retrieve_memory gets an empty list
     tenant_b_records = retrieve_memory(tenant_id=tenant_b, repository=repo)
@@ -506,7 +503,7 @@ def test_development_and_test_environments_usable_with_in_memory_repository(repo
     assert record.id is not None
     assert ver.version == 1
     # Transition to TRUSTED for retrieval
-    transition_memory_trust_state("dev-tenant", record.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state("dev-tenant", record.id, TrustState.TRUSTED.value, repository=repo)
     records = retrieve_memory(tenant_id="dev-tenant", repository=repo)
     assert len(records) == 1
 
@@ -563,7 +560,7 @@ def test_gap_002_update_invalidates_trust_state_to_unverified(repo):
     assert rec_v1.trust_state == TrustState.UNVERIFIED.value
 
     # 2. Simulate M4 validation promoting it to TRUSTED
-    transition_memory_trust_state(tenant_id, rec_v1.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_id, rec_v1.id, TrustState.TRUSTED.value, repository=repo)
     assert repo.get_record(rec_v1.id, tenant_id).trust_state == TrustState.TRUSTED.value
 
     # Eligible for normal retrieval
@@ -789,7 +786,7 @@ def test_gap_004_memory_detail_access_controls(repo):
         get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=False, repository=repo)
 
     # Transition to TRUSTED -> normal access succeeds
-    transition_memory_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
     normal_detail, _, _ = get_memory_detail(tenant_id=tenant_id, record_id=rec.id, for_forensic=False, repository=repo)
     assert normal_detail.id == rec.id
     assert normal_detail.trust_state == TrustState.TRUSTED.value
@@ -809,7 +806,7 @@ def test_update_memory_trusted_becomes_unverified(repo):
     """Rule 2: Updating a TRUSTED record appends a new version and transitions trust_state to UNVERIFIED."""
     tenant_id = "tenant-update-rules"
     rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Trusted baseline", repository=repo)
-    transition_memory_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
+    force_trust_state(tenant_id, rec.id, TrustState.TRUSTED.value, repository=repo)
     assert repo.get_record(rec.id, tenant_id).trust_state == TrustState.TRUSTED.value
 
     updated_rec, ver2 = update_memory(tenant_id=tenant_id, record_id=rec.id, content="Trusted edit", repository=repo)
@@ -870,7 +867,7 @@ def test_update_memory_refused_on_rejected_record(repo):
     """Rule 1: Updating a REJECTED record is refused with ValidationError; leaves version count, trust_state and updated_at unchanged."""
     tenant_id = "tenant-update-rules"
     rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Rejected content", repository=repo)
-    transition_memory_trust_state(tenant_id, rec.id, TrustState.REJECTED.value, repository=repo)
+    force_trust_state(tenant_id, rec.id, TrustState.REJECTED.value, repository=repo)
     baseline_record = repo.get_record(rec.id, tenant_id)
     baseline_updated_at = baseline_record.updated_at
 
@@ -889,7 +886,7 @@ def test_update_memory_refused_on_superseded_record(repo):
     """Rule 1: Updating a SUPERSEDED record is refused with ValidationError; leaves version count, trust_state and updated_at unchanged."""
     tenant_id = "tenant-update-rules"
     rec, ver1 = ingest_memory(tenant_id=tenant_id, content="Superseded content", repository=repo)
-    transition_memory_trust_state(tenant_id, rec.id, TrustState.SUPERSEDED.value, repository=repo)
+    force_trust_state(tenant_id, rec.id, TrustState.SUPERSEDED.value, repository=repo)
     baseline_record = repo.get_record(rec.id, tenant_id)
     baseline_updated_at = baseline_record.updated_at
 

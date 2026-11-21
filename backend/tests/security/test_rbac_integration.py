@@ -80,12 +80,12 @@ def build_app(repo=None) -> FastAPI:
         return {"tenant_id": ctx.tenant_id, "role": ctx.role}
 
     @app.get("/rbac/developer")
-    async def developer_only(ctx: TenantContext = Depends(require_role_access(Role.DEVELOPER))):
+    async def developer_only(ctx: TenantContext = Depends(require_role_access(Role.AI_DEVELOPER))):
         return {"tenant_id": ctx.tenant_id, "role": ctx.role}
 
-    @app.get("/rbac/any-day2-role")
-    async def any_day2_role(
-        ctx: TenantContext = Depends(require_role_access(Role.TENANT_ADMIN, Role.SECURITY_ANALYST, Role.DEVELOPER)),
+    @app.get("/rbac/any-role")
+    async def any_role(
+        ctx: TenantContext = Depends(require_role_access(*Role)),
     ):
         return {"tenant_id": ctx.tenant_id, "role": ctx.role}
 
@@ -138,10 +138,11 @@ def assert_forbidden(res: httpx.Response) -> None:
     [
         ("/rbac/admin", "u-admin", "TENANT_ADMIN"),
         ("/rbac/analyst", "u-analyst", "SECURITY_ANALYST"),
-        ("/rbac/developer", "u-dev", "DEVELOPER"),
-        ("/rbac/any-day2-role", "u-admin", "TENANT_ADMIN"),
-        ("/rbac/any-day2-role", "u-analyst", "SECURITY_ANALYST"),
-        ("/rbac/any-day2-role", "u-dev", "DEVELOPER"),
+        ("/rbac/developer", "u-aidev", "AI_DEVELOPER"),
+        ("/rbac/any-role", "u-admin", "TENANT_ADMIN"),
+        ("/rbac/any-role", "u-analyst", "SECURITY_ANALYST"),
+        ("/rbac/any-role", "u-aidev", "AI_DEVELOPER"),
+        ("/rbac/any-role", "u-auditor", "AUDITOR"),
     ],
 )
 async def test_permitted_role_is_allowed(client, path, user_id, expected_role):
@@ -157,8 +158,11 @@ async def test_permitted_role_is_allowed(client, path, user_id, expected_role):
     "path,user_id",
     [
         ("/rbac/admin", "u-analyst"),
-        ("/rbac/admin", "u-dev"),
-        ("/rbac/analyst", "u-dev"),
+        ("/rbac/admin", "u-aidev"),
+        ("/rbac/analyst", "u-aidev"),
+        ("/rbac/admin", "u-auditor"),       # AUDITOR is read-only
+        ("/rbac/analyst", "u-auditor"),
+        ("/rbac/developer", "u-auditor"),
         ("/rbac/analyst", "u-admin"),  # TENANT_ADMIN is not an implicit super-role
         ("/rbac/developer", "u-admin"),
         ("/rbac/developer", "u-analyst"),
@@ -171,10 +175,10 @@ async def test_unauthorized_recognized_role_returns_403(client, path, user_id):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("user_id", ["u-aidev", "u-auditor", "u-lower", "u-empty"])
+@pytest.mark.parametrize("user_id", ["u-dev", "u-lower", "u-empty"])   # DEVELOPER is not an alias of AI_DEVELOPER
 async def test_unknown_unsupported_or_malformed_membership_role_returns_403(client, user_id):
     async with client:
-        for path in ("/rbac/admin", "/rbac/analyst", "/rbac/developer", "/rbac/any-day2-role"):
+        for path in ("/rbac/admin", "/rbac/analyst", "/rbac/developer", "/rbac/any-role"):
             res = await client.get(path, headers=auth(user_id))
             assert_forbidden(res)
 
@@ -193,7 +197,7 @@ async def test_role_supplied_in_headers_query_or_body_is_ignored(client):
         res = await client.request(
             "GET",
             "/rbac/admin?role=TENANT_ADMIN&tenant_id=tenant-b-uuid-002",
-            headers=auth("u-dev", **{"X-Role": "TENANT_ADMIN", "X-User-Role": "TENANT_ADMIN"}),
+            headers=auth("u-aidev", **{"X-Role": "TENANT_ADMIN", "X-User-Role": "TENANT_ADMIN"}),
             json={"role": "TENANT_ADMIN", "tenant_id": TENANT_B},
         )
     assert_forbidden(res)
@@ -202,7 +206,7 @@ async def test_role_supplied_in_headers_query_or_body_is_ignored(client):
 @pytest.mark.asyncio
 async def test_missing_authentication_remains_401(client):
     async with client:
-        res = await client.get("/rbac/any-day2-role")
+        res = await client.get("/rbac/any-role")
     assert res.status_code == 401
     assert res.json()["error"]["code"] == "AUTHENTICATION_FAILED"
 
@@ -214,7 +218,7 @@ async def test_missing_authentication_remains_401(client):
 )
 async def test_invalid_authentication_remains_401(client, header):
     async with client:
-        res = await client.get("/rbac/any-day2-role", headers={"Authorization": header})
+        res = await client.get("/rbac/any-role", headers={"Authorization": header})
     assert res.status_code == 401
 
 

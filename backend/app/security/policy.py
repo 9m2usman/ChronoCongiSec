@@ -81,6 +81,11 @@ MAX_PARAMETERS_BYTES = 65_536
 MAX_ID_LENGTH = 128
 MAX_IDEMPOTENCY_KEY_LENGTH = 255
 MAX_ISSUED_GRANTS = 10_000
+# Process-local execution ledger (finding M4-F1): one execution per (tenant, idempotency key)
+# and per (tenant, approval id). Defense in depth only: the durable, cross-process guarantee is
+# M6's UNIQUE tool_executions.proposal_id plus approval consumption (OD-6/OD-7), which the
+# caller (M2) must use. Entries are kept for every dispatched execution, whatever its outcome.
+MAX_EXECUTION_LEDGER = 100_000
 
 
 # =============================================================================
@@ -168,6 +173,7 @@ class ReasonCode(str, Enum):
     AUDIT_PERSISTENCE_FAILED = "AUDIT_PERSISTENCE_FAILED"
     PRE_EXECUTION_REVALIDATION_FAILED = "PRE_EXECUTION_REVALIDATION_FAILED"
     EXECUTION_GRANT_ALREADY_USED = "EXECUTION_GRANT_ALREADY_USED"
+    EXECUTION_ALREADY_PERFORMED = "EXECUTION_ALREADY_PERFORMED"
     ADAPTER_EXECUTION_FAILED = "ADAPTER_EXECUTION_FAILED"
 
 
@@ -242,7 +248,7 @@ _CONSTRAINT_KEY = re.compile(r"(max|min|approval_threshold|allowed)_([a-z][a-z0-
 
 @dataclass(frozen=True)
 class PolicyConfig:
-    proposer_roles: Tuple[Union[Role, str], ...] = (Role.DEVELOPER,)
+    proposer_roles: Tuple[Union[Role, str], ...] = (Role.AI_DEVELOPER,)
     tool_policies: Mapping[Tuple[str, str], ToolPolicy] = field(default_factory=lambda: dict(DEFAULT_TOOL_POLICIES))
     enforce_memory_agent_binding: bool = True
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
@@ -598,6 +604,9 @@ class PolicyEngine:
         # decision_id -> the exact issued decision (single use). Whole-object equality means a
         # copy with any altered field (dataclasses.replace) is not recognised as issued.
         self._issued: "OrderedDict[str, PolicyDecision]" = OrderedDict()
+        # (tenant_id, idempotency_key) and (tenant_id, approval_id) already dispatched (M4-F1).
+        self._executed_keys: "OrderedDict[Tuple[str, str], str]" = OrderedDict()
+        self._consumed_approvals: "OrderedDict[Tuple[str, str], str]" = OrderedDict()
 
     # -- public ---------------------------------------------------------------
 
@@ -785,7 +794,7 @@ class PolicyEngine:
             return ReasonCode.APPROVAL_INVALID
         if approval.tenant_id != context.tenant_id or approval.status != "APPROVED":
             return ReasonCode.APPROVAL_INVALID
-        if approval.consumed:
+        if approval.consumed or (context.tenant_id, approval.approval_id) in self._consumed_approvals:
             return ReasonCode.APPROVAL_ALREADY_CONSUMED
         if approval.proposal_fingerprint != fingerprint:
             return ReasonCode.APPROVAL_SCOPE_MISMATCH
@@ -955,6 +964,29 @@ class PolicyEngine:
         issued = self._issued.get(decision.decision_id)
         return issued is not None and issued == decision
 
+    def _reserve_execution(self, decision: PolicyDecision) -> Optional[ReasonCode]:
+        """Atomically (no await) refuse or record this dispatch in the execution ledger.
+
+        Fails closed when the key is missing: an executable decision always carries tenant and
+        idempotency key, so a missing value means an inconsistent decision.
+        """
+        tenant, idem = decision.tenant_id, decision.idempotency_key
+        if not (isinstance(tenant, str) and tenant and isinstance(idem, str) and idem):
+            return ReasonCode.DECISION_NOT_EXECUTABLE
+        key = (tenant, idem)
+        approval_key = (tenant, decision.approval_id) if decision.approval_id else None
+        if key in self._executed_keys:
+            return ReasonCode.EXECUTION_ALREADY_PERFORMED
+        if approval_key is not None and approval_key in self._consumed_approvals:
+            return ReasonCode.APPROVAL_ALREADY_CONSUMED
+        self._executed_keys[key] = decision.decision_id
+        if approval_key is not None:
+            self._consumed_approvals[approval_key] = decision.decision_id
+        for ledger in (self._executed_keys, self._consumed_approvals):
+            while len(ledger) > MAX_EXECUTION_LEDGER:
+                ledger.popitem(last=False)
+        return None
+
 
 # =============================================================================
 # 6. Protected execution guard (policy enforcement point for adapters)
@@ -1123,6 +1155,11 @@ class ProtectedExecutionGuard:
         problem = self._engine._consume_issued(decision)
         if problem is not None:
             return ExecutionOutcome(False, "NOT_EXECUTED", (ReasonCode.EXECUTION_GRANT_ALREADY_USED.value,), decision)
+        # 4b. One dispatch per idempotency key and per approval (M4-F1). Same synchronous step as
+        # the grant consumption, before any await, so concurrent duplicates cannot both pass.
+        replay = self._engine._reserve_execution(decision)
+        if replay is not None:
+            return ExecutionOutcome(False, "NOT_EXECUTED", (replay.value,), decision)
 
         grant = ExecutionGrant(
             grant_id=str(uuid.uuid4()), decision_id=decision.decision_id, tenant_id=decision.tenant_id or "",
@@ -1239,19 +1276,3 @@ def _number(value: Any) -> Optional[Decimal]:
     if not number.is_finite():
         return None
     return number
-
-
-# --- Compatibility exports for M1 / gateway callers ---
-def _load_gateway_compat():
-    try:
-        from backend.app.api.gateway import (
-            DeterministicPolicyEvaluator as _DPE,
-            GatewayDecision as _GD,
-            PolicyEvaluationInput as _PEI,
-        )
-        return _DPE, _GD, _PEI
-    except Exception:
-        return None, None, None
-
-DeterministicPolicyEvaluator, GatewayDecision, PolicyEvaluationInput = _load_gateway_compat()
-

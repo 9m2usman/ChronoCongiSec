@@ -12,7 +12,7 @@ Follows:
 import json
 import secrets
 from functools import lru_cache
-from typing import Any, List, Optional, Union
+from typing import List, Optional, Union
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

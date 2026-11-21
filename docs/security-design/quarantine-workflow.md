@@ -1,5 +1,11 @@
 # M4 Day 5 — Quarantine Security Workflow & Forensic Access
 
+> **Update 2026-11-19:**
+> - **F-1** is fixed on `main` by M3: `update_memory` refuses QUARANTINED, REJECTED and SUPERSEDED.
+> - The forensic-access audit event's `actor_id` is `user:<id>` (M4-F4).
+> - Trust transitions used by quarantine are race-safe (M4-F5); a version change mid-quarantine is retried, not lost.
+> - Recovery is documented in [recovery-workflow.md](recovery-workflow.md).
+
 **Document ID:** AMSC-SEC-005
 **Owner:** M4 — Security Engine & Incident Response Lead
 **Status:** Implemented and tested in M4-owned code.

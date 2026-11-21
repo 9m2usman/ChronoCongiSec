@@ -1,23 +1,20 @@
 import sys
 from pathlib import Path
 import pytest
-import time
 
 repo_root = Path(__file__).resolve().parents[4]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.memory.ingestion import ingest_memory
-from backend.app.memory.lineage import get_ancestors, get_descendants, LineageResult
+from backend.app.memory.lineage import get_ancestors, get_descendants
 from backend.app.memory.provenance import (
     create_provenance_edge,
     InvalidProvenanceError,
     TraversalBudget,
-    MAX_PROVENANCE_DEPTH,
 )
 from backend.app.memory.repository import InMemoryMemoryRepository
-from backend.app.memory.retrieval import get_memory_detail, retrieve_memory
-from backend.app.memory.models import MemoryRecord, ProvenanceEdge, TrustState
+from backend.app.memory.models import MemoryRecord, ProvenanceEdge
 import backend.app.main as main_app
 
 
@@ -150,7 +147,7 @@ def test_traversal_duplicate_edges_deduplicated(repo):
     docB, _ = ingest_memory(tenant_id=tenant_id, content="B", parent_record_id=docA.id, repository=repo)
 
     # Re-call create_provenance_edge with identical parameters -> deduplicated
-    e2 = create_provenance_edge(tenant_id=tenant_id, from_record_id=docA.id, to_record_id=docB.id, repository=repo)
+    create_provenance_edge(tenant_id=tenant_id, from_record_id=docA.id, to_record_id=docB.id, repository=repo)
     edges = repo.get_edges_for_record(docA.id, tenant_id)
     outgoing = [e for e in edges if e.from_record_id == docA.id]
     assert len(outgoing) == 1

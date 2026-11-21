@@ -53,6 +53,7 @@ from backend.app.core.exceptions import (
     ValidationError,
 )
 from backend.app.memory import MemoryRepository, TrustState, get_memory_detail
+from backend.app.security.audit_identity import user_actor
 from backend.app.security.authorization import Role, evaluate_role_access
 from backend.app.security.trust import (
     TRANSITION_MATRIX,
@@ -596,6 +597,10 @@ class ForensicAccess:
         rbac = evaluate_role_access(context, FORENSIC_ROLES)
         if not rbac.allowed:
             raise ForbiddenError("Forensic access not authorized.")
+        try:
+            actor = user_actor(context.user_id)   # OD-9 audit identity, from trusted context only
+        except ValueError as exc:
+            raise ForbiddenError("Forensic access requires a verified tenant context.") from exc
         if type(record_id) is not str or not _SAFE_ID.fullmatch(record_id):
             raise ValidationError("Invalid record identifier.")
         if type(reason) is not str or not (MIN_FORENSIC_REASON <= len(reason.strip()) <= MAX_FORENSIC_REASON):
@@ -616,7 +621,7 @@ class ForensicAccess:
         event = {
             "id": f"aud-{uuid.uuid4().hex[:12]}",
             "tenant_id": context.tenant_id,
-            "actor_id": context.user_id,
+            "actor_id": actor,
             "event_type": "FORENSIC_MEMORY_ACCESSED",
             "resource_id": record_id,
             "action": "FORENSIC_READ",

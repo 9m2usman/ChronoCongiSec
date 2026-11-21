@@ -5,7 +5,7 @@ Owner: M4 — Security Engine & Incident Response Lead (Doc 06 Day 6 deliverable
 
 Routes (canonical; no additional public routes are introduced):
 
-    GET  /drift/observations                 any authenticated member of the tenant
+    GET  /drift/observations                 any canonical role (incl. read-only AUDITOR); unknown roles 403
     POST /drift/observations/{id}/review     SECURITY_ANALYST or TENANT_ADMIN
 
 Scoring is not a separate route: every observation in both responses carries its
@@ -18,7 +18,8 @@ Wiring (M1, ``main.py``)::
     app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
     api_router.include_router(drift_router)
 
-If ``app.state.drift_service`` is not configured, every route returns 503 (fail closed).
+If ``app.state.drift_service`` is not set, the router builds it from ``app.state.db_session_factory``
+(M6 ``UnitOfWork`` + ``SqlDriftReviewStore``). Without either, every route returns 503 (fail closed).
 """
 
 from datetime import datetime
@@ -27,15 +28,15 @@ from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
-from backend.app.core.dependencies import get_tenant_context
 from backend.app.core.exceptions import SecurityDependencyError, get_trace_context
-from backend.app.security.authorization import Role, require_role_access
+from backend.app.security.authorization import READER_ROLES, Role, require_role_access
 from backend.app.security.drift import (
     DriftAssessment,
     DriftClassification,
     DriftObservationView,
     DriftReviewService,
     ReviewerStatus,
+    SqlDriftReviewStore,
 )
 from backend.app.tenancy.context import TenantContext
 
@@ -92,10 +93,21 @@ class DriftReviewResponse(BaseModel):
 
 
 def _service(request: Request) -> DriftReviewService:
-    service = getattr(request.app.state, "drift_service", None)
-    if not isinstance(service, DriftReviewService):
-        raise SecurityDependencyError("Drift review service is not configured.")
-    return service
+    """The configured service, or one built over M6's UnitOfWork when a session factory exists.
+
+    There is deliberately no in-memory fallback: without durable persistence the routes return
+    503 instead of serving or recording drift reviews that would not survive a restart.
+    """
+    state = request.app.state
+    service = getattr(state, "drift_service", None)
+    if isinstance(service, DriftReviewService):
+        return service
+    session_factory = getattr(state, "db_session_factory", None)
+    if session_factory is not None:
+        service = DriftReviewService(SqlDriftReviewStore(session_factory))
+        state.drift_service = service
+        return service
+    raise SecurityDependencyError("Drift review service is not configured.")
 
 
 def _to_response(view: DriftObservationView, assessment: DriftAssessment) -> DriftObservationResponse:
@@ -119,7 +131,7 @@ async def list_drift_observations(
     offset: int = Query(0, ge=0),
     classification: Optional[DriftClassification] = Query(None),
     reviewer_status: Optional[ReviewerStatus] = Query(None),
-    context: TenantContext = Depends(get_tenant_context),
+    context: TenantContext = Depends(require_role_access(*READER_ROLES)),
 ) -> List[DriftObservationResponse]:
     service = _service(request)
     rows = await service.list_observations(
