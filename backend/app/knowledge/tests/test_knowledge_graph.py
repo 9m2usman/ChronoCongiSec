@@ -22,13 +22,6 @@ from backend.app.knowledge.knowledge_graph import build_graph
 from backend.app.main import create_app
 from backend.app.memory.ingestion import ingest_memory
 from backend.app.memory.models import AgentRecord, ProvenanceEdge, ProvenanceRelationType, SourceRecord
-from backend.app.memory.provenance import (
-    DEFAULT_MAX_NODES,
-    DEFAULT_MAX_REPO_CALLS,
-    TraversalBudget,
-    TraversalBudgetExceededError,
-    create_provenance_edge,
-)
 from backend.app.memory.repository import InMemoryMemoryRepository
 
 

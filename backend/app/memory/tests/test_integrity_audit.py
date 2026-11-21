@@ -16,7 +16,7 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.memory.ingestion import ingest_memory
-from backend.app.memory.integrity import audit_memory_integrity, sha256_hex
+from backend.app.memory.integrity import audit_memory_integrity
 from backend.app.memory.models import AgentRecord, SourceRecord
 from backend.app.memory.repository import InMemoryMemoryRepository
 from backend.app.memory.versioning import update_memory
@@ -177,7 +177,7 @@ def test_audit_cli_entry_point(monkeypatch):
 def test_audit_cli_entry_point_failure_exit_code(monkeypatch, repo):
     """Test CLI runner exits with code 1 when mismatches are detected."""
     from backend.app.memory.integrity_audit import main
-    from backend.app.memory.repository import reset_default_repository, get_default_repository
+    from backend.app.memory.repository import get_default_repository
 
     tenant_id = "tenant-cli-fail"
     default_repo = get_default_repository()

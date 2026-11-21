@@ -4,11 +4,10 @@ Module: backend.app.memory.tests.test_chronimem
 Owner: M3 — Knowledge & Memory Systems Lead
 """
 
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 import sys
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 repo_root = Path(__file__).resolve().parents[4]
@@ -18,14 +17,13 @@ if str(repo_root) not in sys.path:
 from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.memory import get_repository
 from backend.app.core.config import get_settings
-from backend.app.core.exceptions import ValidationError
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.ingestion import ingest_memory
-from backend.app.memory.integrity import MemoryIntegrityError, sha256_hex
+from backend.app.memory.integrity import MemoryIntegrityError
 from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import InMemoryMemoryRepository
-from backend.app.memory.retrieval import MemoryNotFoundError, retrieve_memory, transition_memory_trust_state
+from backend.app.memory.retrieval import MemoryNotFoundError, retrieve_memory
 from backend.app.memory.versioning import compare_versions, get_timeline, update_memory
 from backend.app.memory.tests.trust_helpers import force_trust_state
 

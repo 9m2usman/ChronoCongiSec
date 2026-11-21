@@ -23,17 +23,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
-from backend.app.core.exceptions import ForbiddenError, NotFoundError, SecurityDependencyError, ValidationError
+from backend.app.core.exceptions import ForbiddenError, SecurityDependencyError
 from backend.app.memory.models import (
     MemoryDetailResponse,
     MemoryIngestRequest,
     MemoryRecordResponse,
 )
 from backend.app.memory.ingestion import ingest_memory
-from backend.app.memory.integrity import MemoryIntegrityError
 from backend.app.memory.repository import MemoryRepository, get_default_repository
 from backend.app.memory.retrieval import (
-    MemoryNotFoundError,
     get_memory_detail,
     retrieve_memory,
 )

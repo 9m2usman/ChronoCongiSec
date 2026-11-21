@@ -8,7 +8,7 @@ Used by M4 Security Engine for blast-radius rollback calculation.
 """
 
 from collections import deque
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .provenance import (
     DEFAULT_MAX_DEADLINE_SECONDS,

@@ -11,7 +11,6 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.memory.integrity import (
-    MemoryIntegrityError,
     sha256_hex,
     verify_checksum,
 )

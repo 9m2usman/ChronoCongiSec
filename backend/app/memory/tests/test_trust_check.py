@@ -21,10 +21,7 @@ from backend.app.main import app
 from backend.app.memory.ingestion import ingest_memory
 from backend.app.memory.models import (
     AgentRecord,
-    MemoryRecord,
-    MemoryRefCheck,
     MemoryRefStatus,
-    MemoryVersion,
     SourceRecord,
     TrustState,
 )

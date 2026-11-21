@@ -29,15 +29,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.app.api.agents import get_agent_repo
 from backend.app.api.gateway import get_gateway_repository
 from backend.app.api.memory import get_repository as get_memory_repository
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import (
-    CurrentUserDep,
-    SettingsDep,
     TenantContextDep,
-    get_tenant_context,
     require_roles,
 )
 from backend.app.core.exceptions import (

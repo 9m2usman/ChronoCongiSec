@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
 from backend.app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
-from .integrity import MemoryIntegrityError, sha256_hex, verify_checksum
+from .integrity import MemoryIntegrityError, sha256_hex
 from .models import (
     MemoryRecord,
     MemoryRefCheck,

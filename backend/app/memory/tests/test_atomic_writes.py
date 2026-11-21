@@ -16,10 +16,8 @@ if str(repo_root) not in sys.path:
 
 from backend.app.core.exceptions import ValidationError
 from backend.app.memory.ingestion import ingest_memory
-from backend.app.memory.models import AgentRecord, MemoryRecord, MemoryVersion, SourceRecord, TrustState
-from backend.app.memory.provenance import create_provenance_edge
+from backend.app.memory.models import MemoryRecord, MemoryVersion
 from backend.app.memory.repository import InMemoryMemoryRepository
-from backend.app.memory.retrieval import get_memory_detail, transition_memory_trust_state
 from backend.app.memory.versioning import update_memory
 
 

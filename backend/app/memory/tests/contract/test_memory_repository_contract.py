@@ -15,24 +15,16 @@ refusal, and production guards.
 
 from datetime import datetime, timezone
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from backend.app.database.models.agents import Agent as OrmAgent
-from backend.app.database.models.memory import (
-    MemoryRecord as OrmMemoryRecord,
-    MemoryVersion as OrmMemoryVersion,
-    ProvenanceEdge as OrmProvenanceEdge,
-    Source as OrmSource,
-)
 from backend.app.database.repositories.base import TenantScopeError
 from backend.app.memory.adapters import (
     SqlAlchemyMemoryRepository,
-    sanitize_integrity_error,
     to_orm_agent,
     to_orm_memory_record,
     to_orm_memory_version,
@@ -54,7 +46,7 @@ from backend.app.memory.models import (
     SourceRecord,
     TrustState,
 )
-from backend.app.memory.repository import InMemoryMemoryRepository, MemoryRepository
+from backend.app.memory.repository import InMemoryMemoryRepository
 
 VALID_CHECKSUM = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 VALID_CHECKSUM_2 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"

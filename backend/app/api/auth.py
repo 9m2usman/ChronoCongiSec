@@ -13,8 +13,7 @@ import hashlib
 import hmac
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from backend.app.core.config import Settings
@@ -36,7 +35,6 @@ from backend.app.core.security import (
     dummy_verify_password_async,
     verify_password_async,
 )
-from backend.app.tenancy.context import TenantContext, UserRecord
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 

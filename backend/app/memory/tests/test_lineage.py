@@ -17,10 +17,6 @@ from backend.app.memory.lineage import (
     get_ancestors,
     get_descendants,
 )
-from backend.app.memory.provenance import (
-    MAX_PROVENANCE_DEPTH,
-    create_provenance_edge,
-)
 from backend.app.memory.repository import InMemoryMemoryRepository
 from backend.app.memory.retrieval import MemoryNotFoundError
 

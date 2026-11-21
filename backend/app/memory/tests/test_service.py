@@ -15,13 +15,9 @@ from backend.app.memory.models import AgentRecord, SourceRecord, TrustState
 from backend.app.memory.repository import (
     InMemoryMemoryRepository,
     MemoryRepository,
-    get_default_repository,
 )
 from backend.app.memory.ingestion import (
-    MAX_PROVENANCE_DEPTH,
-    MAX_TRAVERSAL_BUDGET,
     InvalidProvenanceError,
-    _check_dag_cycle,
     ingest_memory,
 )
 from backend.app.memory.retrieval import (

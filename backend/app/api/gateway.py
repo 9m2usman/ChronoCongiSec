@@ -26,7 +26,7 @@ import time
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -34,12 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.core.config import Settings, get_settings
 from backend.app.core.dependencies import (
-    CurrentUserDep,
     RateLimiterDep,
-    SettingsDep,
     TenantContextDep,
-    get_tenant_context,
-    require_roles,
 )
 from backend.app.core.exceptions import (
     AMSCException,
@@ -50,7 +46,6 @@ from backend.app.core.exceptions import (
 )
 from backend.app.security.policy import decision_is_executable
 from backend.app.security.runtime import get_gateway_enforcement
-from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.api.gateway")
 

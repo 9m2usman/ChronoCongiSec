@@ -11,7 +11,7 @@ Follows:
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Any
 
 
 # Regular expressions for identifying sensitive data in log streams

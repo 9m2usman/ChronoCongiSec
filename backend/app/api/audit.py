@@ -11,10 +11,10 @@ Implements Canonical Architecture:
 from copy import deepcopy
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from backend.app.core.exceptions import SecurityDependencyError
 from backend.app.security.authorization import Role, require_role_access
