@@ -65,7 +65,7 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://amsc_user:amsc_password@localhost:5432/amsc_db
           REDIS_URL: redis://localhost:6379/0
         run: |
-          pytest backend/tests/security backend/tests/unit backend/app/memory/tests -v --durations=10
+          pytest backend/tests/security backend/tests/unit backend/app/memory/tests backend/app/knowledge backend/tests/database -v -rsx --durations=10
 
   frontend-check:
     name: Frontend Lint & Build
@@ -84,8 +84,14 @@ jobs:
 
       - name: Install Frontend Dependencies
         working-directory: ./frontend
+        # Strict: the lockfile must satisfy package.json (a fallback to `npm install` hid mismatches).
         run: |
-          npm ci || npm install
+          npm ci
+
+      - name: Run Frontend Unit Tests (Vitest)
+        working-directory: ./frontend
+        run: |
+          npm test
 
       - name: Run Frontend Type Check & Production Build
         working-directory: ./frontend
