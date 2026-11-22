@@ -21,6 +21,7 @@ Restrictions:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 import uuid
@@ -28,22 +29,26 @@ import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
 from crewai_service.agents.branch_operations import (
+    BranchOperationOutput,
     BranchRequestInput,
     build_branch_operations_agent,
     process_branch_request,
 )
 from crewai_service.agents.customer_support import (
+    SupportResolutionOutput,
     SupportTicketInput,
     build_customer_support_agent,
     process_customer_support_ticket,
 )
 from crewai_service.agents.finance_operations import (
     ExpenseAuditInput,
+    ExpenseAuditOutput,
     build_finance_operations_agent,
     audit_and_propose_expense,
 )
 from crewai_service.agents.hr_operations import (
     HRRequestInput,
+    HRResolutionOutput,
     build_hr_operations_agent,
     process_hr_request,
 )
@@ -65,6 +70,11 @@ class EnterpriseWorkflowInput(BaseModel):
     hr_request: Optional[HRRequestInput] = None
     finance_expense: Optional[ExpenseAuditInput] = None
     branch_request: Optional[BranchRequestInput] = None
+    # Pre-computed specialist results to avoid duplicate LLM calls in orchestration
+    support_result: Optional[SupportResolutionOutput] = None
+    hr_result: Optional[HRResolutionOutput] = None
+    finance_result: Optional[ExpenseAuditOutput] = None
+    branch_result: Optional[BranchOperationOutput] = None
 
 
 class EnterpriseWorkflowReport(BaseModel):
@@ -96,25 +106,66 @@ def build_workflow_coordinator_agent(
 
     # Controlled delegation tools
     @tool("delegate_to_support_specialist")
-    def delegate_to_support_specialist(ticket_id: str, issue_text: str) -> str:
-        """Delegate customer support subtask to Customer Support Specialist."""
+    def delegate_to_support_specialist(**kwargs: Any) -> str:
+        """Delegate customer support subtask to Customer Support Specialist.
+        
+        Parameters:
+            ticket_id (str): Unique support ticket identifier (e.g. 'ticket-101')
+            issue_text (str): Description of customer issue to resolve
+        """
+        ticket_id = (
+            kwargs.get("ticket_id")
+            or kwargs.get("case_id")
+            or kwargs.get("id")
+            or "ticket-wf-delegated"
+        )
+        issue_text = (
+            kwargs.get("issue_text")
+            or kwargs.get("issue_description")
+            or kwargs.get("issue")
+            or kwargs.get("description")
+            or "Customer support request"
+        )
         logger.info(f"Coordinator delegating ticket '{ticket_id}' to Support Specialist.")
         inp = SupportTicketInput(
-            ticket_id=ticket_id,
+            ticket_id=str(ticket_id),
             customer_id="cust-wf-delegated",
-            issue_description=issue_text,
+            issue_description=str(issue_text),
         )
         res = process_customer_support_ticket(ticket=inp, client=resolved_client)
         return f"SUPPORT RESULT: Ticket {res.ticket_id} ({res.classification}). Action: {res.action_taken}. {res.resolution_text[:150]}"
 
     @tool("delegate_to_finance_specialist")
-    def delegate_to_finance_specialist(expense_id: str, amount: float, destination: str) -> str:
-        """Delegate financial audit and disbursement proposal to Finance Specialist."""
+    def delegate_to_finance_specialist(**kwargs: Any) -> str:
+        """Delegate financial audit and disbursement proposal to Finance Specialist.
+        
+        Parameters:
+            expense_id (str): Unique expense identifier (e.g. 'exp-501')
+            amount (float): Expense dollar amount to disburse (e.g. 150.0)
+            destination (str): Destination account or recipient
+        """
+        expense_id = (
+            kwargs.get("expense_id")
+            or kwargs.get("case_id")
+            or kwargs.get("id")
+            or "exp-wf-delegated"
+        )
+        raw_amt = kwargs.get("amount") or kwargs.get("amount_usd") or kwargs.get("expense_amount") or 0.0
+        try:
+            amount = float(raw_amt)
+        except (ValueError, TypeError):
+            amount = 0.0
+        destination = (
+            kwargs.get("destination")
+            or kwargs.get("destination_account")
+            or kwargs.get("account")
+            or "general-account"
+        )
         logger.info(f"Coordinator delegating expense '{expense_id}' (${amount:.2f}) to Finance Specialist.")
         inp = ExpenseAuditInput(
-            expense_id=expense_id,
+            expense_id=str(expense_id),
             claimant_id="claimant-wf-delegated",
-            destination_account=destination,
+            destination_account=str(destination),
             amount_usd=amount,
             category="WORKFLOW_DISBURSEMENT",
         )
@@ -176,9 +227,16 @@ def execute_enterprise_workflow(
     finance_summary: Optional[str] = None
     branch_summary: Optional[str] = None
     all_passed = True
+    has_escalation = False
 
-    # 1. Engage Customer Support Specialist if requested
-    if workflow_input.support_ticket:
+    # 1. Engage Customer Support Specialist if requested or pre-computed
+    if workflow_input.support_result:
+        specialists_engaged.append("Customer Support Specialist")
+        s_res = workflow_input.support_result
+        support_summary = f"[{s_res.ticket_id}]: {s_res.action_taken} - {s_res.resolution_text[:120]}"
+        if s_res.escalated or s_res.action_taken == "ESCALATED_TO_SUPERVISOR":
+            has_escalation = True
+    elif workflow_input.support_ticket:
         specialists_engaged.append("Customer Support Specialist")
         s_agent = build_customer_support_agent(llm=resolved_llm, client=resolved_client)
         s_res = process_customer_support_ticket(
@@ -188,9 +246,17 @@ def execute_enterprise_workflow(
             workflow_id=workflow_input.workflow_id,
         )
         support_summary = f"[{s_res.ticket_id}]: {s_res.action_taken} - {s_res.resolution_text[:120]}"
+        if s_res.escalated or s_res.action_taken == "ESCALATED_TO_SUPERVISOR":
+            has_escalation = True
 
-    # 2. Engage HR Operations Specialist if requested
-    if workflow_input.hr_request:
+    # 2. Engage HR Operations Specialist if requested or pre-computed
+    if workflow_input.hr_result:
+        specialists_engaged.append("HR Operations Specialist")
+        hr_res = workflow_input.hr_result
+        hr_summary = f"[{hr_res.request_id}]: Status: {hr_res.status} - {hr_res.explanation[:120]}"
+        if hr_res.escalated or hr_res.status == "ESCALATED_FOR_HUMAN_REVIEW":
+            has_escalation = True
+    elif workflow_input.hr_request:
         specialists_engaged.append("HR Operations Specialist")
         hr_agent = build_hr_operations_agent(llm=resolved_llm, client=resolved_client)
         hr_res = process_hr_request(
@@ -200,9 +266,22 @@ def execute_enterprise_workflow(
             workflow_id=workflow_input.workflow_id,
         )
         hr_summary = f"[{hr_res.request_id}]: Status: {hr_res.status} - {hr_res.explanation[:120]}"
+        if hr_res.escalated or hr_res.status == "ESCALATED_FOR_HUMAN_REVIEW":
+            has_escalation = True
 
-    # 3. Engage Finance Operations Specialist if requested
-    if workflow_input.finance_expense:
+    # 3. Engage Finance Operations Specialist if requested or pre-computed
+    if workflow_input.finance_result:
+        specialists_engaged.append("Finance Operations Specialist")
+        fin_res = workflow_input.finance_result
+        finance_summary = (
+            f"[{fin_res.expense_id}]: Decision: {fin_res.gateway_decision} "
+            f"(${fin_res.amount_usd:.2f}) - {fin_res.explanation[:120]}"
+        )
+        if fin_res.gateway_decision == "BLOCK" or fin_res.amount_usd > 300.00 or fin_res.audit_status == "BLOCKED_BY_GATEWAY":
+            all_passed = False
+        if fin_res.audit_status == "ESCALATED":
+            has_escalation = True
+    elif workflow_input.finance_expense:
         specialists_engaged.append("Finance Operations Specialist")
         fin_agent = build_finance_operations_agent(llm=resolved_llm, client=resolved_client)
         fin_res = audit_and_propose_expense(
@@ -215,11 +294,21 @@ def execute_enterprise_workflow(
             f"[{fin_res.expense_id}]: Decision: {fin_res.gateway_decision} "
             f"(${fin_res.amount_usd:.2f}) - {fin_res.explanation[:120]}"
         )
-        if fin_res.gateway_decision == "BLOCK" and fin_res.amount_usd > 300.00:
+        if fin_res.gateway_decision == "BLOCK" or fin_res.amount_usd > 300.00 or fin_res.audit_status == "BLOCKED_BY_GATEWAY":
             all_passed = False
+        if fin_res.audit_status == "ESCALATED":
+            has_escalation = True
 
-    # 4. Engage Branch Operations Specialist if requested
-    if workflow_input.branch_request:
+    # 4. Engage Branch Operations Specialist if requested or pre-computed
+    if workflow_input.branch_result:
+        specialists_engaged.append("Branch Operations Specialist")
+        br_res = workflow_input.branch_result
+        branch_summary = f"[{br_res.request_id}]: Status: {br_res.status} - {br_res.operational_summary[:120]}"
+        if br_res.security_violation_flagged or br_res.status == "BLOCKED_CROSS_BRANCH_BREACH":
+            all_passed = False
+        if br_res.status == "ESCALATED":
+            has_escalation = True
+    elif workflow_input.branch_request:
         specialists_engaged.append("Branch Operations Specialist")
         target_br = workflow_input.branch_request.target_branch_id
         br_agent = build_branch_operations_agent(
@@ -235,8 +324,16 @@ def execute_enterprise_workflow(
             workflow_id=workflow_input.workflow_id,
         )
         branch_summary = f"[{br_res.request_id}]: Status: {br_res.status} - {br_res.operational_summary[:120]}"
-        if br_res.security_violation_flagged:
+        if br_res.security_violation_flagged or br_res.status == "BLOCKED_CROSS_BRANCH_BREACH":
             all_passed = False
+        if br_res.status == "ESCALATED":
+            has_escalation = True
+
+    # Expected overall status based on single source of truth
+    expected_status = (
+        "PARTIAL_BLOCKED" if not all_passed
+        else ("ESCALATED_ANOMALY" if has_escalation else "COMPLETED_CONSOLIDATED")
+    )
 
     # 5. Coordinator consolidates report using Task
     task_desc = (
@@ -248,7 +345,23 @@ def execute_enterprise_workflow(
         f"- HR: {hr_summary or 'Not engaged'}\n"
         f"- Finance: {finance_summary or 'Not engaged'}\n"
         f"- Branch: {branch_summary or 'Not engaged'}\n\n"
-        f"Provide structured assessment confirming whether all security and operational controls passed."
+        f"Provide structured assessment confirming whether all security and operational controls passed.\n\n"
+        f"IMPORTANT: Your response MUST be valid JSON strictly conforming to this schema:\n"
+        f"```json\n"
+        f'{{\n'
+        f'  "workflow_id": "{workflow_input.workflow_id}",\n'
+        f'  "initiative_title": "{workflow_input.initiative_title}",\n'
+        f'  "status": "{expected_status}",\n'
+        f'  "specialists_engaged": {json.dumps(specialists_engaged)},\n'
+        f'  "support_summary": "{support_summary or ""}",\n'
+        f'  "hr_summary": "{hr_summary or ""}",\n'
+        f'  "finance_summary": "{finance_summary or ""}",\n'
+        f'  "branch_summary": "{branch_summary or ""}",\n'
+        f'  "consolidated_assessment": "Executive multi-agent assessment summarizing cross-department coordination.",\n'
+        f'  "all_security_controls_satisfied": {"true" if all_passed else "false"}\n'
+        f'}}\n'
+        f"```\n"
+        f"Only output the raw JSON object."
     )
 
     coord_task = Task(
@@ -272,12 +385,15 @@ def execute_enterprise_workflow(
 
         if output and output.pydantic and isinstance(output.pydantic, EnterpriseWorkflowReport):
             report = output.pydantic
+            # Enforce single source of truth on security invariants
+            report.status = expected_status
+            report.all_security_controls_satisfied = all_passed
         else:
             raw = crew_output.raw
             report = EnterpriseWorkflowReport(
                 workflow_id=workflow_input.workflow_id,
                 initiative_title=workflow_input.initiative_title,
-                status="COMPLETED_CONSOLIDATED" if all_passed else "PARTIAL_BLOCKED",
+                status=expected_status,
                 specialists_engaged=specialists_engaged,
                 support_summary=support_summary,
                 hr_summary=hr_summary,
@@ -289,7 +405,7 @@ def execute_enterprise_workflow(
 
         tracer.finish_run(
             run_id=run_record.run_id,
-            status="COMPLETED" if all_passed else "BLOCKED",
+            status="COMPLETED" if expected_status == "COMPLETED_CONSOLIDATED" else ("ESCALATED" if expected_status == "ESCALATED_ANOMALY" else "BLOCKED"),
             output_summary=report.consolidated_assessment[:120],
         )
         return report

@@ -34,15 +34,28 @@ class ChronoCogniSecClient:
         base_url: Optional[str] = None,
         tenant_id: Optional[str] = None,
         auth_token: Optional[str] = None,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        tenant_slug: Optional[str] = None,
         app: Optional[Any] = None,
         timeout: float = 30.0,
     ) -> None:
         settings = get_crewai_settings()
-        self.base_url = (base_url or settings.CHRONOCONGISEC_API_BASE_URL).rstrip("/")
+        raw_base = (base_url or settings.CHRONOCONGISEC_API_BASE_URL).rstrip("/")
+        if not raw_base.endswith("/api/v1"):
+            raw_base = f"{raw_base}/api/v1"
+        self.base_url = raw_base
         self.tenant_id = tenant_id or settings.CHRONOCONGISEC_TENANT_ID
         self.auth_token = auth_token or settings.CHRONOCONGISEC_AUTH_TOKEN
+        self.email = email or settings.CHRONOCONGISEC_AUTH_EMAIL
+        self.password = password or settings.CHRONOCONGISEC_AUTH_PASSWORD
+        self.tenant_slug = tenant_slug or settings.CHRONOCONGISEC_TENANT_SLUG
         self.timeout = timeout
         self._app = app
+
+    @property
+    def auth_email(self) -> str:
+        return self.email
 
     def _is_test_double_mode(self) -> bool:
         settings = get_crewai_settings()
@@ -63,6 +76,109 @@ class ChronoCogniSecClient:
             from starlette.testclient import TestClient
             return TestClient(self._app, raise_server_exceptions=False)
         return httpx.Client(timeout=self.timeout)
+
+    def authenticate(
+        self,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        tenant_slug: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> bool:
+        """Authenticate against ChronoCogniSec Enterprise API (/auth/login) to obtain JWT."""
+        if self.auth_token and not force_refresh:
+            return True
+
+        if self._is_test_double_mode() and self._app is None:
+            self.auth_token = f"mock-jwt-{uuid.uuid4().hex[:16]}"
+            return True
+
+        use_email = email or self.email
+        use_password = password or self.password
+        use_slug = tenant_slug or self.tenant_slug
+
+        if not use_email or not use_password or not use_slug:
+            logger.warning("Missing email, password, or tenant_slug for backend authentication.")
+            return False
+
+        url = f"{self.base_url}/auth/login" if self._app is None else "/api/v1/auth/login"
+        payload = {
+            "email": use_email,
+            "password": use_password,
+            "tenant_slug": use_slug,
+        }
+
+        try:
+            if self._app is not None:
+                from starlette.testclient import TestClient
+                client = TestClient(self._app, raise_server_exceptions=False)
+                res = client.post(
+                    url,
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    json=payload,
+                )
+            else:
+                with httpx.Client(timeout=self.timeout) as client:
+                    res = client.post(
+                        url,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                        json=payload,
+                    )
+            if res.status_code == 200:
+                data = res.json()
+                self.auth_token = data.get("access_token")
+                active_tenant = data.get("active_tenant", {})
+                if active_tenant and "id" in active_tenant:
+                    self.tenant_id = active_tenant["id"]
+                logger.info(
+                    f"Authentication successful for user '{data.get('user_id')}' "
+                    f"(role: {data.get('role')}, tenant: {self.tenant_id})."
+                )
+                return True
+            elif res.status_code == 401:
+                logger.error(f"Authentication failed (HTTP 401): {res.text}")
+                return False
+            elif res.status_code == 403:
+                logger.error(f"Authorization failed (HTTP 403): {res.text}")
+                return False
+            else:
+                logger.warning(f"Authentication endpoint returned status {res.status_code}: {res.text}")
+                return False
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning(f"Backend authentication network failure at {url}: {exc}")
+            return False
+
+    def _send_request(self, method: str, url: str, **kwargs: Any) -> Optional[Any]:
+        """Send authenticated HTTP request with automatic token retrieval and 401 refresh."""
+        if not self.auth_token and not self._is_test_double_mode():
+            self.authenticate()
+
+        headers = self._get_headers()
+        if "headers" in kwargs:
+            headers.update(kwargs.pop("headers"))
+
+        try:
+            if self._app is not None:
+                from starlette.testclient import TestClient
+                client = TestClient(self._app, raise_server_exceptions=False)
+                res = client.request(method, url, headers=headers, **kwargs)
+                if res.status_code == 401 and not self._is_test_double_mode():
+                    logger.warning("Received HTTP 401 Unauthorized; attempting token refresh...")
+                    if self.authenticate(force_refresh=True):
+                        headers = self._get_headers()
+                        res = client.request(method, url, headers=headers, **kwargs)
+                return res
+            else:
+                with httpx.Client(timeout=self.timeout) as client:
+                    res = client.request(method, url, headers=headers, **kwargs)
+                    if res.status_code == 401 and not self._is_test_double_mode():
+                        logger.warning("Received HTTP 401 Unauthorized; attempting token refresh...")
+                        if self.authenticate(force_refresh=True):
+                            headers = self._get_headers()
+                            res = client.request(method, url, headers=headers, **kwargs)
+                    return res
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning(f"HTTP request to {url} failed: {exc}")
+            return None
 
     # --- Agent Registry ---
 
@@ -85,17 +201,13 @@ class ChronoCogniSecClient:
             params["branch_id"] = branch_id
 
         url = f"{self.base_url}/agents" if self._app is None else "/api/v1/agents"
-        try:
-            with self._create_client() as client:
-                res = client.get(url, headers=self._get_headers(), params=params)
-                if res.status_code != 200:
-                    logger.error(f"Failed to list agents ({res.status_code}): {res.text}")
-                    return []
-                data = res.json()
-                return data.get("items", []) if isinstance(data, dict) else data
-        except (httpx.HTTPError, OSError) as exc:
-            logger.warning(f"Agent registry communication error: {exc}")
+        res = self._send_request("GET", url, params=params)
+        if res is None or res.status_code != 200:
+            if res is not None:
+                logger.error(f"Failed to list agents ({res.status_code}): {res.text}")
             return []
+        data = res.json()
+        return data.get("items", []) if isinstance(data, dict) else data
 
     def register_agent(
         self,
@@ -120,16 +232,12 @@ class ChronoCogniSecClient:
             "model": model,
             "system_prompt": system_prompt,
         }
-        try:
-            with self._create_client() as client:
-                res = client.post(url, headers=self._get_headers(), json=payload)
-                if res.status_code in (200, 201):
-                    return res.json()
-                logger.warning(f"Agent registration failed ({res.status_code}): {res.text}")
-                return None
-        except (httpx.HTTPError, OSError) as exc:
-            logger.warning(f"Agent registration network error: {exc}")
-            return None
+        res = self._send_request("POST", url, json=payload)
+        if res is not None and res.status_code in (200, 201):
+            return res.json()
+        if res is not None:
+            logger.warning(f"Agent registration failed ({res.status_code}): {res.text}")
+        return None
 
     # --- Knowledge & Memory Retrieval ---
 
@@ -185,16 +293,17 @@ class ChronoCogniSecClient:
             params["agent_id"] = agent_id
 
         url = f"{self.base_url}/memory" if self._app is None else "/api/v1/memory"
-        try:
-            with self._create_client() as client:
-                res = client.get(url, headers=self._get_headers(), params=params)
-                if res.status_code != 200:
-                    logger.warning(f"Memory retrieval query returned status {res.status_code}: {res.text}")
-                    return []
-                return res.json()
-        except (httpx.HTTPError, OSError) as exc:
-            logger.warning(f"Memory retrieval communication failure: {exc}")
+        res = self._send_request("GET", url, params=params)
+        if res is None or res.status_code != 200:
+            if res is not None:
+                logger.warning(f"Memory retrieval query returned status {res.status_code}: {res.text}")
             return []
+        data = res.json()
+        if isinstance(data, list):
+            return data
+        elif isinstance(data, dict):
+            return data.get("items", data.get("records", []))
+        return []
 
     def get_memory_detail(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Fetch memory record detail, version history, and provenance."""
@@ -206,16 +315,12 @@ class ChronoCogniSecClient:
                 "content": f"Verified memory detail for {memory_id}",
             }
         url = f"{self.base_url}/memory/{memory_id}" if self._app is None else f"/api/v1/memory/{memory_id}"
-        try:
-            with self._create_client() as client:
-                res = client.get(url, headers=self._get_headers())
-                if res.status_code == 200:
-                    return res.json()
-                logger.warning(f"Memory detail lookup failed for '{memory_id}' ({res.status_code})")
-                return None
-        except (httpx.HTTPError, OSError) as exc:
-            logger.warning(f"Memory detail lookup communication failure: {exc}")
-            return None
+        res = self._send_request("GET", url)
+        if res is not None and res.status_code == 200:
+            return res.json()
+        if res is not None:
+            logger.warning(f"Memory detail lookup failed for '{memory_id}' ({res.status_code})")
+        return None
 
     # --- Protected Tool Gateway ---
 
@@ -278,42 +383,40 @@ class ChronoCogniSecClient:
             }
 
         url = f"{self.base_url}/gateway/actions/propose" if self._app is None else "/api/v1/gateway/actions/propose"
-        try:
-            with self._create_client() as client:
-                res = client.post(url, headers=self._get_headers(), json=payload)
-                if res.status_code in (200, 201):
-                    return res.json()
-                elif res.status_code == 403:
-                    return {
-                        "action_id": action_id,
-                        "proposal_id": f"prop-blocked-{uuid.uuid4().hex[:8]}",
-                        "decision": "BLOCK",
-                        "memory_trust": "SUSPICIOUS",
-                        "policy_result": "DENIED",
-                        "reasons": [res.text],
-                        "execution_status": "NOT_EXECUTED",
-                    }
-                logger.error(f"Gateway proposal failed ({res.status_code}): {res.text}")
+        res = self._send_request("POST", url, json=payload)
+        if res is not None:
+            if res.status_code in (200, 201):
+                return res.json()
+            elif res.status_code == 403:
                 return {
                     "action_id": action_id,
-                    "proposal_id": f"prop-err-{uuid.uuid4().hex[:8]}",
+                    "proposal_id": f"prop-blocked-{uuid.uuid4().hex[:8]}",
                     "decision": "BLOCK",
-                    "memory_trust": "NOT_REFERENCED",
+                    "memory_trust": "SUSPICIOUS",
                     "policy_result": "DENIED",
-                    "reasons": [f"Gateway communication error: {res.status_code}"],
+                    "reasons": [res.text],
                     "execution_status": "NOT_EXECUTED",
                 }
-        except (httpx.HTTPError, OSError) as exc:
-            logger.error(f"Gateway connection error: {exc}")
+            logger.error(f"Gateway proposal failed ({res.status_code}): {res.text}")
             return {
                 "action_id": action_id,
                 "proposal_id": f"prop-err-{uuid.uuid4().hex[:8]}",
                 "decision": "BLOCK",
                 "memory_trust": "NOT_REFERENCED",
                 "policy_result": "DENIED",
-                "reasons": [f"Gateway platform communication failure: {exc}"],
+                "reasons": [f"Gateway communication error: {res.status_code}"],
                 "execution_status": "NOT_EXECUTED",
             }
+        logger.error(f"Gateway connection error: backend unreachable")
+        return {
+            "action_id": action_id,
+            "proposal_id": f"prop-err-{uuid.uuid4().hex[:8]}",
+            "decision": "BLOCK",
+            "memory_trust": "NOT_REFERENCED",
+            "policy_result": "DENIED",
+            "reasons": ["Gateway platform communication failure: backend unreachable"],
+            "execution_status": "NOT_EXECUTED",
+        }
 
     # --- Incidents & Escalation ---
 
@@ -348,13 +451,9 @@ class ChronoCogniSecClient:
         if affected_record_id:
             payload["affected_record_id"] = affected_record_id
 
-        try:
-            with self._create_client() as client:
-                res = client.post(url, headers=self._get_headers(), json=payload)
-                if res.status_code in (200, 201):
-                    return res.json()
-                logger.warning(f"Incident reporting failed ({res.status_code}): {res.text}")
-                return None
-        except (httpx.HTTPError, OSError) as exc:
-            logger.warning(f"Incident reporting communication failure: {exc}")
-            return None
+        res = self._send_request("POST", url, json=payload)
+        if res is not None and res.status_code in (200, 201):
+            return res.json()
+        if res is not None:
+            logger.warning(f"Incident reporting failed ({res.status_code}): {res.text}")
+        return None

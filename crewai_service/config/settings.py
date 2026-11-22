@@ -29,6 +29,15 @@ for _placeholder_var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"
     ):
         del os.environ[_placeholder_var]
 
+# Ensure crewai_service/.env takes precedence over stale inherited Windows process variables
+if _SERVICE_ENV.exists():
+    from dotenv import dotenv_values
+    _file_vals = dotenv_values(_SERVICE_ENV)
+    for _cred_var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        _fval = _file_vals.get(_cred_var)
+        if _fval and _fval.strip():
+            os.environ[_cred_var] = _fval.strip()
+
 
 class ExecutionMode(str, Enum):
     LIVE = "live"
@@ -84,6 +93,15 @@ class CrewAISettings(BaseSettings):
     CHRONOCONGISEC_API_BASE_URL: str = "http://127.0.0.1:8000/api/v1"
     CHRONOCONGISEC_TENANT_ID: str = "tenant-a-uuid-001"
     CHRONOCONGISEC_AUTH_TOKEN: Optional[str] = None
+    CHRONOCONGISEC_AUTH_EMAIL: str = "analyst@company-a.com"
+    CHRONOCONGISEC_AUTH_PASSWORD: str = "SecurePassword123!"
+    CHRONOCONGISEC_TENANT_SLUG: str = "company-a"
+
+    # --- LLM Rate Limiting, Pacing & Resilience ---
+    LLM_REQUEST_PACE_SECONDS: float = 4.0
+    LLM_MAX_RETRIES: int = 5
+    LLM_RETRY_BASE_DELAY_SECONDS: float = 5.0
+    LLM_RETRY_MAX_DELAY_SECONDS: float = 60.0
 
     # --- Enterprise Simulated Branches ---
     DEFAULT_BRANCH_ID: str = EnterpriseBranch.HEAD_OFFICE.value

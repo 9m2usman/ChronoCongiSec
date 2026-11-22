@@ -140,8 +140,8 @@ def process_customer_support_ticket(
         f"1. Retrieve trusted support FAQ policies using 'retrieve_trusted_support_faq'.\n"
         f"2. Check if the customer's request is eligible under official 14-day return and refund policy.\n"
         f"3. If a refund is warranted under policy and <= $300, submit a Gateway proposal via 'propose_customer_refund'.\n"
-        f"4. If the ticket is ambiguous, abusive, or exceeds authorized limits, escalate via 'escalate_to_human_supervisor'.\n"
-        f"5. Prepare structured resolution output."
+        f"4. If the ticket is ambiguous, abusive, fraudulent, or requires human intervention, call 'escalate_to_human_supervisor' with JSON: {{\"case_id\": \"{ticket.ticket_id}\", \"reason\": \"<specific justification>\", \"severity\": \"HIGH\"}}.\n"
+        f"5. Prepare structured resolution output strictly conforming to the SupportResolutionOutput schema."
     )
 
     task = Task(
@@ -163,6 +163,8 @@ def process_customer_support_ticket(
         crew_output = crew.kickoff()
         output = task.output
 
+        has_escalation_call = any(t.tool_name == "escalate_to_human_supervisor" for t in run_record.tool_invocations)
+
         # Determine structured result
         if output and output.pydantic and isinstance(output.pydantic, SupportResolutionOutput):
             res = output.pydantic
@@ -173,25 +175,35 @@ def process_customer_support_ticket(
         else:
             # Deterministic parsing from raw text
             raw = crew_output.raw
-            is_escalated = "escalat" in raw.lower()
             prop_id = run_record.gateway_proposal_ids[-1] if run_record.gateway_proposal_ids else None
             res = SupportResolutionOutput(
                 ticket_id=ticket.ticket_id,
                 classification="BILLING" if ticket.claim_amount_usd else "GENERAL_SUPPORT",
                 priority=ticket.urgency,
                 resolution_text=raw[:500] if raw else "Resolved under policy",
-                action_taken="PROPOSED_GATEWAY_ACTION" if prop_id else ("ESCALATED_TO_SUPERVISOR" if is_escalated else "RESOLVED_WITH_POLICY"),
+                action_taken="PROPOSED_GATEWAY_ACTION" if prop_id else ("ESCALATED_TO_SUPERVISOR" if has_escalation_call else "RESOLVED_WITH_POLICY"),
                 gateway_proposal_id=prop_id,
-                escalated=is_escalated,
-                escalation_reason="Human review requested" if is_escalated else None,
+                escalated=has_escalation_call,
+                escalation_reason="Human review requested" if has_escalation_call else None,
                 memory_references=run_record.memory_references or ["mem-supp-faq-001"],
             )
+
+        # Enforce consistency as single source of truth
+        if has_escalation_call or res.escalated:
+            res.escalated = True
+            res.action_taken = "ESCALATED_TO_SUPERVISOR"
+            if not res.escalation_reason:
+                res.escalation_reason = "Customer support case escalated to human supervisor"
+        else:
+            res.escalated = False
+            if res.action_taken == "ESCALATED_TO_SUPERVISOR":
+                res.action_taken = "PROPOSED_GATEWAY_ACTION" if res.gateway_proposal_id else "RESOLVED_WITH_POLICY"
 
         if res.gateway_proposal_id and res.gateway_proposal_id not in run_record.gateway_proposal_ids:
             tracer.record_gateway_decision(
                 run_id=run_record.run_id,
                 proposal_id=res.gateway_proposal_id,
-                decision="ALLOW",
+                decision="REVIEW" if res.escalated else "ALLOW",
             )
         for m_ref in res.memory_references:
             tracer.record_memory_reference(run_record.run_id, m_ref)
