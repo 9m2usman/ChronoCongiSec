@@ -9,9 +9,13 @@ and future cloud deployment.
 
 from enum import Enum
 import os
+from pathlib import Path
 from typing import Dict, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_SERVICE_DIR = Path(__file__).resolve().parent.parent
+_SERVICE_ENV = _SERVICE_DIR / ".env"
 
 
 class ExecutionMode(str, Enum):
@@ -38,7 +42,7 @@ class CrewAISettings(BaseSettings):
     """Central configuration for CrewAI agents and platform integration."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(_SERVICE_ENV, ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )

@@ -65,9 +65,9 @@ from crewai_service.workflows.flows import EnterpriseLifecycleFlow
 
 
 def run_synthetic_demonstration(
-    mode: str = "live",
-    provider: str = "gemini",
-    model: str = "gemini-1.5-flash",
+    mode: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> int:
     """Run genuine end-to-end multi-agent demonstration across the simulated enterprise."""
     print("=" * 80)
@@ -75,9 +75,20 @@ def run_synthetic_demonstration(
     print("=" * 80)
 
     settings = get_crewai_settings()
-    settings.EXECUTION_MODE = ExecutionMode(mode)
-    settings.LLM_PROVIDER = SupportedProvider(provider)
-    settings.LLM_MODEL = model
+    if mode is not None:
+        settings.EXECUTION_MODE = ExecutionMode(mode)
+    if provider is not None:
+        settings.LLM_PROVIDER = SupportedProvider(provider)
+    if model is not None:
+        settings.LLM_MODEL = model
+
+    try:
+        settings.validate_provider_configuration()
+    except ValueError as e:
+        print(f"\n[CONFIGURATION ERROR] {e}")
+        print("Tip: To run the offline demonstration without external API keys, execute:")
+        print("     python -m crewai_service.main --mode test_double\n")
+        return 1
 
     print(f"Execution Mode: {settings.EXECUTION_MODE.value.upper()}")
     print(f"LLM Provider:   {settings.LLM_PROVIDER.value.upper()} (Model: {settings.LLM_MODEL})")
@@ -194,9 +205,9 @@ def run_synthetic_demonstration(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ChronoCogniSec CrewAI Business Agents Service")
-    parser.add_argument("--mode", choices=["live", "test_double"], default="live", help="Execution mode")
-    parser.add_argument("--provider", choices=["gemini", "openai", "test_double"], default="gemini", help="LLM Provider")
-    parser.add_argument("--model", default="gemini-1.5-flash", help="LLM Model identifier")
+    parser.add_argument("--mode", choices=["live", "test_double"], default=None, help="Execution mode (defaults to .env)")
+    parser.add_argument("--provider", choices=["gemini", "openai", "test_double"], default=None, help="LLM Provider (defaults to .env)")
+    parser.add_argument("--model", default=None, help="LLM Model identifier (defaults to .env)")
     args = parser.parse_args()
 
     exit_code = run_synthetic_demonstration(
