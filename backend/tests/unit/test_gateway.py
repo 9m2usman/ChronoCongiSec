@@ -50,9 +50,8 @@ Tests verify:
 """
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
-import math
-from typing import Any, Dict, List, Optional
+from datetime import timedelta
+from typing import Any, Dict, Optional
 import uuid
 import pytest
 import httpx
@@ -63,24 +62,18 @@ from backend.app.api.agents import (
     InMemoryAgentRepository,
 )
 from backend.app.api.gateway import (
-    ExecutionStatus,
     GatewayDecision,
     InMemoryGatewayRepository,
     PolicyDecisionEntity,
     SqlAlchemyGatewayRepository,
-    ToolAdapterProtocol,
-    ToolExecutionEntity,
     ToolExecutionResult,
     ToolProposalEntity,
-    compute_payload_fingerprint,
-    redact_sensitive_payload,
 )
 from backend.app.core.config import Settings
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.hashing import sha256_hex
 from backend.app.memory.models import (
-    AgentRecord,
     MemoryRecord,
     MemoryVersion,
     RecordType,

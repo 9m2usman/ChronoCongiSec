@@ -8,13 +8,12 @@ Canonical References:
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict
 import pytest
 import httpx
 
 from backend.app.api.traces import (
     InMemoryTraceRepository,
-    MAX_MEMORY_EVENTS_LIMIT,
     MAX_SPANS_LIMIT,
     redact_sensitive_dict,
     validate_trace_id,
@@ -23,7 +22,7 @@ from backend.app.core.config import Settings
 from backend.app.core.exceptions import ValidationError
 from backend.app.core.security import create_access_token
 from backend.app.database.models.agents import Agent
-from backend.app.database.models.gateway import Approval, PolicyDecision, ToolExecution, ToolProposal
+from backend.app.database.models.gateway import Approval, PolicyDecision, ToolProposal
 from backend.app.database.models.memory import MemoryRecord, MemoryVersion, RetrievalEvent, Source
 from backend.app.database.models.observability import Trace, TraceSpan
 from backend.app.main import create_app

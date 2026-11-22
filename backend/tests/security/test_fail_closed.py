@@ -40,7 +40,7 @@ from backend.app.core.exceptions import SecurityDependencyError, register_except
 from backend.app.core.security import create_access_token
 from backend.app.database.models import AuditEvent
 from backend.app.database.unit_of_work import UnitOfWork
-from backend.app.memory import retrieve_memory, transition_memory_trust_state, update_memory
+from backend.app.memory import retrieve_memory, update_memory
 from backend.app.security import policy as policy_mod
 from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
 from backend.app.security.policy import (

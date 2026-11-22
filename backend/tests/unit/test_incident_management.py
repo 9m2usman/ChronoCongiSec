@@ -11,10 +11,7 @@ Canonical References:
 - AMSC-DOC-008: GAP-018/029, GAP-019/030, GAP-020/031, GAP-021/032
 """
 
-from copy import deepcopy
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
-import uuid
+from datetime import datetime, timezone
 import pytest
 import httpx
 
@@ -28,11 +25,7 @@ from backend.app.api.gateway import (
     ToolProposalEntity,
 )
 from backend.app.api.incident_management import (
-    EvidenceType,
     InMemoryIncidentRepository,
-    IncidentClassification,
-    IncidentSeverity,
-    IncidentStatus,
     redact_sensitive_dict,
 )
 from backend.app.core.config import Settings
@@ -40,7 +33,6 @@ from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.hashing import sha256_hex
 from backend.app.memory.models import (
-    AgentRecord,
     MemoryRecord,
     MemoryVersion,
     RecordType,

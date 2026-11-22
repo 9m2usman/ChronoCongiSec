@@ -344,7 +344,7 @@ async def test_login_inactive_membership_rejected(auth_client: httpx.AsyncClient
 @pytest.mark.asyncio
 async def test_login_membership_database_failure_fails_closed():
     """Verify repository/database failure during membership check fails closed with HTTP 503."""
-    from backend.app.tenancy.context import InMemoryAuthRepository, set_default_auth_repository
+    from backend.app.tenancy.context import InMemoryAuthRepository
 
     class FailingMembershipRepo(InMemoryAuthRepository):
         async def get_membership(self, user_id: str, tenant_id: str):
@@ -434,7 +434,6 @@ async def test_protected_request_denied_when_membership_suspended():
     from backend.app.core.security import create_access_token
     from backend.app.tenancy.context import (
         InMemoryAuthRepository,
-        MembershipRecord,
         seed_demo_accounts,
     )
 

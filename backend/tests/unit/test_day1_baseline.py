@@ -23,23 +23,19 @@ Verifies:
 
 import logging
 import pytest
-from fastapi import FastAPI, Body
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 
-from backend.app.core.config import Settings, get_settings
+from backend.app.core.config import Settings
 from backend.app.core.exceptions import (
-    AMSCException,
     AuthenticationError,
-    ForbiddenError,
-    NotFoundError,
     PolicyDeniedError,
     SecurityDependencyError,
     TenantAccessForbiddenError,
-    ValidationError as AMSCValidationError,
     register_exception_handlers,
 )
-from backend.app.core.logging import SensitiveDataFilter, RedactingFormatter, setup_logging
+from backend.app.core.logging import SensitiveDataFilter, RedactingFormatter
 from backend.app.main import create_app
 
 

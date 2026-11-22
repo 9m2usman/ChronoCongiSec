@@ -39,16 +39,14 @@ Verifies:
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Optional
 import pytest
 import httpx
 
 from backend.app.api.agents import (
     AgentEntity,
-    AgentRepositoryProtocol,
     AgentVersionEntity,
     InMemoryAgentRepository,
-    get_default_agent_repository,
 )
 from backend.app.core.config import Settings
 from backend.app.core.security import create_access_token

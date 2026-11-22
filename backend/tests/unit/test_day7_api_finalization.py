@@ -42,42 +42,21 @@ Verifies:
    - Reverse proxy spoofing rejected; trusted proxy right-to-left traversal enforced.
 """
 
-import json
-import re
 import pytest
 from datetime import timedelta
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from pydantic import BaseModel, Field
 
 from backend.app.core.config import Settings
-from backend.app.core.dependencies import (
-    InMemoryRateLimiter,
-    RateLimitResult,
-    get_rate_limiter,
-)
 from backend.app.core.exceptions import (
     AMSCException,
-    API_ERROR_RESPONSES,
-    AuthenticationError,
-    ErrorDetail,
-    ErrorResponse,
-    ForbiddenError,
-    NotFoundError,
-    PolicyDeniedError,
     RateLimitExceededError,
     SecurityDependencyError,
-    TenantAccessForbiddenError,
-    ValidationError as AMSCValidationError,
     register_exception_handlers,
     sanitize_validation_message,
 )
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
-from backend.app.tenancy.context import (
-    InMemoryAuthRepository,
-    create_demo_auth_repository,
-)
 
 # Test Constants
 TENANT_A_ID = "tenant-a-uuid-001"
