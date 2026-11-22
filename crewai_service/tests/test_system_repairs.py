@@ -259,6 +259,7 @@ def test_gemini_adapter_retries_on_429_and_succeeds():
     """Verify GeminiLLMAdapter retries on HTTP 429 with backoff and returns valid result."""
     adapter = GeminiLLMAdapter(api_key="mock-key-for-retry-test", model="gemini-3.5-flash-lite")
     adapter._pace_seconds = 0.0
+    adapter._client = None  # force REST branch; mock httpx.Client.post is the execution boundary
 
     resp_429 = MagicMock()
     resp_429.status_code = 429
@@ -294,6 +295,7 @@ def test_gemini_adapter_fails_fast_on_permanent_client_errors():
     """Verify GeminiLLMAdapter does NOT retry permanent 400, 401, or 403 errors."""
     adapter = GeminiLLMAdapter(api_key="mock-key-for-fail-fast", model="gemini-3.5-flash-lite")
     adapter._pace_seconds = 0.0
+    adapter._client = None  # force REST branch; mock httpx.Client.post is the execution boundary
 
     resp_401 = MagicMock()
     resp_401.status_code = 401
@@ -482,6 +484,7 @@ def test_gemini_adapter_retry_delay_from_error_message():
     """Verify GeminiLLMAdapter extracts numeric delay from error message strings on 429."""
     adapter = GeminiLLMAdapter(api_key="mock-key-for-regex-test", model="gemini-3.5-flash-lite")
     adapter._pace_seconds = 0.0
+    adapter._client = None  # force REST branch; mock httpx.Client.post is the execution boundary
 
     resp_429 = MagicMock()
     resp_429.status_code = 429

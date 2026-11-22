@@ -47,4 +47,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Database-level CONNECT privilege (granted dynamically during upgrade)
+    op.execute(
+        f"DO $$ BEGIN "
+        f"EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), '{APP_ROLE}'); "
+        f"END $$;"
+    )
+    # Schema-level privileges
+    op.execute(f"REVOKE ALL PRIVILEGES ON SCHEMA public FROM {APP_ROLE};")
+    # Table-level DML grants
+    op.execute(f"REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public FROM {APP_ROLE};")
+    # Sequence-level grants
+    op.execute(f"REVOKE USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public FROM {APP_ROLE};")
+    # Default privileges for future tables
+    op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM {APP_ROLE};")
+    # Default privileges for future sequences
+    op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE, SELECT ON SEQUENCES FROM {APP_ROLE};")
+    # Drop the role safely (now that all dependencies are removed)
     op.execute(f"DROP ROLE IF EXISTS {APP_ROLE};")
