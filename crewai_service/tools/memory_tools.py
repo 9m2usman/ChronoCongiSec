@@ -42,7 +42,20 @@ class TrustedMemoryToolFactory:
         @tool("retrieve_trusted_support_faq")
         def retrieve_trusted_support_faq(query_topic: str = "general", **kwargs: Any) -> str:
             """Retrieve trusted Customer Support FAQ and return policies from company memory."""
-            logger.info(f"Retrieving support knowledge for topic '{query_topic}'.")
+            if isinstance(query_topic, str) and query_topic.strip().startswith("{"):
+                try:
+                    import json, ast
+                    raw_dict = json.loads(query_topic.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(query_topic.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    query_topic = raw_dict.get("query_topic") or raw_dict.get("topic") or raw_dict.get("query") or "general"
+
+            resolved_topic = query_topic if query_topic != "general" else (kwargs.get("topic") or kwargs.get("query") or kwargs.get("query_topic") or query_topic)
+            logger.info(f"Retrieving support knowledge for topic '{resolved_topic}'.")
             records = client.query_trusted_memory()
 
             # Record reference in active trace run
@@ -88,7 +101,20 @@ class TrustedMemoryToolFactory:
         @tool("retrieve_hr_policy_knowledge")
         def retrieve_hr_policy_knowledge(policy_area: str = "general", **kwargs: Any) -> str:
             """Retrieve trusted HR policies (leave, benefits, code of conduct) from company memory."""
-            logger.info(f"Retrieving HR policy knowledge for area '{policy_area}'.")
+            if isinstance(policy_area, str) and policy_area.strip().startswith("{"):
+                try:
+                    import json, ast
+                    raw_dict = json.loads(policy_area.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(policy_area.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    policy_area = raw_dict.get("policy_area") or raw_dict.get("area") or raw_dict.get("topic") or raw_dict.get("query") or "general"
+
+            resolved_area = policy_area if policy_area != "general" else (kwargs.get("area") or kwargs.get("topic") or kwargs.get("query") or kwargs.get("policy_area") or policy_area)
+            logger.info(f"Retrieving HR policy knowledge for area '{resolved_area}'.")
             records = client.query_trusted_memory()
 
             active_runs = tracer.list_runs()
@@ -130,7 +156,20 @@ class TrustedMemoryToolFactory:
         @tool("retrieve_financial_procedure")
         def retrieve_financial_procedure(expense_category: str = "general", **kwargs: Any) -> str:
             """Retrieve approved corporate expenditure, invoice auditing, and reimbursement rules."""
-            logger.info(f"Retrieving financial procedure for category '{expense_category}'.")
+            if isinstance(expense_category, str) and expense_category.strip().startswith("{"):
+                try:
+                    import json, ast
+                    raw_dict = json.loads(expense_category.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(expense_category.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    expense_category = raw_dict.get("expense_category") or raw_dict.get("category") or raw_dict.get("type") or raw_dict.get("topic") or "general"
+
+            resolved_category = expense_category if expense_category != "general" else (kwargs.get("category") or kwargs.get("type") or kwargs.get("topic") or kwargs.get("expense_category") or expense_category)
+            logger.info(f"Retrieving financial procedure for category '{resolved_category}'.")
             records = client.query_trusted_memory()
 
             active_runs = tracer.list_runs()

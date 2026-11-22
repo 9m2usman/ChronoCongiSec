@@ -48,8 +48,35 @@ class GatewayToolFactory:
 
             Returns Gateway authorization receipt. Fails closed if Gateway returns BLOCK.
             """
+            import re
+            # If destination_account contains serialized JSON or dict, unpack arguments safely
+            if isinstance(destination_account, str) and destination_account.strip().startswith("{") and not amount:
+                try:
+                    import json, ast
+                    raw_dict = json.loads(destination_account.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(destination_account.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    destination_account = raw_dict.get("destination_account") or raw_dict.get("destination") or raw_dict.get("account") or ""
+                    amount = raw_dict.get("amount") or raw_dict.get("amount_usd") or 0.0
+                    currency = raw_dict.get("currency") or currency
+                    memo = raw_dict.get("memo") or memo
+                    if not memory_refs and "memory_refs" in raw_dict:
+                        memory_refs = raw_dict["memory_refs"]
+
             dest = destination_account or kwargs.get("destination", "") or kwargs.get("account", "acc-corp-disbursement")
-            amt = float(amount or kwargs.get("amount_usd", 0.0))
+            raw_amt = amount or kwargs.get("amount_usd", 0.0) or kwargs.get("amount", 0.0)
+            if isinstance(raw_amt, str):
+                cleaned_num = re.sub(r"[^\d.]", "", raw_amt)
+                amt = float(cleaned_num) if cleaned_num else 0.0
+            else:
+                try:
+                    amt = float(raw_amt)
+                except (ValueError, TypeError):
+                    amt = 0.0
             logger.info(
                 f"Agent [{agent_id}] submitting expense proposal: ${amt:.2f} {currency} to '{dest}'."
             )
@@ -130,8 +157,35 @@ class GatewayToolFactory:
             **kwargs: Any,
         ) -> str:
             """Submit a customer refund proposal to ChronoCogniSec Security Gateway."""
+            import re
+            # If customer_account contains serialized JSON or dict, unpack arguments safely
+            if isinstance(customer_account, str) and customer_account.strip().startswith("{") and not refund_amount:
+                try:
+                    import json, ast
+                    raw_dict = json.loads(customer_account.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(customer_account.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    customer_account = raw_dict.get("customer_account") or raw_dict.get("destination") or raw_dict.get("account") or ""
+                    refund_amount = raw_dict.get("refund_amount") or raw_dict.get("amount") or raw_dict.get("claim_amount_usd") or 0.0
+                    ticket_id = raw_dict.get("ticket_id") or raw_dict.get("case_id") or ""
+                    reason = raw_dict.get("reason") or reason
+                    if not memory_refs and "memory_refs" in raw_dict:
+                        memory_refs = raw_dict["memory_refs"]
+
             dest = customer_account or kwargs.get("destination", "") or kwargs.get("account", "acc-customer")
-            amt = float(refund_amount or kwargs.get("amount", 0.0) or kwargs.get("claim_amount_usd", 0.0))
+            raw_amt = refund_amount or kwargs.get("amount", 0.0) or kwargs.get("claim_amount_usd", 0.0)
+            if isinstance(raw_amt, str):
+                cleaned_num = re.sub(r"[^\d.]", "", raw_amt)
+                amt = float(cleaned_num) if cleaned_num else 0.0
+            else:
+                try:
+                    amt = float(raw_amt)
+                except (ValueError, TypeError):
+                    amt = 0.0
             tkt = ticket_id or kwargs.get("case_id", "tkt-default")
             logger.info(
                 f"Agent [{agent_id}] submitting customer refund: ${amt:.2f} for ticket '{tkt}'."

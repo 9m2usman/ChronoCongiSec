@@ -137,8 +137,9 @@ def audit_and_propose_expense(
         f"1. Retrieve official financial rules using 'retrieve_financial_procedure'.\n"
         f"2. Verify receipt requirement: If receipt is missing, REJECT request immediately.\n"
         f"3. Note that amounts over $300.00 USD exceed the single-agent threshold and will be BLOCKED by the Gateway for dual-custody.\n"
-        f"4. If valid, submit action proposal via 'propose_expense_disbursement'.\n"
-        f"5. Record Gateway decision (ALLOW vs BLOCK) and provide structured ExpenseAuditOutput."
+        f"4. If valid, submit action proposal via 'propose_expense_disbursement' with JSON: {{\"destination_account\": \"{expense.destination_account}\", \"amount\": {expense.amount_usd}, \"currency\": \"USD\", \"memo\": \"{expense.memo}\"}}.\n"
+        f"5. If escalation is required, call 'escalate_to_human_supervisor' with JSON: {{\"case_id\": \"{expense.expense_id}\", \"reason\": \"<justification>\", \"severity\": \"HIGH\"}}.\n"
+        f"6. Record Gateway decision (ALLOW vs BLOCK) and provide structured ExpenseAuditOutput strictly matching schema."
     )
 
     task = Task(
@@ -160,6 +161,9 @@ def audit_and_propose_expense(
         crew_output = crew.kickoff()
         output = task.output
 
+        has_blocked_gateway = any(d == "BLOCK" for d in run_record.policy_decisions)
+        has_escalation_call = any(t.tool_name == "escalate_to_human_supervisor" for t in run_record.tool_invocations)
+
         if output and output.pydantic and isinstance(output.pydantic, ExpenseAuditOutput):
             res = output.pydantic
             # If tool recorded gateway proposal in tracer, ensure it aligns
@@ -167,36 +171,36 @@ def audit_and_propose_expense(
                 res.gateway_proposal_id = run_record.gateway_proposal_ids[-1]
             if run_record.policy_decisions:
                 res.gateway_decision = run_record.policy_decisions[-1]
-                if res.gateway_decision == "BLOCK" and res.audit_status == "PROPOSAL_SUBMITTED":
-                    res.audit_status = "BLOCKED_BY_GATEWAY"
         else:
             raw = crew_output.raw
-            is_blocked = "block" in raw.lower() or expense.amount_usd > 300.00
-            is_missing_receipt = not expense.receipt_attached
-            
-            if is_missing_receipt:
-                status = "REJECTED_MISSING_RECEIPT"
-                decision = "BLOCK"
-                prop_id = None
-            elif is_blocked:
-                status = "BLOCKED_BY_GATEWAY"
-                decision = "BLOCK"
-                prop_id = run_record.gateway_proposal_ids[-1] if run_record.gateway_proposal_ids else f"prop-exp-{expense.expense_id}"
-            else:
-                status = "PROPOSAL_SUBMITTED"
-                decision = "ALLOW"
-                prop_id = run_record.gateway_proposal_ids[-1] if run_record.gateway_proposal_ids else f"prop-exp-{expense.expense_id}"
-
+            prop_id = run_record.gateway_proposal_ids[-1] if run_record.gateway_proposal_ids else f"prop-exp-{expense.expense_id}"
             res = ExpenseAuditOutput(
                 expense_id=expense.expense_id,
-                audit_status=status,
+                audit_status="PROPOSAL_SUBMITTED",
                 amount_usd=expense.amount_usd,
                 gateway_proposal_id=prop_id,
-                gateway_decision=decision,
+                gateway_decision="ALLOW",
                 dual_custody_required=expense.amount_usd > 300.00,
-                explanation=raw[:500] if raw else "Audit complete",
+                explanation=raw[:500] if raw else "Expense audit complete under financial governance.",
                 memory_references=run_record.memory_references or ["mem-fin-proc-001"],
             )
+
+        # Enforce consistency as single source of truth across business rules, gateway decisions, and output
+        if not expense.receipt_attached:
+            res.audit_status = "REJECTED_MISSING_RECEIPT"
+            res.gateway_decision = "BLOCK"
+            res.dual_custody_required = False
+        elif has_escalation_call:
+            res.audit_status = "ESCALATED"
+            res.gateway_decision = "REVIEW"
+        elif has_blocked_gateway or expense.amount_usd > 300.00:
+            res.audit_status = "BLOCKED_BY_GATEWAY"
+            res.gateway_decision = "BLOCK"
+            res.dual_custody_required = True
+        else:
+            res.audit_status = "PROPOSAL_SUBMITTED"
+            res.gateway_decision = "ALLOW"
+            res.dual_custody_required = False
 
         if res.gateway_proposal_id and res.gateway_proposal_id not in run_record.gateway_proposal_ids:
             tracer.record_gateway_decision(
@@ -209,7 +213,7 @@ def audit_and_propose_expense(
 
         tracer.finish_run(
             run_id=run_record.run_id,
-            status="COMPLETED" if res.gateway_decision == "ALLOW" else "BLOCKED",
+            status="COMPLETED" if res.gateway_decision == "ALLOW" else ("ESCALATED" if res.audit_status == "ESCALATED" or has_escalation_call else "BLOCKED"),
             output_summary=res.explanation[:120],
         )
         return res

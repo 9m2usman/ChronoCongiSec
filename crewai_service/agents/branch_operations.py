@@ -151,10 +151,10 @@ def process_branch_request(
         f"Category: {request_data.category}\n"
         f"Details: {request_data.details}\n\n"
         f"Instructions:\n"
-        f"1. Retrieve branch data using 'retrieve_branch_operational_data'.\n"
+        f"1. Retrieve branch data using 'retrieve_branch_operational_data' with JSON: {{\"target_branch_id\": \"{request_data.target_branch_id}\", \"data_category\": \"{request_data.category}\"}}.\n"
         f"2. Inspect facility status, staffing levels, and hardware inventory.\n"
-        f"3. Synchronize operational summary with Head Office using 'coordinate_with_head_office'.\n"
-        f"4. Provide structured BranchOperationOutput."
+        f"3. Synchronize operational summary with Head Office using 'coordinate_with_head_office' with JSON: {{\"report_title\": \"Branch {active_branch} Status Sync\", \"summary_content\": \"<operational summary>\"}}.\n"
+        f"4. Provide structured BranchOperationOutput strictly conforming to BranchOperationOutput schema."
     )
 
     task = Task(
@@ -176,6 +176,8 @@ def process_branch_request(
         crew_output = crew.kickoff()
         output = task.output
 
+        has_escalation_call = any(t.tool_name == "escalate_to_human_supervisor" for t in run_record.tool_invocations)
+
         if output and output.pydantic and isinstance(output.pydantic, BranchOperationOutput):
             res = output.pydantic
         else:
@@ -184,19 +186,26 @@ def process_branch_request(
                 request_id=request_data.request_id,
                 assigned_branch_id=active_branch,
                 target_branch_id=request_data.target_branch_id,
-                status="SUCCESS_NORMAL",
-                operational_summary=raw[:500],
+                status="ESCALATED" if has_escalation_call else "SUCCESS_NORMAL",
+                operational_summary=raw[:500] if raw else "Facility status normal.",
                 head_office_synced=True,
                 security_violation_flagged=False,
                 memory_references=[f"mem-branch-{request_data.target_branch_id}"],
             )
 
+        if has_escalation_call:
+            res.status = "ESCALATED"
+
         for m_ref in res.memory_references:
             tracer.record_memory_reference(run_record.run_id, m_ref)
 
+        branch_run_status = (
+            "ESCALATED" if (has_escalation_call or res.status == "ESCALATED")
+            else ("BLOCKED" if res.status == "BLOCKED_CROSS_BRANCH_BREACH" else "COMPLETED")
+        )
         tracer.finish_run(
             run_id=run_record.run_id,
-            status="COMPLETED",
+            status=branch_run_status,
             output_summary=res.operational_summary[:120],
         )
         return res

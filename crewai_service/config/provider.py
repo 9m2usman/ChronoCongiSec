@@ -65,13 +65,24 @@ class BaseLLMAdapter(ABC):
 
 
 class GeminiLLMAdapter(BaseLLMAdapter):
-    """Real LLM execution adapter for Google Gemini models via google-genai SDK or REST API."""
+    """Real LLM execution adapter for Google Gemini models via google-genai SDK or REST API.
 
-    def __init__(self, api_key: str, model: str = "gemini-1.5-flash") -> None:
+    Features:
+    - Thread-safe request pacing to avoid rate limit spikes.
+    - Exponential backoff with jitter and Retry-After inspection for HTTP 429.
+    - Retry exhaustion with detailed error diagnostics.
+    - Fail-fast on permanent authentication or malformed request errors.
+    """
+
+    _last_request_time: float = 0.0
+    _pace_lock = __import__("threading").Lock()
+
+    def __init__(self, api_key: str, model: str = "gemini-1.5-flash", pace_seconds: Optional[float] = None) -> None:
         if not api_key or not api_key.strip():
             raise ProviderExecutionError("GEMINI_API_KEY is required for GeminiLLMAdapter.")
         self._api_key = api_key.strip()
         self._model = model.strip()
+        self._pace_seconds = pace_seconds
         self._client: Optional[Any] = None
         self._init_client()
 
@@ -96,27 +107,37 @@ class GeminiLLMAdapter(BaseLLMAdapter):
     def model_name(self) -> str:
         return self._model
 
-    def complete(self, prompt: str) -> str:
-        """Execute genuine Gemini text generation."""
-        logger.info(f"Dispatching live LLM call to Gemini model '{self._model}'.")
-        if self._client is not None:
-            try:
-                response = self._client.models.generate_content(
-                    model=self._model,
-                    contents=prompt,
-                )
-                text = getattr(response, "text", None)
-                if text is not None:
-                    return text
-                return str(response)
-            except Exception as exc:
-                logger.error(f"Gemini SDK generation failed: {exc}")
-                raise ProviderExecutionError(f"Gemini API failure: {exc}") from exc
+    def _pace_request(self) -> None:
+        """Enforce request pacing to respect model rate limits (e.g., 15 RPM)."""
+        import time
+        settings = get_crewai_settings()
+        pace_seconds = self._pace_seconds if self._pace_seconds is not None else getattr(settings, "LLM_REQUEST_PACE_SECONDS", 4.0)
+        if pace_seconds <= 0:
+            return
+        with GeminiLLMAdapter._pace_lock:
+            now = time.time()
+            elapsed = now - GeminiLLMAdapter._last_request_time
+            if elapsed < pace_seconds:
+                sleep_time = pace_seconds - elapsed
+                logger.debug(f"Pacing LLM request: sleeping for {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
+            GeminiLLMAdapter._last_request_time = time.time()
 
-        # REST API fallback
+    def complete(self, prompt: str) -> str:
+        """Execute genuine Gemini text generation with pacing and exponential backoff on 429."""
+        import random
+        import re
+        import time
         import httpx
+
+        settings = get_crewai_settings()
+        max_retries = getattr(settings, "LLM_MAX_RETRIES", 5)
+        base_delay = getattr(settings, "LLM_RETRY_BASE_DELAY_SECONDS", 5.0)
+        max_delay = getattr(settings, "LLM_RETRY_MAX_DELAY_SECONDS", 60.0)
+
         clean_key = str(self._api_key).strip().strip("'\"")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent?key={clean_key}"
+        model_id = self._model.replace("models/", "").strip()
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": clean_key,
@@ -124,30 +145,142 @@ class GeminiLLMAdapter(BaseLLMAdapter):
         payload = {
             "contents": [{"parts": [{"text": prompt}]}]
         }
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                res = client.post(url, json=payload, headers=headers)
-                if res.status_code != 200:
+
+        for attempt in range(max_retries + 1):
+            self._pace_request()
+            logger.info(
+                f"Dispatching live LLM call to Gemini model '{self._model}' "
+                f"(attempt {attempt + 1}/{max_retries + 1})."
+            )
+
+            # SDK execution branch if available
+            if self._client is not None:
+                try:
+                    response = self._client.models.generate_content(
+                        model=self._model,
+                        contents=prompt,
+                    )
+                    text = getattr(response, "text", None)
+                    if text is not None:
+                        return text
+                    return str(response)
+                except Exception as sdk_exc:
+                    exc_str = str(sdk_exc)
+                    is_rate_limit = "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str
+                    if is_rate_limit and attempt < max_retries:
+                        delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(1.0, 3.0))
+                        logger.warning(
+                            f"Gemini SDK rate limit (429) hit: {sdk_exc}. "
+                            f"Backing off for {delay:.1f}s (retry {attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.error(f"Gemini SDK generation failed: {sdk_exc}")
+                    raise ProviderExecutionError(f"Gemini API failure: {sdk_exc}") from sdk_exc
+
+            # REST execution branch
+            try:
+                with httpx.Client(timeout=45.0) as client:
+                    res = client.post(url, json=payload, headers=headers)
+
+                    if res.status_code == 200:
+                        data = res.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = (candidates[0].get("content") or {}).get("parts", [])
+                            if parts:
+                                return parts[0].get("text", "")
+                        return json.dumps(data)
+
+                    # Extract error details
                     error_detail = res.text
                     try:
                         err_json = res.json()
                         error_detail = err_json.get("error", {}).get("message", res.text)
                     except Exception:
                         pass
+
+                    # 429 Rate Limit handling
+                    if res.status_code == 429:
+                        if attempt >= max_retries:
+                            raise ProviderExecutionError(
+                                f"Google Gemini API rate limit (HTTP 429) exhausted after {max_retries} retries: {error_detail}"
+                            )
+                        # Check Retry-After header
+                        delay = None
+                        retry_after_header = res.headers.get("Retry-After")
+                        if retry_after_header:
+                            try:
+                                delay = float(retry_after_header)
+                            except ValueError:
+                                pass
+
+                        # Check error details list or message text
+                        if delay is None:
+                            try:
+                                err_data = res.json()
+                                details = err_data.get("error", {}).get("details", [])
+                                for d in details:
+                                    if "retryDelay" in d:
+                                        rd = d["retryDelay"]
+                                        if isinstance(rd, dict):
+                                            delay = float(rd.get("seconds", 0)) + float(rd.get("nanos", 0)) / 1e9
+                                        elif isinstance(rd, (int, float)):
+                                            delay = float(rd)
+                                        else:
+                                            m = re.search(r"([0-9]+(?:\.[0-9]+)?)", str(rd))
+                                            if m:
+                                                delay = float(m.group(1))
+                                        if delay:
+                                            break
+                            except Exception:
+                                pass
+
+                        # Try extracting wait/retry time from error message string
+                        if delay is None:
+                            m = re.search(r"(?:retry after|retry in|wait)\s*([0-9]+(?:\.[0-9]+)?)\s*s?", error_detail, re.IGNORECASE)
+                            if m:
+                                delay = float(m.group(1))
+
+                        if delay is None:
+                            delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(1.0, 3.0))
+                        else:
+                            delay = min(max_delay, max(delay + random.uniform(0.5, 1.5), 2.0))
+
+                        logger.warning(
+                            f"Google Gemini API HTTP 429 (Rate Limit): Backing off for {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{max_retries}). Detail: {error_detail[:120]}"
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    # Server errors (500, 502, 503, 504) -> temporary, retryable
+                    if res.status_code in (500, 502, 503, 504) and attempt < max_retries:
+                        delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(1.0, 2.0))
+                        logger.warning(
+                            f"Google Gemini API server error (HTTP {res.status_code}): Retrying in {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{max_retries})..."
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    # Permanent client errors (400, 401, 403, 404) -> do not retry
                     raise ProviderExecutionError(
                         f"Google Gemini API error (HTTP {res.status_code}): {error_detail}"
                     )
-                data = res.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", "")
-                return json.dumps(data)
-        except ProviderExecutionError:
-            raise
-        except Exception as exc:
-            raise ProviderExecutionError(f"Gemini REST connection failed: {exc}") from exc
+
+            except httpx.RequestError as net_exc:
+                if attempt < max_retries:
+                    delay = min(max_delay, base_delay * (2 ** attempt) + random.uniform(1.0, 2.5))
+                    logger.warning(
+                        f"Gemini REST network error: {net_exc}. Retrying in {delay:.1f}s "
+                        f"(attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(delay)
+                    continue
+                raise ProviderExecutionError(f"Gemini REST connection failed: {net_exc}") from net_exc
+
+        raise ProviderExecutionError(f"Gemini LLM calls failed after {max_retries} attempts.")
 
     def generate_structured(self, prompt: str, schema: Type[BaseModel]) -> BaseModel:
         """Generate structured output validated against the Pydantic schema."""
@@ -158,7 +291,6 @@ class GeminiLLMAdapter(BaseLLMAdapter):
             f"Do not include any prose, explanations, or markdown fences outside the JSON."
         )
         raw_output = self.complete(json_prompt)
-        # Parse JSON
         clean = raw_output.strip()
         if clean.startswith("```json"):
             clean = clean[7:]
@@ -167,12 +299,27 @@ class GeminiLLMAdapter(BaseLLMAdapter):
         if clean.endswith("```"):
             clean = clean[:-3]
         clean = clean.strip()
+
+        parsed_dict = None
         try:
-            data = json.loads(clean)
-            return schema.model_validate(data)
-        except Exception as exc:
-            logger.warning(f"Structured output parsing failed: {exc}. Raw was: {raw_output}")
-            raise ProviderExecutionError(f"Failed to parse model output into {schema.__name__}: {exc}") from exc
+            parsed_dict = json.loads(clean)
+        except Exception:
+            s_idx = clean.find("{")
+            e_idx = clean.rfind("}")
+            if s_idx != -1 and e_idx > s_idx:
+                try:
+                    parsed_dict = json.loads(clean[s_idx : e_idx + 1])
+                except Exception:
+                    pass
+
+        if isinstance(parsed_dict, dict):
+            try:
+                return schema.model_validate(parsed_dict)
+            except Exception as exc:
+                logger.warning(f"Structured output validation failed: {exc}. Raw was: {raw_output}")
+                raise ProviderExecutionError(f"Failed to validate model output into {schema.__name__}: {exc}") from exc
+
+        raise ProviderExecutionError(f"Failed to extract JSON matching {schema.__name__} from model output: {raw_output[:200]}")
 
 
 class OpenAILLMAdapter(BaseLLMAdapter):
@@ -274,7 +421,7 @@ class TestDoubleLLMAdapter(BaseLLMAdapter):
         has_observation = has_scratchpad and ("\nObservation:" in scratchpad_content or "Observation: " in scratchpad_content)
 
         # 1. Enterprise Workflow Coordinator
-        if "enterprise workflow coordinator" in role.lower() or "enterpriseworkflowreport" in prompt_lower:
+        if "enterprise workflow coordinator" in role.lower() or (not role and ("enterpriseworkflowreport" in prompt_lower or "wf-ent" in prompt_lower)):
             wf_id = _extract([r"workflow\s*id:\s*([a-zA-Z0-9_\-]+)", r"initiative\s*'([^']+)'", r"'(wf-[^']+)'", r"(wf-[a-zA-Z0-9_\-]+)"], "wf-ent-505")
             return "Final Answer: " + json.dumps({
                 "workflow_id": wf_id,
@@ -290,12 +437,7 @@ class TestDoubleLLMAdapter(BaseLLMAdapter):
             })
 
         # 2. Customer Support Ticket
-        elif (
-            "customer support specialist" in role.lower()
-            or "supportresolutionoutput" in prompt_lower
-            or "customer support" in prompt_lower
-            or "ticket" in prompt_lower
-        ):
+        elif "customer support specialist" in role.lower() or (not role and ("customer support" in prompt_lower or "ticket" in prompt_lower or "supportresolutionoutput" in prompt_lower or "tkt-" in prompt_lower)):
             tkt_id = _extract([r"ticket\s*id:\s*([a-zA-Z0-9_\-]+)", r"ticket\s*'([^']+)'", r"'(tkt-[^']+)'", r"(tkt-[a-zA-Z0-9_\-]+)"], "tkt-support-101")
             issue_match = re.search(r"Issue Description:\s*([^\n\r]+)", task_desc, re.IGNORECASE)
             issue_text = issue_match.group(1).lower() if issue_match else prompt_lower
@@ -333,10 +475,15 @@ class TestDoubleLLMAdapter(BaseLLMAdapter):
             })
 
         # 3. HR Operations Request
-        elif "hr operations specialist" in role.lower() or "hrresolutionoutput" in prompt_lower:
+        elif "hr operations specialist" in role.lower() or (not role and ("hrresolutionoutput" in prompt_lower or "hr-req" in prompt_lower)):
             req_id = _extract([r"request\s*id:\s*([a-zA-Z0-9_\-]+)", r"request\s*'([^']+)'", r"'(hr-[^']+)'", r"(hr-[a-zA-Z0-9_\-]+)", r"(scen-02-hr)"], "hr-req-202")
             emp_id = _extract([r"employee\s*id:\s*([a-zA-Z0-9_\-]+)", r"employee\s*'([^']+)'", r"'(emp-[^']+)'", r"(emp-[a-zA-Z0-9_\-]+)"], "emp-042")
-            is_disc = any(k in task_desc_lower for k in ["disciplinary_dispute", "disciplinary dispute", "contract termination", "termination without", "demotion", "salary reduction", "hr-disc"])
+            req_type_match = re.search(r"Request Type:\s*([^\n\r]+)", task_desc, re.IGNORECASE)
+            req_type = req_type_match.group(1).lower() if req_type_match else ""
+            details_match = re.search(r"Details:\s*([^\n\r]+)", task_desc, re.IGNORECASE)
+            details_text = details_match.group(1).lower() if details_match else ""
+            req_text = f"{req_type} {details_text}"
+            is_disc = any(k in req_text for k in ["disciplinary", "termination", "demotion", "salary reduction", "harassment", "dispute"]) or "hr-disc" in prompt_lower
 
             if has_tools and not has_observation:
                 return "Thought: I must retrieve official HR policies from trusted memory.\nAction: retrieve_hr_policy_knowledge\nAction Input: {\"policy_area\": \"leave\"}"

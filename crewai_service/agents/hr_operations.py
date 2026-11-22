@@ -127,9 +127,9 @@ def process_hr_request(
         f"Instructions:\n"
         f"1. Retrieve official HR policies using 'retrieve_hr_policy_knowledge'.\n"
         f"2. Check request against documented annual leave (22 days) and medical leave rules.\n"
-        f"3. If the request involves termination, disciplinary action, or compensation modifications, "
-        f"strictly ESCALATE using 'escalate_to_human_supervisor' as autonomous action is forbidden.\n"
-        f"4. Provide structured HRResolutionOutput."
+        f"3. If the request involves termination, disciplinary disputes, harassment, or consequential employment actions, "
+        f"strictly call 'escalate_to_human_supervisor' with JSON: {{\"case_id\": \"{request_data.request_id}\", \"reason\": \"<justification>\", \"severity\": \"HIGH\"}} as autonomous action is forbidden.\n"
+        f"4. Provide structured HRResolutionOutput strictly conforming to the HRResolutionOutput schema."
     )
 
     task = Task(
@@ -151,23 +151,36 @@ def process_hr_request(
         crew_output = crew.kickoff()
         output = task.output
 
+        has_escalation_call = any(t.tool_name == "escalate_to_human_supervisor" for t in run_record.tool_invocations)
+        is_disciplinary = any(k in f"{request_data.request_type} {request_data.details}".lower() for k in ["disciplin", "terminat", "grievance", "harass", "demot", "severance", "whistleblower", "fraud"])
+
         if output and output.pydantic and isinstance(output.pydantic, HRResolutionOutput):
             res = output.pydantic
         else:
             raw = crew_output.raw
-            is_disciplinary = "disciplin" in request_data.request_type.lower() or "terminat" in request_data.details.lower()
-            is_escalated = is_disciplinary or "escalat" in raw.lower()
+            is_esc = is_disciplinary or has_escalation_call
             res = HRResolutionOutput(
                 request_id=request_data.request_id,
                 employee_id=request_data.employee_id,
                 request_type=request_data.request_type,
-                status="ESCALATED_FOR_HUMAN_REVIEW" if is_escalated else "ELIGIBLE",
+                status="ESCALATED_FOR_HUMAN_REVIEW" if is_esc else "ELIGIBLE",
                 policy_reference="AMSC-HR-POL-001 (Annual & Medical Leave Guidelines)",
-                explanation=raw[:500],
-                escalated=is_escalated,
-                escalation_reason="Consequential employment decision requires human HR director review" if is_escalated else None,
+                explanation=raw[:500] if raw else "Leave application evaluated under annual leave policy.",
+                escalated=is_esc,
+                escalation_reason="Consequential employment decision requires human HR director review" if is_esc else None,
                 memory_references=["mem-hr-pol-001"],
             )
+
+        # Enforce consistency as single source of truth: Escalation must NEVER be presented as an approval
+        if has_escalation_call or is_disciplinary or res.escalated:
+            res.escalated = True
+            res.status = "ESCALATED_FOR_HUMAN_REVIEW"
+            if not res.escalation_reason:
+                res.escalation_reason = "Consequential employment decision requires human HR director review"
+        else:
+            res.escalated = False
+            if res.status == "ESCALATED_FOR_HUMAN_REVIEW" or "APPROV" in res.status:
+                res.status = "ELIGIBLE"
 
         for m_ref in res.memory_references:
             tracer.record_memory_reference(run_record.run_id, m_ref)

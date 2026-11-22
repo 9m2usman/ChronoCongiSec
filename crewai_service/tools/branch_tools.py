@@ -43,6 +43,20 @@ class BranchToolFactory:
 
             Fails closed and raises SecurityBoundaryViolation if an agent attempts cross-branch access.
             """
+            # If target_branch_id contains serialized JSON or dict, unpack arguments safely
+            if isinstance(target_branch_id, str) and target_branch_id.strip().startswith("{"):
+                try:
+                    import json, ast
+                    raw_dict = json.loads(target_branch_id.strip())
+                except Exception:
+                    try:
+                        raw_dict = ast.literal_eval(target_branch_id.strip())
+                    except Exception:
+                        raw_dict = None
+                if isinstance(raw_dict, dict):
+                    target_branch_id = raw_dict.get("target_branch_id") or raw_dict.get("branch_id") or ""
+                    data_category = raw_dict.get("data_category") or raw_dict.get("category") or data_category
+
             tgt = target_branch_id or kwargs.get("branch_id") or assigned_branch
             category = data_category or kwargs.get("category", "FACILITY_STATUS")
             logger.info(
