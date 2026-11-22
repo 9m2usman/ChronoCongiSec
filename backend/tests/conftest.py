@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("EXECUTION_MODE", "test_double")
+os.environ.setdefault("LLM_PROVIDER", "test_double")
 """Pytest Configuration and Platform-Specific Environment Fixtures.
 
 Module: backend.tests.conftest

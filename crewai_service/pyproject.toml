@@ -1,33 +1,18 @@
 [build-system]
-requires = ["setuptools>=68.0.0", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chronocognisec-crewai-service"
-version = "1.0.0"
-description = "ChronoCogniSec Enterprise Genuine CrewAI Business Agents Service"
-readme = "README.md"
+version = "0.1.0"
 requires-python = ">=3.11"
-authors = [
-    { name = "ChronoCogniSec AI Engineering Council", email = "ai-engineering@chronocognisec.internal" }
-]
 dependencies = [
-    "crewai>=0.80.0",
-    "crewai-tools>=0.14.0",
     "pydantic>=2.4.2",
     "pydantic-settings>=2.0.0",
     "httpx>=0.28.1",
     "python-dotenv>=1.0.0",
-    "google-genai>=2.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=9.0.0",
-    "pytest-asyncio>=1.4.0",
-]
-
-[tool.pytest.ini_options]
-asyncio_mode = "strict"
-testpaths = ["tests"]
-python_files = ["test_*.py"]
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["crewai_service*"]
