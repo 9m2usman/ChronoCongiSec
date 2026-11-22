@@ -109,8 +109,74 @@ BRANCHES = [
     {
         "id": "branch-lhr-002",
         "tenant_id": "tenant-a-uuid-001",
-        "name": "Finance Operations Branch",
+        "name": "Finance & Regional Operations Branch (Lahore)",
         "status": "ACTIVE",
+    },
+    {
+        "id": "branch-khi-003",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Maritime & Logistics Operations Branch (Karachi)",
+        "status": "ACTIVE",
+    },
+    {
+        "id": "branch-isb-004",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Corporate Affairs & HR Branch (Islamabad)",
+        "status": "ACTIVE",
+    },
+]
+
+# Genuine CrewAI Business Agents
+CREWAI_AGENTS = [
+    {
+        "id": "agent-crew-support-001",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Customer Support Specialist",
+        "runtime": "CREWAI",
+        "model": "gemini-1.5-flash",
+        "status": "ACTIVE",
+        "config_version": "v1.0.0",
+        "system_prompt": "Authorized CrewAI Customer Support Specialist bounded by ChronoCogniSec Security Gateway.",
+    },
+    {
+        "id": "agent-crew-hr-002",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "HR Operations Specialist",
+        "runtime": "CREWAI",
+        "model": "gemini-1.5-flash",
+        "status": "ACTIVE",
+        "config_version": "v1.0.0",
+        "system_prompt": "Authorized CrewAI HR Operations Specialist enforcing official company handbooks.",
+    },
+    {
+        "id": "agent-crew-finance-003",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Finance Operations Specialist",
+        "runtime": "CREWAI",
+        "model": "gemini-1.5-flash",
+        "status": "ACTIVE",
+        "config_version": "v1.0.0",
+        "system_prompt": "Authorized CrewAI Finance Operations Specialist enforcing $300 dual-custody threshold.",
+    },
+    {
+        "id": "agent-crew-branch-004",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Branch Operations Specialist",
+        "runtime": "CREWAI",
+        "model": "gemini-1.5-flash",
+        "status": "ACTIVE",
+        "config_version": "v1.0.0",
+        "system_prompt": "Authorized CrewAI Branch Operations Specialist bounded strictly by assigned branch scope.",
+    },
+    {
+        "id": "agent-crew-coord-005",
+        "tenant_id": "tenant-a-uuid-001",
+        "name": "Enterprise Workflow Coordinator",
+        "runtime": "CREWAI",
+        "model": "gemini-1.5-flash",
+        "status": "ACTIVE",
+        "config_version": "v1.0.0",
+        "system_prompt": "Authorized CrewAI Enterprise Workflow Coordinator managing cross-department workflows.",
     },
 ]
 
@@ -181,6 +247,26 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
             )
             session.add(mem)
             stats["memberships"] += 1
+
+    # 5. Seed Genuine CrewAI Agents
+    stats["agents"] = 0
+    for a_data in CREWAI_AGENTS:
+        res = await session.execute(select(Agent).where(Agent.id == a_data["id"]))
+        if res.scalar_one_or_none() is None:
+            agent = Agent(
+                id=a_data["id"],
+                tenant_id=a_data["tenant_id"],
+                name=a_data["name"],
+                runtime=a_data["runtime"],
+                model=a_data["model"],
+                status=a_data["status"],
+                config_version=a_data["config_version"],
+                system_prompt=a_data["system_prompt"],
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(agent)
+            stats["agents"] += 1
 
     await session.commit()
     logger.info(f"Database seed complete: {stats}")

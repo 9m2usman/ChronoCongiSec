@@ -1,0 +1,19 @@
+# ChronoCogniSec Genuine CrewAI Business Agents Service
+# Python >= 3.11 (Python 3.12 recommended for CrewAI)
+
+# CrewAI Agent Framework
+crewai>=0.80.0
+crewai-tools>=0.14.0
+
+# LLM Providers & Clients
+google-genai>=2.0.0
+httpx>=0.28.1
+
+# Data Validation & Settings
+pydantic>=2.4.2
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+
+# Testing & Verification
+pytest>=9.0.0
+pytest-asyncio>=1.4.0

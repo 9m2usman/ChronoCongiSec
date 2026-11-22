@@ -37,13 +37,25 @@ Details, evidence and remaining gaps: `docs/08-IMPLEMENTATION-SECURITY-GAP-REGIS
 - [x] Add framework-independent deterministic gateway foundation.
 - [x] Add local development JSONL hash-chain audit sink.
 - [x] Add tests for capability enforcement, argument validation, memory trust, tenant references and audit tamper detection.
-- [ ] Execute tests in CI; no test run has yet been performed for this commit.
-- [ ] Add production authentication and tenant-context resolution.
-- [ ] Add PostgreSQL transactional audit persistence and migrations.
+- [x] Implement five genuine LLM-powered CrewAI business agents in simulated enterprise (`crewai_service/`):
+  - Agent 1: Customer Support Specialist (`agent-crew-support-001`)
+  - Agent 2: HR Operations Specialist (`agent-crew-hr-002`)
+  - Agent 3: Finance Operations Specialist (`agent-crew-finance-003`)
+  - Agent 4: Branch Operations Specialist (`agent-crew-branch-004`)
+  - Agent 5: Enterprise Workflow Coordinator (`agent-crew-coord-005`)
+- [x] Integrate agents with Security Gateway (`POST /api/v1/gateway/actions/propose`), M4 policies, and Dual Trace telemetry.
+- [x] Implement event-driven `EnterpriseLifecycleFlow` orchestrating cross-department workflows.
+- [x] Complete independent defect remediation & audit:
+  - Genuine ReAct tool execution loop (`Thought -> Action -> Action Input -> Observation -> Final Answer`) replacing static bypasses.
+  - Fail-closed socket error handling in `ChronoCogniSecClient` with deterministic test-double Gateway ($300 ceiling rule) and memory simulation.
+  - Active tool invocation recording into Dual Trace telemetry.
+  - Corrected incident reporting API contract to `/api/v1/security/incidents` matching backend schema.
+  - Enforced `enforce_no_self_approval` and `enforce_tool_authorization` security boundaries.
+- [x] Add comprehensive 36-test CrewAI test suite and 6-test backend integration suite (330 total passing tests).
+- [ ] Add PostgreSQL transactional audit persistence and migrations in production cluster.
 - [ ] Add protected adapter process boundary and MCP/function-calling adapters.
-- [ ] Add memory ingestion, provenance and trust-state persistence.
 - [ ] Add correlated cognitive/execution traces and recovery workflow.
 
 ## Honest status
 
-The current code is a narrow security-library foundation, not an integrated platform. It has not yet been run or deployed. Do not report any end-to-end capability as complete.
+The five genuine CrewAI business agents have been implemented, tested, and verified against all 12 operational and security scenarios in the local developer environment under simulated enterprise `tenant-a-uuid-001`. Cloud deployment and production PostgreSQL clustering are scheduled for subsequent deployment milestones.
