@@ -32,35 +32,18 @@ The system consists of three main pieces designed to work seamlessly together:
 
 ## 2. Resolving the Two Terminal Errors
 
-### Error A: `[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions` (Terminal 1)
+### Error A: `[WinError 10013] Socket access forbidden` or `ECONNREFUSED 127.0.0.1:8000`
 
 #### Why did this happen?
-On Windows 10/11, when Docker Desktop, WSL2, or Hyper-V starts, Windows Host Network Service (**WinNAT**) automatically reserves large dynamic blocks of TCP ports. In addition, port `8000` may be held by another background process or reserved port range. Windows refuses permission to bind to that port and throws `WinError 10013 (WSAEACCES)`.
+1. On Windows, binding explicitly to `127.0.0.1:8000` is blocked by Windows interface restrictions when WSL/Hyper-V is active.
+2. When the backend is not running, Vite's proxy logs `connect ECONNREFUSED 127.0.0.1:8000` whenever the frontend tries to fetch API data.
 
-#### Immediate Fix: Use Port 8001 (or bind to 0.0.0.0)
-You have two quick options:
-
-**Option 1: Run Backend on Port 8001 (Recommended)**
-```powershell
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001 --reload
-```
-*Note: Vite's `frontend/vite.config.ts` has been configured to read `VITE_BACKEND_URL`. If you run on 8001, start the frontend with:*
-```powershell
-$env:VITE_BACKEND_URL = "http://127.0.0.1:8001"
-npm run dev
-```
-
-**Option 2: Try binding to 0.0.0.0 on port 8000**
+#### The Permanent Fix: Bind to `0.0.0.0 --port 8000`
+Binding to `0.0.0.0` bypasses the Windows single-interface restriction completely:
 ```powershell
 python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-
-**Option 3: Release Windows Reserved Port Block (Administrator PowerShell)**
-If you want port 8000 freed permanently, open PowerShell as Administrator and run:
-```powershell
-net stop winnat
-net start winnat
-```
+Once this starts, `http://127.0.0.1:8000/health` responds immediately with `{"status":"healthy","service":"amsc-api"}` and Vite connects with 0 errors!
 
 ---
 
@@ -133,17 +116,16 @@ Open VS Code with the `ChronoCogniSec` repository. Open 3 PowerShell terminals (
 # 1. Navigate to repository root
 Set-Location E:\ChronoCogniSec
 
-# 2. Start the FastAPI backend server
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
-# (If port 8000 gave WinError 10013, use port 8001):
-# python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8001 --reload
+# 2. Start the FastAPI backend server on 0.0.0.0 (avoids Windows 10013 socket errors)
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 **Expected Output:**
 ```
 INFO:     Started server process
 INFO:     Waiting for application startup.
+2026-11-22 14:31:39 [INFO] [amsc] Starting Agent Memory Security Center v1.0.0 [development]
 INFO:     Application startup complete.
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
 
 ---
@@ -154,10 +136,7 @@ INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
 # 1. Navigate to frontend directory
 Set-Location E:\ChronoCogniSec\frontend
 
-# 2. (If backend is on port 8001, configure the proxy URL; otherwise skip this line)
-# $env:VITE_BACKEND_URL = "http://127.0.0.1:8001"
-
-# 3. Start the Vite development server
+# 2. Start the Vite development server
 npm run dev
 ```
 **Expected Output:**
