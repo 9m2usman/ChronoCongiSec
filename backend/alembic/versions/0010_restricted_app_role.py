@@ -7,7 +7,12 @@ Create Date: 2026-11-20
 Creates a dedicated `amsc_app` role that the backend connects as in production.
 The role has SELECT/INSERT/UPDATE/DELETE on application tables but NO DDL
 privileges (CREATE, ALTER, DROP) and NO superuser. The migration runner role
-(`amsc`) retains ownership. This enforces defense-in-depth at the DB layer.
+retains ownership. This enforces defense-in-depth at the DB layer.
+
+Database name is resolved dynamically via current_database() so the migration
+works regardless of the actual database name. Credentials are NOT hardcoded;
+the role is created without a password (OS-level auth) or the password is
+set via the AMS_APP_DB_PASSWORD environment variable at runtime, not in SQL.
 """
 from alembic import op
 
@@ -20,18 +25,24 @@ APP_ROLE = "amsc_app"
 
 
 def upgrade() -> None:
-    op.execute(f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN CREATE ROLE {APP_ROLE} LOGIN PASSWORD 'amsc_app_password'; END IF; END $$;")
-    # Grant connect
-    op.execute(f"GRANT CONNECT ON DATABASE amsc TO {APP_ROLE};")
+    # Create role idempotently WITHOUT a hardcoded password.
+    op.execute(
+        f"DO $$ BEGIN "
+        f"IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN "
+        f"CREATE ROLE {APP_ROLE} LOGIN NOCREATEDB NOCREATEROLE NOSUPERUSER; "
+        f"END IF; END $$;"
+    )
+    # Grant connect to the CURRENT database (dynamic, never hardcoded).
+    op.execute(
+        f"DO $$ BEGIN "
+        f"EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), '{APP_ROLE}'); "
+        f"END $$;"
+    )
     op.execute(f"GRANT USAGE ON SCHEMA public TO {APP_ROLE};")
-    # Grant DML on all existing tables
     op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {APP_ROLE};")
-    # Grant usage on sequences
     op.execute(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {APP_ROLE};")
-    # Default privileges for future tables (created by migration runner)
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {APP_ROLE};")
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {APP_ROLE};")
-    # Explicitly deny DDL — revoke CREATE on schema
     op.execute(f"REVOKE CREATE ON SCHEMA public FROM {APP_ROLE};")
 
 
