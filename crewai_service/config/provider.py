@@ -115,16 +115,27 @@ class GeminiLLMAdapter(BaseLLMAdapter):
 
         # REST API fallback
         import httpx
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent?key={self._api_key}"
+        clean_key = str(self._api_key).strip().strip("'\"")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent?key={clean_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": clean_key,
+        }
         payload = {
             "contents": [{"parts": [{"text": prompt}]}]
         }
         try:
             with httpx.Client(timeout=30.0) as client:
-                res = client.post(url, json=payload)
+                res = client.post(url, json=payload, headers=headers)
                 if res.status_code != 200:
+                    error_detail = res.text
+                    try:
+                        err_json = res.json()
+                        error_detail = err_json.get("error", {}).get("message", res.text)
+                    except Exception:
+                        pass
                     raise ProviderExecutionError(
-                        f"Gemini REST API error {res.status_code}: {res.text}"
+                        f"Google Gemini API error (HTTP {res.status_code}): {error_detail}"
                     )
                 data = res.json()
                 candidates = data.get("candidates", [])
@@ -133,6 +144,8 @@ class GeminiLLMAdapter(BaseLLMAdapter):
                     if parts:
                         return parts[0].get("text", "")
                 return json.dumps(data)
+        except ProviderExecutionError:
+            raise
         except Exception as exc:
             raise ProviderExecutionError(f"Gemini REST connection failed: {exc}") from exc
 

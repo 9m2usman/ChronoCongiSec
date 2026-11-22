@@ -210,12 +210,19 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="LLM Model identifier (defaults to .env)")
     args = parser.parse_args()
 
-    exit_code = run_synthetic_demonstration(
-        mode=args.mode,
-        provider=args.provider,
-        model=args.model,
-    )
-    sys.exit(exit_code)
+    try:
+        exit_code = run_synthetic_demonstration(
+            mode=args.mode,
+            provider=args.provider,
+            model=args.model,
+        )
+        sys.exit(exit_code)
+    except Exception as exc:
+        print(f"\n[AGENT EXECUTION ERROR] {exc}\n")
+        print("Tip: If using live LLM providers, verify that your API key in crewai_service/.env is valid.")
+        print("     To run the complete offline demonstration without any external keys, run:")
+        print("     python -m crewai_service.main --mode test_double\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

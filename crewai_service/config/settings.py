@@ -17,6 +17,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 _SERVICE_ENV = _SERVICE_DIR / ".env"
 
+# Evict accidental literal placeholder values from environment so they don't mask .env configuration
+for _placeholder_var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    _val = os.environ.get(_placeholder_var)
+    if _val and _val.strip().strip("'\"") in (
+        "your-actual-api-key",
+        "your_api_key_here",
+        "your_gemini_api_key_here",
+        "placeholder",
+        "",
+    ):
+        del os.environ[_placeholder_var]
+
 
 class ExecutionMode(str, Enum):
     LIVE = "live"
@@ -52,11 +64,21 @@ class CrewAISettings(BaseSettings):
     LLM_PROVIDER: SupportedProvider = SupportedProvider.GEMINI
     LLM_MODEL: str = "gemini-1.5-flash"
 
-    # --- Credentials (Configured securely via environment) ---
-    GEMINI_API_KEY: Optional[str] = Field(default_factory=lambda: os.environ.get("GEMINI_API_KEY"))
-    OPENAI_API_KEY: Optional[str] = Field(default_factory=lambda: os.environ.get("OPENAI_API_KEY"))
-    ANTHROPIC_API_KEY: Optional[str] = Field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY"))
+    # --- Credentials (Configured securely via environment or .env) ---
+    GEMINI_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+
+    @field_validator("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", mode="before")
+    @classmethod
+    def clean_credential_value(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return None
+        cleaned = str(v).strip().strip("'\"")
+        if cleaned in ("your-actual-api-key", "your_api_key_here", "your_gemini_api_key_here", "placeholder", ""):
+            return None
+        return cleaned
 
     # --- ChronoCogniSec Platform Integration ---
     CHRONOCONGISEC_API_BASE_URL: str = "http://127.0.0.1:8000/api/v1"
