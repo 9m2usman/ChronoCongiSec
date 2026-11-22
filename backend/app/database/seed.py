@@ -16,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.security import hash_password
+from backend.app.database.models.agents import Agent
+
 from backend.app.database.models.identity import (
     Branch,
     Membership,
