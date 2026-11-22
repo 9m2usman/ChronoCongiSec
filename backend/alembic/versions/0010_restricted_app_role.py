@@ -63,5 +63,8 @@ def downgrade() -> None:
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM {APP_ROLE};")
     # Default privileges for future sequences
     op.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE, SELECT ON SEQUENCES FROM {APP_ROLE};")
+    # Reassign and drop any objects owned by the role before dropping it
+    # (standard, non-destructive role-removal sequence).
+    op.execute(f"DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{APP_ROLE}') THEN EXECUTE format('REASSIGN OWNED BY %I TO %I', '{APP_ROLE}', current_user); EXECUTE format('DROP OWNED BY %I', '{APP_ROLE}'); END IF; END $$;")
     # Drop the role safely (now that all dependencies are removed)
     op.execute(f"DROP ROLE IF EXISTS {APP_ROLE};")
