@@ -26,6 +26,14 @@ from crewai_service.config.settings import (
     get_crewai_settings,
 )
 
+# CrewAI BaseLLM compatibility (when official crewai installed)
+try:
+    from crewai.llms.base_llm import BaseLLM as _CrewAIBaseLLM  # type: ignore
+    _CREWAI_BASELLM_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _CrewAIBaseLLM = None
+    _CREWAI_BASELLM_AVAILABLE = False
+
 logger = logging.getLogger("amsc.crewai.provider")
 
 
@@ -368,7 +376,7 @@ class OpenAILLMAdapter(BaseLLMAdapter):
         return schema.model_validate(json.loads(clean.strip()))
 
 
-class TestDoubleLLMAdapter(BaseLLMAdapter):
+class TestDoubleLLMAdapter(BaseLLMAdapter, *([_CrewAIBaseLLM] if _CREWAI_BASELLM_AVAILABLE else [])):
     """Explicitly labeled test double for unit testing and offline development.
 
     Never masquerades as a live AI execution. Returns deterministic, schema-compliant
@@ -378,6 +386,11 @@ class TestDoubleLLMAdapter(BaseLLMAdapter):
 
     def __init__(self, model: str = "test-double-deterministic") -> None:
         self._model = model
+        if _CREWAI_BASELLM_AVAILABLE and _CrewAIBaseLLM is not None:
+            try:
+                self.model = model
+            except Exception:
+                pass
 
     @property
     def is_real_execution(self) -> bool:
@@ -572,6 +585,24 @@ class TestDoubleLLMAdapter(BaseLLMAdapter):
             })
 
         return f"[TEST DOUBLE RESPONSE] Processed prompt successfully for {self._model}."
+
+    def call(self, messages, tools=None, callbacks=None, available_functions=None, from_task=None, from_agent=None, response_model=None, **kwargs):
+        if isinstance(messages, list):
+            prompt = "\\n".join(str(m.get("content", m) if isinstance(m, dict) else m) for m in messages)
+        else:
+            prompt = str(messages)
+        result = self.complete(prompt)
+        if response_model is not None:
+            try:
+                import json
+                data = json.loads(result)
+                return response_model.model_validate(data)
+            except Exception:
+                pass
+        return result
+
+    async def acall(self, messages, tools=None, callbacks=None, available_functions=None, from_task=None, from_agent=None, response_model=None, **kwargs):
+        return self.call(messages, tools=tools, callbacks=callbacks, available_functions=available_functions, from_task=from_task, from_agent=from_agent, response_model=response_model, **kwargs)
 
     def generate_structured(self, prompt: str, schema: Type[BaseModel]) -> BaseModel:
         logger.debug(f"[TEST DOUBLE] Synthesizing structured {schema.__name__} response.")
