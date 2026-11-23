@@ -32,7 +32,7 @@ import {
 } from '@/types';
 
 const API_BASE_URL = '/api/v1';
-const REQUEST_TIMEOUT_MS = 2500;
+const REQUEST_TIMEOUT_MS = 15000;
 
 /** Map the backend IncidentSummaryResponse to the UI SecurityIncident shape without inventing data. */
 export function toSecurityIncident(item: IncidentSummary): SecurityIncident {

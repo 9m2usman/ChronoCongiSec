@@ -136,15 +136,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if not hasattr(app.state, "db_session_factory") or app.state.db_session_factory is None:
         if db_url and db_url.startswith("postgresql+asyncpg://"):
             try:
+                import asyncio
+                from sqlalchemy import text
                 from backend.app.database.session import create_engine, create_session_factory
                 engine = create_engine(db_url)
+                # Verify database connectivity with a fast 1.0s timeout
+                async def _test_conn():
+                    async with engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                await asyncio.wait_for(_test_conn(), timeout=1.0)
                 app.state.db_engine = engine
                 app.state.db_session_factory = create_session_factory(engine)
-                logger.info("Initialized PostgreSQL async engine and session factory.")
+                logger.info("Initialized PostgreSQL async engine and verified connectivity.")
             except Exception as exc:
                 if settings.APP_ENV == "production":
                     raise RuntimeError(f"Production database initialization failed: {exc}")
-                logger.warning(f"Database initialization failed: {exc}")
+                logger.info(
+                    f"PostgreSQL at {db_url} is not running or unreachable ({exc}). "
+                    "Operating in in-memory development mode without background connection delays."
+                )
+                app.state.db_engine = None
+                app.state.db_session_factory = None
 
     # Wire persistent repositories when session factory is configured
     session_factory = getattr(app.state, "db_session_factory", None)

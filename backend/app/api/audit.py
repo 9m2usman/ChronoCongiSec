@@ -91,22 +91,27 @@ async def record_audit_event(
     session_factory = getattr(request.app.state, "db_session_factory", None)
     if session_factory is not None:
         try:
-            from backend.app.database.models.observability import AuditEvent
-            async with session_factory() as session:
-                async with session.begin():
-                    db_event = AuditEvent(
-                        id=event_id,
-                        tenant_id=tenant_id,
-                        actor_id=actor_id,
-                        event_type=event_type,
-                        resource_id=resource_id,
-                        action=action,
-                        outcome=outcome,
-                        trace_id=getattr(request.state, "trace_id", None),
-                        details_json=clean_details,
-                        occurred_at=now,
-                    )
-                    session.add(db_event)
+            import asyncio
+
+            async def _persist_audit() -> None:
+                from backend.app.database.models.observability import AuditEvent
+                async with session_factory() as session:
+                    async with session.begin():
+                        db_event = AuditEvent(
+                            id=event_id,
+                            tenant_id=tenant_id,
+                            actor_id=actor_id,
+                            event_type=event_type,
+                            resource_id=resource_id,
+                            action=action,
+                            outcome=outcome,
+                            trace_id=getattr(request.state, "trace_id", None),
+                            details_json=clean_details,
+                            occurred_at=now,
+                        )
+                        session.add(db_event)
+
+            await asyncio.wait_for(_persist_audit(), timeout=0.5)
         except Exception as exc:
             logger.warning("Failed to persist audit event to database: %s", exc)
 
