@@ -17,7 +17,7 @@ from crewai_service.config.settings import CrewAISettings
 from crewai_service.telemetry.tracer import get_tracer
 from crewai_service.tools.amsc_client import ChronoCogniSecClient
 from crewai_service.tools.gateway_tools import GatewayToolFactory
-from demo.run_demo2 import build_demo_environment, run_demo2, DEMO_AGENT_ID, DEMO_TENANT_ID
+from demo.run_demo2 import build_demo_environment, run_demo2, DEMO_AGENT_ID
 
 
 @pytest.mark.asyncio
@@ -237,7 +237,7 @@ def test_day5_trace_propagation_from_active_run_to_proposal() -> None:
     tracer.clear()
 
     active_trace_id = "trace-w3c-wf-4bf92f3577b34da6a3ce929d0e0e4736"
-    run_record = tracer.start_run(
+    tracer.start_run(
         agent_id="agent-crew-finance-003",
         agent_role="Finance Operations Specialist",
         task_id="task-trace-test",
