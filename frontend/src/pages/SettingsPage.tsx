@@ -60,7 +60,7 @@ export const SettingsPage: React.FC = () => {
 
   // Approval modal state
   const [selectedRequest, setSelectedRequest] = useState<RegistrationRequestDetail | null>(null);
-  const [approvalRole, setApprovalRole] = useState<Role>('SECURITY_ANALYST');
+  const [approvalRole, setApprovalRole] = useState<Role | string>('SECURITY_ANALYST');
   const [approvalBranchId, setApprovalBranchId] = useState<string>('branch-ho-001');
   const [approvalNote, setApprovalNote] = useState<string>('');
   const [isApproving, setIsApproving] = useState<boolean>(false);
@@ -72,7 +72,7 @@ export const SettingsPage: React.FC = () => {
 
   // Member editing state
   const [editingMember, setEditingMember] = useState<TenantMember | null>(null);
-  const [editMemberRole, setEditMemberRole] = useState<Role>('SECURITY_ANALYST');
+  const [editMemberRole, setEditMemberRole] = useState<Role | string>('SECURITY_ANALYST');
   const [editMemberBranchId, setEditMemberBranchId] = useState<string>('branch-ho-001');
   const [isUpdatingMember, setIsUpdatingMember] = useState<boolean>(false);
 
@@ -128,9 +128,9 @@ export const SettingsPage: React.FC = () => {
 
   const openApproveModal = (req: RegistrationRequestDetail) => {
     setSelectedRequest(req);
-    setApprovalRole('SECURITY_ANALYST');
-    const matchedBranch = branches.find((b) => b.code === req.requested_branch_code);
-    setApprovalBranchId(matchedBranch?.id ?? branches[0]?.id ?? 'branch-ho-001');
+    setApprovalRole(req.requested_role || 'SECURITY_ANALYST');
+    const matchedBranch = branches.find((b) => b.code === req.requested_branch_code || b.id === req.target_branch_id);
+    setApprovalBranchId(matchedBranch?.id ?? req.target_branch_id ?? branches[0]?.id ?? 'branch-ho-001');
     setApprovalNote('Approved by Tenant Admin');
   };
 
@@ -140,9 +140,12 @@ export const SettingsPage: React.FC = () => {
       setIsApproving(true);
       setGovernanceError(null);
       await apiClient.approveRegistration(selectedRequest.id, {
-        role: approvalRole,
+        role: approvalRole as Role,
+        assigned_role: approvalRole as Role,
         branch_id: approvalBranchId,
+        assigned_branch_id: approvalBranchId,
         reason: approvalNote,
+        review_note: approvalNote,
       });
       setGovernanceSuccess(`Registration request for ${selectedRequest.email} approved successfully.`);
       setSelectedRequest(null);
@@ -179,7 +182,7 @@ export const SettingsPage: React.FC = () => {
       setIsUpdatingMember(true);
       setGovernanceError(null);
       await apiClient.updateUserMembership(editingMember.user_id, {
-        role: editMemberRole,
+        role: editMemberRole as Role,
         branch_id: editMemberBranchId,
       });
       setGovernanceSuccess(`Membership for ${editingMember.email} updated.`);
@@ -550,6 +553,8 @@ export const SettingsPage: React.FC = () => {
                           <tr className="border-b border-slate-800 text-slate-400">
                             <th className="py-2 px-3 font-semibold">Applicant</th>
                             <th className="py-2 px-3 font-semibold">Email</th>
+                            <th className="py-2 px-3 font-semibold">Requested Role</th>
+                            <th className="py-2 px-3 font-semibold">Target Branch</th>
                             <th className="py-2 px-3 font-semibold">Requested Branch</th>
                             <th className="py-2 px-3 font-semibold">Date</th>
                             <th className="py-2 px-3 font-semibold text-right">Actions</th>
@@ -560,11 +565,15 @@ export const SettingsPage: React.FC = () => {
                             <tr key={req.id} className="hover:bg-slate-800/40 transition-colors">
                               <td className="py-3 px-3 text-slate-200 font-bold">{req.full_name}</td>
                               <td className="py-3 px-3 text-slate-300">{req.email}</td>
+                              <td className="py-3 px-3 text-blue-400 font-bold">{req.requested_role || 'SECURITY_ANALYST'}</td>
+                              <td className="py-3 px-3 text-cyan-300">
+                                {branches.find((b) => b.id === req.target_branch_id)?.name || req.target_branch_id || '-'}
+                              </td>
                               <td className="py-3 px-3 text-cyan-300 font-bold">
-                                {branches.find((b) => b.code === req.requested_branch_code)?.name || req.requested_branch_code}
+                                {branches.find((b) => b.code === req.requested_branch_code)?.name || req.requested_branch_code || '-'}
                               </td>
                               <td className="py-3 px-3 text-slate-400">
-                                {req.created_at ? new Date(req.created_at).toLocaleDateString() : '-'}
+                                {req.created_at ? new Date(String(req.created_at)).toLocaleDateString() : '-'}
                               </td>
                               <td className="py-3 px-3 text-right">
                                 <div className="inline-flex items-center gap-2">
@@ -652,10 +661,10 @@ export const SettingsPage: React.FC = () => {
                               {branches.find((b) => b.id === member.branch_id)?.name || member.branch_id || 'Company-Wide'}
                             </td>
                             <td className="py-3 px-3">
-                              {member.status === 'ACTIVE' ? (
+                              {member.status === 'ACTIVE' || member.is_active ? (
                                 <span className="text-emerald-400 font-bold">Active</span>
                               ) : (
-                                <span className="text-red-400 font-bold">{member.status}</span>
+                                <span className="text-red-400 font-bold">{member.status || 'Inactive'}</span>
                               )}
                             </td>
                             <td className="py-3 px-3 text-right">

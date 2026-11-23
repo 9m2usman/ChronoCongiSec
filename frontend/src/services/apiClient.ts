@@ -308,7 +308,7 @@ class ApiClient {
     const effectivePayload = {
       role: payload.role || payload.assigned_role,
       branch_id: payload.branch_id || payload.assigned_branch_id,
-      reason: payload.reason,
+      reason: payload.reason || payload.review_note,
     };
     const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/registrations/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',

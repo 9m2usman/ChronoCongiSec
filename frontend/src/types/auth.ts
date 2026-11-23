@@ -96,15 +96,16 @@ export interface TenantMember {
 }
 
 export interface ApproveRegistrationPayload {
-  role?: Role;
-  assigned_role?: Role;
+  role?: Role | string;
+  assigned_role?: Role | string;
   branch_id?: string | null;
   assigned_branch_id?: string | null;
   reason?: string;
+  review_note?: string;
 }
 
 export interface UpdateMemberPayload {
-  role?: Role;
+  role?: Role | string;
   branch_id?: string | null;
   status?: 'ACTIVE' | 'SUSPENDED' | 'REVOKED' | string;
 }
