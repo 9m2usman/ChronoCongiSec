@@ -24,7 +24,7 @@ import backend.app.database.models  # noqa: F401
 from backend.app.database.base import Base
 from backend.tests.database import helpers
 
-EXPECTED_TABLE_COUNT = 36
+EXPECTED_TABLE_COUNT = 37
 
 
 async def _public_tables(database: str) -> set[str]:
