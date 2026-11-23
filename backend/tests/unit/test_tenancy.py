@@ -16,7 +16,6 @@ from fastapi import FastAPI, Depends
 
 from backend.app.core.config import Settings
 from backend.app.core.dependencies import (
-    TenantContextDep,
     require_roles,
 )
 from backend.app.tenancy.context import (
@@ -24,7 +23,6 @@ from backend.app.tenancy.context import (
     TenantContext,
     TenantRecord,
     UserRecord,
-    MembershipRecord,
     get_default_auth_repository,
     set_default_auth_repository,
 )

@@ -3,7 +3,7 @@
 Module: backend.app.api.chronimem
 Owner: M3 — Knowledge & Memory Systems Lead
 
-Not yet registered in main.py: M1 to add app.include_router(...)
+Registered in main.py via api_router.include_router()
 
 Implements Document 05 Section 5.1 Route Catalog:
 - GET /chronimem/timeline (Get temporal version timeline)

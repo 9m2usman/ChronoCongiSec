@@ -12,28 +12,22 @@ Verifies all critical audit findings:
 
 import pytest
 import httpx
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError as PydanticValidationError
 
 from backend.app.core.config import Settings
 from backend.app.core.dependencies import (
     InMemoryRateLimiter,
-    RateLimitResult,
-    get_rate_limiter,
 )
 from backend.app.core.exceptions import (
     AMSCException,
     AuthenticationError,
-    PolicyDeniedError,
-    RateLimitExceededError,
-    SecurityDependencyError,
     register_exception_handlers,
 )
 from backend.app.main import create_app
 from backend.app.tenancy.context import (
     InMemoryAuthRepository,
-    UserRecord,
     create_demo_auth_repository,
     get_default_auth_repository,
 )

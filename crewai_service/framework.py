@@ -44,8 +44,8 @@ try:
     except ImportError:
         _OfficialFlow, _official_start, _official_listen = None, None, None
 
-    _OFFICIAL_CREWAI_AVAILABLE = True
-    logger.info("Official CrewAI package detected and activated.")
+    _OFFICIAL_CREWAI_AVAILABLE = False
+    logger.info("Forcing native CrewAI-compatible runtime for stable tool/agent field compatibility.")
 except ImportError:
     _OFFICIAL_CREWAI_AVAILABLE = False
     logger.info("Official CrewAI package not found in current environment. Using native CrewAI-compatible runtime.")
@@ -910,3 +910,36 @@ Task = _OfficialTask if _OFFICIAL_CREWAI_AVAILABLE else NativeTask
 Flow = (_OfficialFlow if (_OFFICIAL_CREWAI_AVAILABLE and _OfficialFlow) else NativeFlow)
 start = (_official_start if (_OFFICIAL_CREWAI_AVAILABLE and _official_start) else start)
 listen = (_official_listen if (_OFFICIAL_CREWAI_AVAILABLE and _official_listen) else listen)
+# Use official CrewAI tool decorator + BaseTool when available so tools are accepted by official Agent
+if _OFFICIAL_CREWAI_AVAILABLE:
+    try:
+        from crewai.tools import BaseTool as _OfficialBaseTool  # type: ignore
+        BaseTool = _OfficialBaseTool
+    except Exception:
+        pass
+    _official_tool_raw = _official_tool
+    def tool(name_or_func=None, description=None, **kw):
+        if description is not None and isinstance(name_or_func, str):
+            name = name_or_func
+            def decorator(fn):
+                fn.__doc__ = fn.__doc__ or description
+                return _official_tool_raw(name)(fn)
+            # support direct call with function
+            return decorator
+        # allow passing function directly
+        if callable(name_or_func) and description is None:
+            return _official_tool_raw(name_or_func)
+        if callable(name_or_func) and description is not None:
+            name_or_func.__doc__ = name_or_func.__doc__ or description
+            return _official_tool_raw(name_or_func)
+        # name_or_func is str name without description
+        if isinstance(name_or_func, str) and description is None:
+            return _official_tool_raw(name_or_func)
+        # fallback: description provided with name
+        if isinstance(name_or_func, str) and description is not None:
+            name = name_or_func
+            def decorator(fn):
+                fn.__doc__ = fn.__doc__ or description
+                return _official_tool_raw(name)(fn)
+            return decorator
+        return _official_tool_raw(name_or_func, **kw)

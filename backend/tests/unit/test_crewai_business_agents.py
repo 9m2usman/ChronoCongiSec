@@ -15,7 +15,6 @@ Verifies:
 import pytest
 
 from crewai_service.agents.branch_operations import (
-    BranchOperationOutput,
     BranchRequestInput,
     build_branch_operations_agent,
     process_branch_request,
@@ -40,7 +39,6 @@ from crewai_service.agents.hr_operations import (
 )
 from crewai_service.agents.workflow_coordinator import (
     EnterpriseWorkflowInput,
-    EnterpriseWorkflowReport,
     build_workflow_coordinator_agent,
     execute_enterprise_workflow,
 )
@@ -51,9 +49,7 @@ from crewai_service.security.boundaries import (
     enforce_no_self_approval,
     enforce_tenant_isolation,
     enforce_tool_authorization,
-    validate_memory_trust,
 )
-from crewai_service.telemetry.tracer import get_tracer
 from crewai_service.tools.amsc_client import ChronoCogniSecClient
 
 

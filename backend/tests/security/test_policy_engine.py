@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 
 from backend.app.core.exceptions import ValidationError
-from backend.app.memory import AgentRecord, transition_memory_trust_state, update_memory
+from backend.app.memory import AgentRecord, update_memory
 from backend.app.security import policy as policy_mod
 from backend.app.security.policy import (
     MANDATORY_CHECKS,

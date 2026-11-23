@@ -16,8 +16,7 @@ import hashlib
 import hmac
 import json
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 import httpx
 import pytest
 from starlette.requests import Request
@@ -25,19 +24,16 @@ from starlette.requests import Request
 from backend.app.core.config import Settings
 from backend.app.core.dependencies import (
     InMemoryRateLimiter,
-    RateLimitResult,
     RedisRateLimiter,
     get_rate_limiter,
 )
 from backend.app.core.exceptions import (
     AuthenticationError,
     SecurityDependencyError,
-    TenantAccessForbiddenError,
     ValidationError,
 )
 from backend.app.core.security import (
     InMemoryRevocationStore,
-    KeyRing,
     RedisRevocationStore,
     create_access_token,
     decode_access_token,
@@ -47,12 +43,10 @@ from backend.app.main import create_app
 from backend.app.tenancy.context import (
     MembershipRecord,
     TenantContext,
-    resolve_tenant_context_from_request,
 )
 from backend.app.api.traces import (
     InMemoryTraceRepository,
     redact_sensitive_dict,
-    redact_sensitive_value,
 )
 from backend.app.api.incident_management import (
     EvidenceType,

@@ -1,0 +1,46 @@
+# Production overrides — apply with:
+#   docker compose -f docker-compose.yml -f compose.production.yaml up -d --build
+services:
+  postgres:
+    ports: []  # Do not expose Postgres publicly
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  redis:
+    ports: []  # Do not expose Redis publicly
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    restart: always
+
+  backend:
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      RATE_LIMIT_HMAC_SECRET: ${RATE_LIMIT_HMAC_SECRET:?RATE_LIMIT_HMAC_SECRET must be set}
+      AUTH_BACKEND: database
+      ALLOW_IN_MEMORY_AUTH: "false"
+      RATE_LIMITER_BACKEND: redis
+      ALLOW_IN_MEMORY_RATE_LIMITER: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
+      DATABASE_URL: postgresql+asyncpg://amsc:${POSTGRES_PASSWORD}@postgres:5432/amsc
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  frontend:
+    restart: always
+
+  crewai:
+    restart: always
+    environment:
+      APP_ENV: production

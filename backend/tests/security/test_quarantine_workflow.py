@@ -29,7 +29,6 @@ from backend.app.memory import (
     MemoryNotFoundError,
     get_memory_detail,
     retrieve_memory,
-    transition_memory_trust_state,
     update_memory,
 )
 from backend.app.security import quarantine as q_mod
