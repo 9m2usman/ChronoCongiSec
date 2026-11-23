@@ -18,9 +18,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from backend.app.api.admin import router as admin_router
 from backend.app.api.agents import router as agents_router
 from backend.app.api.audit import router as audit_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.drift import router as drift_router
 from backend.app.api.gateway import router as gateway_router
@@ -129,6 +131,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         f"Starting {settings.APP_NAME} v{settings.APP_VERSION} [{settings.APP_ENV}]"
     )
 
+    # Database engine and session factory initialization
+    db_url = getattr(settings, "DATABASE_URL", None)
+    if not hasattr(app.state, "db_session_factory") or app.state.db_session_factory is None:
+        if db_url and db_url.startswith("postgresql+asyncpg://"):
+            try:
+                from backend.app.database.session import create_engine, create_session_factory
+                engine = create_engine(db_url)
+                app.state.db_engine = engine
+                app.state.db_session_factory = create_session_factory(engine)
+                logger.info("Initialized PostgreSQL async engine and session factory.")
+            except Exception as exc:
+                if settings.APP_ENV == "production":
+                    raise RuntimeError(f"Production database initialization failed: {exc}")
+                logger.warning(f"Database initialization failed: {exc}")
+
+    # Wire persistent repositories when session factory is configured
+    session_factory = getattr(app.state, "db_session_factory", None)
+    if session_factory is not None:
+        if getattr(app.state, "agent_repo", None) is None:
+            from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
+            app.state.agent_repo = SqlAlchemyAgentRepository(session_factory)
+
+        if getattr(app.state, "memory_repo", None) is None:
+            from backend.app.memory.adapters import DatabaseMemoryRepository
+            app.state.memory_repo = DatabaseMemoryRepository(session_factory)
+
+        if getattr(app.state, "drift_service", None) is None:
+            from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
+            app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
+
+        if getattr(app.state, "recovery_service", None) is None:
+            from backend.app.recovery.store import create_recovery_service
+            app.state.recovery_service = create_recovery_service(
+                session_factory,
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
+
+        if getattr(app.state, "outbox_processor", None) is None:
+            from backend.app.workers.outbox import OutboxProcessor
+            app.state.outbox_processor = OutboxProcessor(session_factory)
+
     # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
         auth_repo = getattr(app.state, "auth_repo", None)
@@ -219,6 +263,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
+
+    outbox_proc = getattr(app.state, "outbox_processor", None)
+    if outbox_proc is not None:
+        try:
+            outbox_proc.stop()
+        except Exception:
+            pass
+
+    db_engine = getattr(app.state, "db_engine", None)
+    if db_engine is not None:
+        try:
+            await db_engine.dispose()
+        except Exception:
+            pass
+
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 
@@ -269,14 +328,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from backend.app.memory.repository import get_default_repository
         app.state.memory_repo = get_default_repository()
     else:
-        app.state.memory_repo = None
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.memory.adapters import DatabaseMemoryRepository
+            app.state.memory_repo = DatabaseMemoryRepository(session_factory)
+        else:
+            app.state.memory_repo = None
 
     # Agent repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
         from backend.app.api.agents import get_default_agent_repository
         app.state.agent_repo = get_default_agent_repository()
     else:
-        app.state.agent_repo = None
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
+            app.state.agent_repo = SqlAlchemyAgentRepository(session_factory)
+        else:
+            app.state.agent_repo = None
 
     # Gateway repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
@@ -538,6 +607,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return ReadinessResponse(status="ready", service="amsc-api", dependencies=deps)
 
     api_router.include_router(auth_router)
+    api_router.include_router(branches_router)
+    api_router.include_router(admin_router)
     api_router.include_router(tenants_router)
     api_router.include_router(agents_router)
     api_router.include_router(gateway_router)

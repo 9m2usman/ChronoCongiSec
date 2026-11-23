@@ -58,6 +58,13 @@ async def get_repository(request: Request) -> MemoryRepository:
     settings = getattr(request.app.state, "settings", None) or get_settings()
     repo = getattr(request.app.state, "memory_repo", None)
 
+    if repo is None:
+        session_factory = getattr(request.app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.memory.adapters import DatabaseMemoryRepository
+            repo = DatabaseMemoryRepository(session_factory)
+            request.app.state.memory_repo = repo
+
     if settings.APP_ENV == "production":
         if repo is None or getattr(repo, "is_in_memory", True) or not getattr(repo, "is_persistent", False):
             raise SecurityDependencyError("Production database memory repository is not configured.")

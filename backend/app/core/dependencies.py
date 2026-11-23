@@ -60,6 +60,17 @@ async def get_auth_repo(
     if repo is not None:
         return repo
 
+    session_factory = getattr(request.app.state, "db_session_factory", None)
+    if session_factory is not None and (
+        settings.AUTH_BACKEND == "database"
+        or settings.APP_ENV == "production"
+        or not settings.ALLOW_IN_MEMORY_AUTH
+    ):
+        from backend.app.database.repositories.auth import DatabaseAuthRepository
+        db_repo = DatabaseAuthRepository(session_factory)
+        request.app.state.auth_repo = db_repo
+        return db_repo
+
     if (
         settings.APP_ENV == "production"
         or not settings.ALLOW_IN_MEMORY_AUTH

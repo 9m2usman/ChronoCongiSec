@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.security import hash_password
-from backend.app.database.models.agents import Agent
+from backend.app.database.models.agents import Agent, ToolRegistration, AgentToolPermission
 
 from backend.app.database.models.identity import (
     Branch,
@@ -73,6 +73,13 @@ USERS = [
         "status": "ACTIVE",
         "is_superadmin": False,
     },
+    {
+        "id": "usr-analyst-comp-a",
+        "email": "analyst@company-a.com",
+        "full_name": "Alice Analyst",
+        "status": "ACTIVE",
+        "is_superadmin": False,
+    },
 ]
 
 # Memberships
@@ -96,6 +103,13 @@ MEMBERSHIPS = [
         "user_id": "usr-dev-dave-03",
         "tenant_id": "tenant-a-uuid-001",
         "role": "AI_DEVELOPER",
+        "status": "ACTIVE",
+    },
+    {
+        "id": "mem-analyst-comp-a-01",
+        "user_id": "usr-analyst-comp-a",
+        "tenant_id": "tenant-a-uuid-001",
+        "role": "SECURITY_ANALYST",
         "status": "ACTIVE",
     },
 ]
@@ -204,7 +218,7 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
             stats["tenants"] += 1
 
     # 2. Seed Users
-    default_pw_hash = hash_password("CorrectHorseBatteryStaple2026!")
+    default_pw_hash = hash_password("SecurePassword123!")
     for u_data in USERS:
         res = await session.execute(select(User).where(User.id == u_data["id"]))
         if res.scalar_one_or_none() is None:
@@ -269,6 +283,50 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
             )
             session.add(agent)
             stats["agents"] += 1
+
+    # 6. Seed Protected Tool Registrations & Agent Permissions
+    res_tool = await session.execute(
+        select(ToolRegistration).where(
+            ToolRegistration.tenant_id == "tenant-a-uuid-001",
+            ToolRegistration.name == "sandbox_transfer",
+        )
+    )
+    tool_reg = res_tool.scalar_one_or_none()
+    if tool_reg is None:
+        tool_reg = ToolRegistration(
+            id="tool-sandbox-transfer",
+            tenant_id="tenant-a-uuid-001",
+            name="sandbox_transfer",
+            adapter_type="INTERNAL",
+            description="Sandbox funds transfer and disbursement tool",
+            is_protected=True,
+            schema_definition={"type": "object", "properties": {"destination": {"type": "string"}, "amount": {"type": "number"}}},
+            created_at=now,
+        )
+        session.add(tool_reg)
+        await session.flush()
+
+    for aid, ops, max_amt in [
+        ("agent-crew-support-001", "transfer_funds", 300.0),
+        ("agent-crew-finance-003", "transfer_funds", 10000.0),
+    ]:
+        res_perm = await session.execute(
+            select(AgentToolPermission).where(
+                AgentToolPermission.agent_id == aid,
+                AgentToolPermission.tool_id == tool_reg.id,
+            )
+        )
+        if res_perm.scalar_one_or_none() is None:
+            perm = AgentToolPermission(
+                id=f"perm-{aid[:16]}-transfer",
+                tenant_id="tenant-a-uuid-001",
+                agent_id=aid,
+                tool_id=tool_reg.id,
+                allowed_operations=ops,
+                constraints_json={"max_amount": max_amt, "approval_threshold_amount": 300.0},
+                created_at=now,
+            )
+            session.add(perm)
 
     await session.commit()
     logger.info(f"Database seed complete: {stats}")

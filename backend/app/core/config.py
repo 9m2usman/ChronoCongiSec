@@ -110,6 +110,7 @@ class Settings(BaseSettings):
             "X-Correlation-ID",
             "Idempotency-Key",
             "X-Idempotency-Key",
+            "X-Bootstrap-Secret",
         ],
         description="Explicit allowed HTTP request headers for CORS",
     )
@@ -132,6 +133,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = Field(
         default="HS256",
         description="JWT cryptographic signing algorithm",
+    )
+    BOOTSTRAP_SECRET: str = Field(
+        default="",
+        description="Managed secret for initial Tenant Admin bootstrap authorization",
     )
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
         default=60,

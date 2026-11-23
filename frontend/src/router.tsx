@@ -1,5 +1,9 @@
 import { createBrowserRouter } from 'react-router-dom';
 import { AppShell } from '@/layouts/AppShell';
+import { AuthGuard } from '@/components/auth/AuthGuard';
+import { LoginPage } from '@/pages/LoginPage';
+import { RegisterPage } from '@/pages/RegisterPage';
+import { RegistrationStatusPage } from '@/pages/RegistrationStatusPage';
 import { OverviewPage } from '@/pages/OverviewPage';
 import { AgentRegistryPage } from '@/pages/AgentRegistryPage';
 import { MemoryExplorerPage } from '@/pages/MemoryExplorerPage';
@@ -14,8 +18,24 @@ import { SettingsPage } from '@/pages/SettingsPage';
 
 export const router = createBrowserRouter([
   {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
+    path: '/register',
+    element: <RegisterPage />,
+  },
+  {
+    path: '/registration-status/:requestId',
+    element: <RegistrationStatusPage />,
+  },
+  {
     path: '/',
-    element: <AppShell />,
+    element: (
+      <AuthGuard>
+        <AppShell />
+      </AuthGuard>
+    ),
     children: [
       { index: true, element: <OverviewPage /> },
       { path: 'overview', element: <OverviewPage /> },

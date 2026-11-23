@@ -31,3 +31,4 @@ dev = [
 asyncio_mode = "strict"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = [".."]

@@ -73,6 +73,12 @@ class RecoveryPlanResponse(BaseModel):
 
 def _service(request: Request) -> RecoveryService:
     service = getattr(request.app.state, "recovery_service", None)
+    if service is None:
+        session_factory = getattr(request.app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.recovery.store import create_recovery_service
+            service = create_recovery_service(session_factory)
+            request.app.state.recovery_service = service
     if not isinstance(service, RecoveryService):
         raise SecurityDependencyError("Recovery service is not configured.")
     return service

@@ -75,6 +75,7 @@ class Membership(Base):
     migration 0003 were backfilled to INACTIVE (their status was unknown).
     Revoke access by setting ``status``, not by deleting the row: approvals
     reference the membership with ON DELETE RESTRICT.
+    ``branch_id`` designates the user's authorized branch scope (GAP-028 / Phase 1).
     """
 
     __tablename__ = "memberships"
@@ -87,15 +88,56 @@ class Membership(Base):
     role: Mapped[str] = mapped_column(
         String(64), nullable=False, server_default=text("'SECURITY_ANALYST'")
     )
+    branch_id: Mapped[Optional[str]] = mapped_column(
+        String(ID_LENGTH), ForeignKey("branches.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
     created_at: Mapped[datetime] = created_at_column()
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", name="uq_tenant_user"),
         Index("idx_memberships_tenant_user", "tenant_id", "user_id"),
+        Index("idx_memberships_branch", "branch_id"),
         CheckConstraint(
             "status IN (" + ", ".join(f"'{s}'" for s in MEMBERSHIP_STATUSES) + ")",
             name="status",
+        ),
+    )
+
+
+# Registration request lifecycle (AMSC Phase 1 IAM)
+REGISTRATION_STATUSES = ("PENDING", "APPROVED", "REJECTED", "EXPIRED")
+
+
+class RegistrationRequest(Base):
+    """Employee registration request requiring Tenant Admin approval."""
+
+    __tablename__ = "registration_requests"
+
+    id: Mapped[str] = id_column()
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    requested_branch_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
+    created_at: Mapped[datetime] = created_at_column()
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String(ID_LENGTH), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    review_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    assigned_role: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    assigned_branch_id: Mapped[Optional[str]] = mapped_column(
+        String(ID_LENGTH), ForeignKey("branches.id", ondelete="SET NULL"), nullable=True
+    )
+
+    __table_args__ = (
+        Index("idx_reg_requests_tenant_status", "tenant_id", "status"),
+        Index("idx_reg_requests_email", "email"),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in REGISTRATION_STATUSES) + ")",
+            name="ck_reg_requests_status",
         ),
     )
 

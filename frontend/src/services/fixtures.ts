@@ -696,6 +696,7 @@ export const TENANT_FIXTURE_STORE: Record<string, TenantFixtureDataset> = {
   'tenant-alphacorp': JSON.parse(JSON.stringify(ALPHACORP_FIXTURES)),
   'tenant-betashield': JSON.parse(JSON.stringify(BETASHIELD_FIXTURES)),
   'tenant-gammaai': JSON.parse(JSON.stringify(GAMMAAI_FIXTURES)),
+  'tenant-a-uuid-001': JSON.parse(JSON.stringify(ALPHACORP_FIXTURES)),
 };
 
 /**
