@@ -30,22 +30,15 @@ Covers all 22 required acceptance criteria:
 
 import pytest
 import httpx
-from datetime import datetime, timezone
 
 from backend.app.core.config import Settings
 from backend.app.core.security import decode_access_token, hash_password
-from backend.app.security.authorization import Role
 from backend.app.main import create_app
 from backend.app.tenancy.context import (
     InMemoryAuthRepository,
-    TenantRecord,
     UserRecord,
     MembershipRecord,
-    BranchRecord,
-    RegistrationRequestRecord,
-    AuthRepositoryProtocol,
     seed_demo_accounts,
-    get_default_auth_repository,
     set_default_auth_repository,
 )
 from backend.app.database.repositories.auth import DatabaseAuthRepository
