@@ -95,7 +95,16 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
         sessionStorage.removeItem('amsc_auth_token');
       }
     }
-    set({ authToken: token, currentUser: user });
+    const tenantUpdates: Partial<WorkstationState> = {};
+    if (user?.active_tenant) {
+      tenantUpdates.activeTenant = {
+        id: user.active_tenant.id,
+        name: user.active_tenant.name,
+        slug: user.active_tenant.slug,
+        badge: 'FINANCIAL_AI',
+      };
+    }
+    set({ authToken: token, currentUser: user, ...tenantUpdates });
   },
   logout: () => {
     if (typeof window !== 'undefined') {

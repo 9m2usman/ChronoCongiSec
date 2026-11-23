@@ -85,7 +85,7 @@ interface FetchOptions extends RequestInit {
 class ApiClient {
   private getHeaders(tenantId?: string): HeadersInit {
     const store = useWorkstationStore.getState();
-    const effectiveTenantId = tenantId || store.activeTenant.id;
+    const effectiveTenantId = tenantId || store.currentUser?.active_tenant?.id || store.activeTenant.id;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Tenant-ID': effectiveTenantId,
