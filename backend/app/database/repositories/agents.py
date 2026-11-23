@@ -9,11 +9,10 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.api.agents import AgentEntity, AgentRepositoryProtocol, AgentVersionEntity
-from backend.app.core.exceptions import AMSCException, ValidationError
+from backend.app.core.exceptions import ValidationError
 from backend.app.database.models.agents import (
     Agent as OrmAgent,
     AgentToolPermission as OrmAgentToolPermission,
