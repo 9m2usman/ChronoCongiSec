@@ -30,13 +30,17 @@ from crewai_service.tools.gateway_tools import GatewayToolFactory
 
 def test_client_authenticate_success():
     """Verify authenticate() posts to /auth/login and stores JWT and tenant ID."""
-    client = ChronoCogniSecClient()
+    client = ChronoCogniSecClient(
+        email="ci-test-user@example.invalid",
+        password="ci-test-password",
+        tenant_slug="ci-test-tenant",
+    )
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {
         "access_token": "mock-jwt-token-12345",
         "token_type": "bearer",
-        "tenant_id": "tenant-a-uuid-001",
+        "active_tenant": {"id": "tenant-a-uuid-001", "name": "Test Tenant", "slug": "ci-test-tenant"},
     }
 
     with patch.object(client, "_is_test_double_mode", return_value=False):
@@ -74,7 +78,11 @@ def test_client_send_request_injects_auth_header():
 
 def test_client_send_request_refreshes_token_on_401():
     """Verify _send_request() automatically re-authenticates and retries on HTTP 401."""
-    client = ChronoCogniSecClient()
+    client = ChronoCogniSecClient(
+        email="ci-test-user@example.invalid",
+        password="ci-test-password",
+        tenant_slug="ci-test-tenant",
+    )
     client.auth_token = "stale-expired-token"
 
     resp_401 = MagicMock()
@@ -89,7 +97,7 @@ def test_client_send_request_refreshes_token_on_401():
     auth_resp.status_code = 200
     auth_resp.json.return_value = {
         "access_token": "fresh-refreshed-token",
-        "tenant_id": "tenant-a-uuid-001",
+        "active_tenant": {"id": "tenant-a-uuid-001", "name": "Test Tenant", "slug": "ci-test-tenant"},
     }
 
     with patch.object(client, "_is_test_double_mode", return_value=False):

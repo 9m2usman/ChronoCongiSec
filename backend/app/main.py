@@ -9,6 +9,7 @@ Follows:
 - AMSC-DOC-006: Seven-Person Implementation Plan (Day 1 Deliverable)
 """
 
+import hashlib
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -83,6 +84,23 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         raw_req_id = request.headers.get("x-request-id")
         raw_trace_id = request.headers.get("x-trace-id")
         raw_corr_id = request.headers.get("x-correlation-id")
+        raw_traceparent = request.headers.get("traceparent")
+
+        w3c_trace_id = None
+        if raw_traceparent:
+            tp_match = re.match(
+                r"^00-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-([0-9a-fA-F]{2})$",
+                raw_traceparent.strip(),
+            )
+            if tp_match:
+                extracted_tid = tp_match.group(1).lower()
+                extracted_pid = tp_match.group(2).lower()
+                # W3C Trace Context spec: all-zeros trace_id or parent_id are invalid
+                if extracted_tid != "0" * 32 and extracted_pid != "0" * 16:
+                    w3c_trace_id = extracted_tid
+
+        if not raw_trace_id and w3c_trace_id:
+            raw_trace_id = w3c_trace_id
 
         safe_req_id = sanitize_correlation_id(raw_req_id)
         safe_trace_id = sanitize_correlation_id(raw_trace_id)
@@ -99,6 +117,15 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         if trace_id:
             response.headers["X-Trace-ID"] = trace_id
+            if w3c_trace_id and trace_id == w3c_trace_id and raw_traceparent:
+                response.headers["traceparent"] = raw_traceparent.strip()
+            else:
+                if re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+                    canonical_tid = trace_id.lower()
+                else:
+                    canonical_tid = hashlib.sha256(trace_id.encode("utf-8")).hexdigest()[:32]
+                span_id = uuid.uuid4().hex[:16]
+                response.headers["traceparent"] = f"00-{canonical_tid}-{span_id}-01"
         if safe_corr_id:
             response.headers["X-Correlation-ID"] = safe_corr_id
         return response
@@ -191,14 +218,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
 
-        if getattr(app.state, "recovery_service", None) is None:
-            from backend.app.recovery.store import create_recovery_service
-            app.state.recovery_service = create_recovery_service(
-                session_factory,
-                memory_repo=getattr(app.state, "memory_repo", None),
-                trust_evaluator=getattr(app.state, "trust_evaluator", None),
-            )
-
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
             app.state.outbox_processor = OutboxProcessor(session_factory)
@@ -289,6 +308,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Production startup failure: Persistent database trace repository from M6 is not configured. "
                 "In-memory trace repository is strictly forbidden in production."
             )
+
+    # Construct services that depend on validated production repositories only after
+    # the production guards have rejected any in-memory or missing persistence layer.
+    if session_factory is not None and getattr(app.state, "recovery_service", None) is None:
+        from backend.app.recovery.store import create_recovery_service
+        app.state.recovery_service = create_recovery_service(
+            session_factory,
+            memory_repo=getattr(app.state, "memory_repo", None),
+            trust_evaluator=getattr(app.state, "trust_evaluator", None),
+        )
 
     yield
     from backend.app.core.security import shutdown_auth_executor

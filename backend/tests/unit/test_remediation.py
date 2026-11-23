@@ -125,7 +125,7 @@ async def test_production_endpoint_fails_closed_without_database_repo():
         assert data["error"]["code"] == "SECURITY_DEPENDENCY_UNAVAILABLE"
 
 
-def test_production_lifespan_detects_missing_or_demo_auth_repo():
+def test_production_lifespan_wires_database_auth_before_rate_limiter_guard():
     """Verify application lifespan in production raises RuntimeError if real database repo is missing."""
     prod_settings = Settings(
         APP_ENV="production",
@@ -144,7 +144,8 @@ def test_production_lifespan_detects_missing_or_demo_auth_repo():
     with pytest.raises(RuntimeError) as exc:
         with TestClient(app):
             pass
-    assert "Real database authentication repository is not configured" in str(exc.value)
+    assert "Redis-backed rate limiter is not configured" in str(exc.value)
+    assert getattr(app.state.auth_repo, "is_demo", False) is False
 
 
 def test_development_mode_permits_explicit_demo_configuration():
