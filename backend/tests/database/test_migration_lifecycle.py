@@ -83,9 +83,6 @@ def test_every_downgrade_is_the_exact_inverse_of_its_upgrade(empty_db: str) -> N
     for index in range(len(revisions) - 1, -1, -1):
         target = revisions[index - 1] if index > 0 else "base"
         helpers.downgrade(empty_db, target)
-        if revisions[index] == "0011":
-            # 0011 introduces registration_requests; downgrading it intentionally drops that table.
-            counts_lost = True
         actual = _fingerprint(empty_db)
         assert actual == forward[target], (
             f"downgrade {revisions[index]} -> {target} is not the exact inverse:\n"
