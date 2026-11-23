@@ -62,8 +62,8 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("traces", "agent_id", "agents", "SET NULL"),
     Rel("trace_spans", "trace_id", "traces", "CASCADE"),
     # Phase 1 IAM: branch and reviewer references must remain inside the tenant.
-    Rel("memberships", "branch_id", "branches", "SET NULL"),
-    Rel("registration_requests", "assigned_branch_id", "branches", "SET NULL"),
+    Rel("memberships", "branch_id", "branches", "RESTRICT"),
+    Rel("registration_requests", "assigned_branch_id", "branches", "RESTRICT"),
     Rel("registration_requests", "reviewed_by_user_id", "memberships", "RESTRICT", "user_id"),
 )
 
