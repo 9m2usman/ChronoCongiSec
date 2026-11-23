@@ -15,11 +15,8 @@ Validates:
    - DatabaseMemoryRepository
 """
 
-import asyncio
-from datetime import datetime, timezone
 import hashlib
 from typing import Any, Dict, List
-import uuid
 
 import pytest
 from sqlalchemy import text
