@@ -161,14 +161,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
 
-        if getattr(app.state, "recovery_service", None) is None:
-            from backend.app.recovery.store import create_recovery_service
-            app.state.recovery_service = create_recovery_service(
-                session_factory,
-                memory_repo=getattr(app.state, "memory_repo", None),
-                trust_evaluator=getattr(app.state, "trust_evaluator", None),
-            )
-
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
             app.state.outbox_processor = OutboxProcessor(session_factory)
@@ -259,6 +251,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Production startup failure: Persistent database trace repository from M6 is not configured. "
                 "In-memory trace repository is strictly forbidden in production."
             )
+
+    # Build recovery services only after production repository validation.
+    # The recovery factory constructs TrustEvaluator; creating it before this guard
+    # can raise a lower-level durability error when an explicitly injected in-memory
+    # repository is present, obscuring the authoritative startup rejection.
+    if session_factory is not None and getattr(app.state, "recovery_service", None) is None:
+        from backend.app.recovery.store import create_recovery_service
+        app.state.recovery_service = create_recovery_service(
+            session_factory,
+            memory_repo=getattr(app.state, "memory_repo", None),
+            trust_evaluator=getattr(app.state, "trust_evaluator", None),
+        )
 
     yield
     from backend.app.core.security import shutdown_auth_executor
