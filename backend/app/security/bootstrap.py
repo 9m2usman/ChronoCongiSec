@@ -30,7 +30,7 @@ async def bootstrap_admin_cli(
     admin_full_name: str,
     password: str,
 ) -> None:
-    settings = get_settings()
+    get_settings()
 
     if len(password) < 8:
         print("[ERROR] Administrator password must be at least 8 characters.", file=sys.stderr)
@@ -51,7 +51,7 @@ async def bootstrap_admin_cli(
             admin_full_name=admin_full_name,
             password_hash=pw_hash,
         )
-        print(f"[SUCCESS] Bootstrapped Tenant Administrator successfully:")
+        print("[SUCCESS] Bootstrapped Tenant Administrator successfully:")
         print(f"          Tenant:   {tenant.name} (slug: {tenant.slug}, id: {tenant.id})")
         print(f"          User:     {user.full_name} ({user.email}, id: {user.id})")
         print(f"          Role:     {mem.role} (status: {mem.status})")
