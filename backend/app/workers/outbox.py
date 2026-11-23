@@ -8,10 +8,10 @@ Spec: AMSC-DOC-002 TRD Section 14 & 16, AMSC-DOC-005 Section 3.5
 import asyncio
 from datetime import datetime, timezone
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.database.models.observability import OutboxEvent
