@@ -311,13 +311,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
-    if session_factory is not None and getattr(app.state, "recovery_service", None) is None:
-        from backend.app.recovery.store import create_recovery_service
-        app.state.recovery_service = create_recovery_service(
-            session_factory,
-            memory_repo=getattr(app.state, "memory_repo", None),
-            trust_evaluator=getattr(app.state, "trust_evaluator", None),
-        )
+    if getattr(app.state, "recovery_service", None) is None:
+        if session_factory is not None:
+            from backend.app.recovery.store import create_recovery_service
+            app.state.recovery_service = create_recovery_service(
+                session_factory,
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
+        elif settings.APP_ENV != "production":
+            from backend.app.recovery.store import create_in_memory_recovery_service
+            app.state.recovery_service = create_in_memory_recovery_service(
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
 
     yield
     from backend.app.core.security import shutdown_auth_executor
@@ -369,8 +376,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Memory repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
-        from backend.app.memory.repository import get_default_repository
+        from backend.app.memory.repository import get_default_repository, seed_enterprise_demo_memories
         app.state.memory_repo = get_default_repository()
+        seed_enterprise_demo_memories(app.state.memory_repo)
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -430,6 +438,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
     app.state.quarantine_service = get_default_quarantine_service()
+
+    # Recovery service initialization
+    if getattr(app.state, "recovery_service", None) is None:
+        if settings.APP_ENV != "production":
+            from backend.app.recovery.store import create_in_memory_recovery_service
+            app.state.recovery_service = create_in_memory_recovery_service(
+                memory_repo=app.state.memory_repo,
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
