@@ -732,6 +732,7 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "ENABLE TRIGGER trg_audit_events_no_update_delete",   # 0009
         "trg_audit_events_chain",                          # 0009
         "trg_policy_decisions_permanent",                  # 0009
+        "uq_branches_tenant_id_id",                           # 0012
         "fk_memberships_branch_tenant",                       # 0012
         "fk_registration_requests_reviewed_by_membership",    # 0012
         "fk_registration_requests_assigned_branch_tenant",    # 0012
@@ -750,6 +751,7 @@ def test_offline_downgrade_generates_sql_back_to_base() -> None:
         "DROP CONSTRAINT fk_registration_requests_reviewed_by_membership", # 0012
         "DROP CONSTRAINT fk_registration_requests_assigned_branch_tenant", # 0012
         "DROP CONSTRAINT fk_memberships_branch_tenant",                   # 0012
+        "DROP CONSTRAINT uq_branches_tenant_id_id",                     # 0012
         "DROP COLUMN chain_seq",                                         # 0009
         "DROP TRIGGER trg_require_recovery_snapshot",                    # 0008
         "DROP COLUMN pre_recovery_snapshot_sha256",                      # 0008
