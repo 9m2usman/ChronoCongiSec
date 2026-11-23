@@ -7,8 +7,7 @@ Spec: AMSC-DOC-005 Section 3.5, AMSC-DOC-002 TRD Section 18
 
 from collections.abc import Sequence
 from datetime import datetime, timezone
-import json
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from sqlalchemy import select, update
