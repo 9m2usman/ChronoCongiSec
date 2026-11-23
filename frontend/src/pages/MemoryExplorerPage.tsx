@@ -53,7 +53,9 @@ export const MemoryExplorerPage: React.FC = () => {
   // Ingest Modal State
   const [ingestModalOpen, setIngestModalOpen] = useState(false);
   const [sourceId, setSourceId] = useState('src-accounting-policy-v2.pdf');
-  const [agentId, setAgentId] = useState('agt-fin-001');
+  const [customSourceId, setCustomSourceId] = useState('');
+  const [agentId, setAgentId] = useState('agent-crew-finance-003');
+  const [customAgentId, setCustomAgentId] = useState('');
   const [recordType, setRecordType] = useState('KNOWLEDGE');
   const [content, setContent] = useState('');
   const [ingestSuccessChecksum, setIngestSuccessChecksum] = useState<string | null>(null);
@@ -62,12 +64,16 @@ export const MemoryExplorerPage: React.FC = () => {
     e.preventDefault();
     if (!content.trim()) return;
 
+    const finalSourceId = sourceId === 'custom' ? customSourceId.trim() : sourceId;
+    const finalAgentId = agentId === 'custom' ? customAgentId.trim() : agentId;
+    if (!finalSourceId || !finalAgentId) return;
+
     ingestMutation.mutate(
       {
         content,
         record_type: recordType,
-        source_id: sourceId,
-        agent_id: agentId,
+        source_id: finalSourceId,
+        agent_id: finalAgentId,
       },
       {
         onSuccess: (res) => {
@@ -297,26 +303,63 @@ export const MemoryExplorerPage: React.FC = () => {
                 <>
                   <div>
                     <label className="block text-[11px] text-slate-400 mb-1">Source URI / Document:</label>
-                    <input
-                      type="text"
-                      value={sourceId}
-                      onChange={(e) => setSourceId(e.target.value)}
-                      required
-                      placeholder="e.g. corporate_policy_2026.pdf"
-                      className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
-                    />
+                    <div className="space-y-1.5">
+                      <select
+                        value={sourceId}
+                        onChange={(e) => setSourceId(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
+                      >
+                        <option value="src-accounting-policy-v2.pdf">src-accounting-policy-v2.pdf (Accounting Policy v2)</option>
+                        <option value="src-doc-001">src-doc-001 (Treasury Policy Memo)</option>
+                        <option value="src-hr-handbook-v1.pdf">src-hr-handbook-v1.pdf (HR Employee Handbook)</option>
+                        <option value="src-support-guide-v1.pdf">src-support-guide-v1.pdf (Customer Support Protocols)</option>
+                        <option value="src-branch-ops-v1.pdf">src-branch-ops-v1.pdf (Branch Operations Manual)</option>
+                        <option value="src-workflow-gov-v1.pdf">src-workflow-gov-v1.pdf (Cross-Department Workflow Governance)</option>
+                        <option value="custom">-- Custom Source Identifier --</option>
+                      </select>
+                      {sourceId === 'custom' && (
+                        <input
+                          type="text"
+                          value={customSourceId}
+                          onChange={(e) => setCustomSourceId(e.target.value)}
+                          required
+                          placeholder="e.g. src-custom-feed-001"
+                          className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
+                        />
+                      )}
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1">Target Agent ID:</label>
-                      <input
-                        type="text"
-                        value={agentId}
-                        onChange={(e) => setAgentId(e.target.value)}
-                        placeholder="e.g. agt-fin-001"
-                        className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
-                      />
+                      <div className="space-y-1.5">
+                        <select
+                          value={agentId}
+                          onChange={(e) => setAgentId(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
+                        >
+                          <option value="agent-crew-finance-003">Finance Ops (agent-crew-finance-003)</option>
+                          <option value="agent-crew-support-001">Customer Support (agent-crew-support-001)</option>
+                          <option value="agent-crew-hr-002">HR Operations (agent-crew-hr-002)</option>
+                          <option value="agent-crew-branch-004">Branch Operations (agent-crew-branch-004)</option>
+                          <option value="agent-crew-coord-005">Workflow Coord (agent-crew-coord-005)</option>
+                          <option value="agent-001">Finance Bot (agent-001)</option>
+                          <option value="agent-head-office-001">Head Office Lead (agent-head-office-001)</option>
+                          <option value="agt-fin-001">Finance Alias (agt-fin-001)</option>
+                          <option value="custom">-- Custom Agent ID --</option>
+                        </select>
+                        {agentId === 'custom' && (
+                          <input
+                            type="text"
+                            value={customAgentId}
+                            onChange={(e) => setCustomAgentId(e.target.value)}
+                            required
+                            placeholder="e.g. agent-custom-001"
+                            className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-blue-500 font-mono"
+                          />
+                        )}
+                      </div>
                     </div>
                     <div>
                       <label className="block text-[11px] text-slate-400 mb-1">Record Type:</label>

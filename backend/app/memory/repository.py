@@ -173,6 +173,15 @@ class MemoryRepository(ABC):
         pass
 
 
+AGENT_ALIASES: Dict[str, str] = {
+    "agt-fin-001": "agent-crew-finance-003",
+    "agt-supp-001": "agent-crew-support-001",
+    "agt-hr-001": "agent-crew-hr-002",
+    "agt-branch-001": "agent-crew-branch-004",
+    "agt-coord-001": "agent-crew-coord-005",
+}
+
+
 class InMemoryMemoryRepository(MemoryRepository):
     """In-memory reference implementation of MemoryRepository for standalone operation and tests."""
 
@@ -224,6 +233,38 @@ class InMemoryMemoryRepository(MemoryRepository):
                 branch_id="branch-lhr-002",
             )
         )
+
+        # CrewAI Business Agents (AMSC-DOC-005 Table 5)
+        crew_agents = [
+            ("agent-crew-support-001", "Customer Support Specialist", "branch-ho-001"),
+            ("agent-crew-hr-002", "HR Operations Specialist", "branch-isb-004"),
+            ("agent-crew-finance-003", "Finance Operations Specialist", "branch-lhr-002"),
+            ("agent-crew-branch-004", "Branch Operations Specialist", "branch-khi-003"),
+            ("agent-crew-coord-005", "Enterprise Workflow Coordinator", "branch-ho-001"),
+        ]
+        for aid, aname, abid in crew_agents:
+            self.create_agent(
+                AgentRecord(
+                    id=aid,
+                    tenant_id=t_a,
+                    name=aname,
+                    status="ACTIVE",
+                    branch_id=abid,
+                )
+            )
+
+        # Enterprise agent aliases for UI shortcuts and client compatibility
+        for alias_id, canonical_id in AGENT_ALIASES.items():
+            self.create_agent(
+                AgentRecord(
+                    id=alias_id,
+                    tenant_id=t_a,
+                    name=f"Alias for {canonical_id}",
+                    status="ACTIVE",
+                )
+            )
+
+        # Knowledge sources for tenant-a-uuid-001
         self.create_source(
             SourceRecord(
                 id="src-doc-001",
@@ -243,6 +284,24 @@ class InMemoryMemoryRepository(MemoryRepository):
                 status="INACTIVE",
             )
         )
+        sources = [
+            ("src-accounting-policy-v2.pdf", "Accounting Policy v2", "branch-lhr-002"),
+            ("src-hr-handbook-v1.pdf", "HR Employee Handbook", "branch-isb-004"),
+            ("src-support-guide-v1.pdf", "Customer Support Protocols", "branch-ho-001"),
+            ("src-branch-ops-v1.pdf", "Branch Operations Manual", "branch-khi-003"),
+            ("src-workflow-gov-v1.pdf", "Cross-Department Workflow Governance", "branch-ho-001"),
+        ]
+        for sid, sname, sbid in sources:
+            self.create_source(
+                SourceRecord(
+                    id=sid,
+                    tenant_id=t_a,
+                    name=sname,
+                    source_type="DOCUMENT_FEED",
+                    status="ACTIVE",
+                    branch_id=sbid,
+                )
+            )
 
         # Secondary tenant for cross-company isolation tests
         t_b = "tenant-b-uuid-002"
@@ -378,6 +437,8 @@ class InMemoryMemoryRepository(MemoryRepository):
     def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
         key = f"{tenant_id}:{agent_id}"
         agent = self._agents.get(key)
+        if not agent and agent_id in AGENT_ALIASES:
+            agent = self._agents.get(f"{tenant_id}:{AGENT_ALIASES[agent_id]}")
         return deepcopy(agent) if agent else _AWAITABLE_NONE
 
     def create_agent(self, agent: AgentRecord) -> AgentRecord:

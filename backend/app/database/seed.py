@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.security import hash_password
 from backend.app.database.models.agents import Agent, ToolRegistration, AgentToolPermission
+from backend.app.database.models.memory import Source
 
 from backend.app.database.models.identity import (
     Branch,
@@ -327,6 +328,35 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
                 created_at=now,
             )
             session.add(perm)
+
+    # 7. Seed Canonical Knowledge Sources (Document 05 Table 5)
+    stats["sources"] = 0
+    sources_to_seed = [
+        ("src-doc-001", "Treasury Policy Memo", "DOCUMENT_FEED"),
+        ("src-accounting-policy-v2.pdf", "Accounting Policy v2", "DOCUMENT_FEED"),
+        ("src-hr-handbook-v1.pdf", "HR Employee Handbook", "DOCUMENT_FEED"),
+        ("src-support-guide-v1.pdf", "Customer Support Protocols", "DOCUMENT_FEED"),
+        ("src-branch-ops-v1.pdf", "Branch Operations Manual", "DOCUMENT_FEED"),
+        ("src-workflow-gov-v1.pdf", "Cross-Department Workflow Governance", "DOCUMENT_FEED"),
+    ]
+    for sid, sname, stype in sources_to_seed:
+        res_source = await session.execute(
+            select(Source).where(
+                Source.tenant_id == "tenant-a-uuid-001",
+                Source.id == sid,
+            )
+        )
+        if res_source.scalar_one_or_none() is None:
+            src = Source(
+                id=sid,
+                tenant_id="tenant-a-uuid-001",
+                name=sname,
+                source_type=stype,
+                status="ACTIVE",
+                created_at=now,
+            )
+            session.add(src)
+            stats["sources"] += 1
 
     await session.commit()
     logger.info(f"Database seed complete: {stats}")

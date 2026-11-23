@@ -4,10 +4,10 @@ export interface Agent {
   name: string;
   runtime: string;
   model: string;
-  system_prompt: string;
-  trust_tier: 'RESTRICTED' | 'STANDARD' | 'ELEVATED';
-  status: 'ACTIVE' | 'STANDBY' | 'SUSPENDED';
-  tools: string[];
+  system_prompt?: string;
+  trust_tier?: 'RESTRICTED' | 'STANDARD' | 'ELEVATED' | string;
+  status: 'ACTIVE' | 'STANDBY' | 'SUSPENDED' | 'ISOLATED' | 'DEPRECATED' | string;
+  tools?: string[];
   last_heartbeat?: string;
   created_at?: string;
   updated_at?: string;
