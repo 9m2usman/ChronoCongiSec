@@ -31,3 +31,7 @@ ml/model_registry/*
 htmlcov/
 .DS_Store
 Thumbs.db
+
+# Generated local artifacts and database backups (never commit these)
+backups/
+*.egg-info/
