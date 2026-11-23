@@ -46,7 +46,7 @@ def test_production_cannot_start_with_in_memory_auth_setting():
             ALLOW_IN_MEMORY_AUTH=True,
             AUTH_BACKEND="database",
             JWT_SECRET="a" * 40,
-            DATABASE_URL=None,  # Keep this test focused on the missing-auth-repository guard.
+            DATABASE_URL="postgresql+asyncpg://prod_user:p_w_d_123@prod-db.internal:5432/amsc",
             REDIS_URL="redis://prod-redis.internal:6379/0",
             CORS_ORIGINS=["https://app.example.com"],
         )
@@ -135,7 +135,7 @@ def test_production_lifespan_detects_missing_or_demo_auth_repo():
         RATE_LIMITER_BACKEND="redis",
         RATE_LIMIT_REDIS_FAILURE_POLICY="fail_closed",
         JWT_SECRET="a" * 40,
-        DATABASE_URL="postgresql+asyncpg://prod_user:p_w_d_123@prod-db.internal:5432/amsc",
+        DATABASE_URL=None,  # Exercise the missing-auth-repository guard before other dependencies.
         REDIS_URL="redis://prod-redis.internal:6379/0",
         CORS_ORIGINS=["https://app.example.com"],
     )
