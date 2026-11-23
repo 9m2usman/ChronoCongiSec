@@ -31,7 +31,8 @@ def upgrade() -> None:
         ["tenant_id", "id"],
     )
 
-    # Membership branch scope must match the membership's tenant.
+    # Membership branch scope must match the membership's tenant. RESTRICT prevents
+    # deleting a branch that still defines an employee's authorization scope.
     op.drop_constraint(
         "fk_memberships_branch_id_branches",
         "memberships",
@@ -43,7 +44,7 @@ def upgrade() -> None:
         "branches",
         ["tenant_id", "branch_id"],
         ["tenant_id", "id"],
-        ondelete="SET NULL (branch_id)",
+        ondelete="RESTRICT",
     )
     op.drop_index("ix_memberships_branch_id", table_name="memberships")
     op.create_index(
@@ -64,7 +65,8 @@ def upgrade() -> None:
         ondelete="RESTRICT",
     )
 
-    # An assigned branch must belong to the same tenant as the request.
+    # An assigned branch must belong to the same tenant as the request. Keep the
+    # branch while a registration request still refers to it.
     op.drop_constraint(
         "fk_registration_requests_assigned_branch_id_branches",
         "registration_requests",
@@ -76,7 +78,7 @@ def upgrade() -> None:
         "branches",
         ["tenant_id", "assigned_branch_id"],
         ["tenant_id", "id"],
-        ondelete="SET NULL (assigned_branch_id)",
+        ondelete="RESTRICT",
     )
 
     op.create_index(
