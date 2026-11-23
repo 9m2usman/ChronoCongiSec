@@ -23,6 +23,14 @@ TRIGGER_NAME = "trg_forbid_tenant_id_change"
 
 
 def upgrade() -> None:
+    # Branch IDs are globally unique, but PostgreSQL still requires the exact
+    # composite parent key for tenant-consistent foreign keys.
+    op.create_unique_constraint(
+        "uq_branches_tenant_id_id",
+        "branches",
+        ["tenant_id", "id"],
+    )
+
     # Membership branch scope must match the membership's tenant.
     op.drop_constraint(
         "fk_memberships_branch_id_branches",
@@ -142,4 +150,10 @@ def downgrade() -> None:
         "memberships",
         ["branch_id"],
         unique=False,
+    )
+
+    op.drop_constraint(
+        "uq_branches_tenant_id_id",
+        "branches",
+        type_="unique",
     )
