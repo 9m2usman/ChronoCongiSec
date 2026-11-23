@@ -136,18 +136,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if not hasattr(app.state, "db_session_factory") or app.state.db_session_factory is None:
         if db_url and db_url.startswith("postgresql+asyncpg://"):
             try:
-                import asyncio
-                from sqlalchemy import text
                 from backend.app.database.session import create_engine, create_session_factory
                 engine = create_engine(db_url)
-                # Verify database connectivity with a fast 1.0s timeout
-                async def _test_conn():
-                    async with engine.connect() as conn:
-                        await conn.execute(text("SELECT 1"))
-                await asyncio.wait_for(_test_conn(), timeout=1.0)
+                # In development mode, verify connectivity to avoid background connection stalls if DB is offline
+                if settings.APP_ENV != "production":
+                    import asyncio
+                    from sqlalchemy import text
+                    async def _test_conn() -> None:
+                        async with engine.connect() as conn:
+                            await conn.execute(text("SELECT 1"))
+                    await asyncio.wait_for(_test_conn(), timeout=1.0)
                 app.state.db_engine = engine
                 app.state.db_session_factory = create_session_factory(engine)
-                logger.info("Initialized PostgreSQL async engine and verified connectivity.")
+                logger.info("Initialized PostgreSQL async engine and session factory.")
             except Exception as exc:
                 if settings.APP_ENV == "production":
                     raise RuntimeError(f"Production database initialization failed: {exc}")
@@ -161,6 +162,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Wire persistent repositories when session factory is configured
     session_factory = getattr(app.state, "db_session_factory", None)
     if session_factory is not None:
+        auth_repo = getattr(app.state, "auth_repo", None)
+        if auth_repo is None or getattr(auth_repo, "is_demo", False):
+            from backend.app.database.repositories.auth import DatabaseAuthRepository
+            app.state.auth_repo = DatabaseAuthRepository(session_factory)
+
         if getattr(app.state, "agent_repo", None) is None:
             from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
             app.state.agent_repo = SqlAlchemyAgentRepository(session_factory)
@@ -169,9 +175,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.memory.adapters import DatabaseMemoryRepository
             app.state.memory_repo = DatabaseMemoryRepository(session_factory)
 
+        if getattr(app.state, "gateway_repo", None) is None:
+            from backend.app.api.gateway import SqlAlchemyGatewayRepository
+            app.state.gateway_repo = SqlAlchemyGatewayRepository(session_factory)
+
+        if getattr(app.state, "incident_repo", None) is None:
+            from backend.app.api.incident_management import SqlAlchemyIncidentRepository
+            app.state.incident_repo = SqlAlchemyIncidentRepository(session_factory)
+
+        if getattr(app.state, "trace_repo", None) is None:
+            from backend.app.api.traces import SqlAlchemyTraceRepository
+            app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
+
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
+
+        if getattr(app.state, "recovery_service", None) is None:
+            from backend.app.recovery.store import create_recovery_service
+            app.state.recovery_service = create_recovery_service(
+                session_factory,
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
@@ -264,36 +290,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory trace repository is strictly forbidden in production."
             )
 
-    # Build recovery services only after production repository validation.
-    # The recovery factory constructs TrustEvaluator; creating it before this guard
-    # can raise a lower-level durability error when an explicitly injected in-memory
-    # repository is present, obscuring the authoritative startup rejection.
-    if session_factory is not None and getattr(app.state, "recovery_service", None) is None:
-        from backend.app.recovery.store import create_recovery_service
-        app.state.recovery_service = create_recovery_service(
-            session_factory,
-            memory_repo=getattr(app.state, "memory_repo", None),
-            trust_evaluator=getattr(app.state, "trust_evaluator", None),
-        )
-
     yield
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
-
-    outbox_proc = getattr(app.state, "outbox_processor", None)
-    if outbox_proc is not None:
-        try:
-            outbox_proc.stop()
-        except Exception:
-            pass
-
-    db_engine = getattr(app.state, "db_engine", None)
-    if db_engine is not None:
-        try:
-            await db_engine.dispose()
-        except Exception:
-            pass
-
     logger.info(f"Shutting down {settings.APP_NAME}")
 
 
