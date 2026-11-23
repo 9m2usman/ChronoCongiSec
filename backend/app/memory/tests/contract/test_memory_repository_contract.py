@@ -627,7 +627,7 @@ async def test_unit_tenant_mismatch_refusal():
         await repo.create_source(SourceRecord(id="s1", tenant_id=foreign, name="S", status="ACTIVE"))
 
 
-def test_unit_production_guard_qualification(monkeypatch):
+def test_unit_production_guard_qualification(monkeypatch, request):
     """Unit test: SqlAlchemyMemoryRepository qualifies under the production guard while in-memory repo is rejected."""
     assert SqlAlchemyMemoryRepository.is_persistent is True
     assert SqlAlchemyMemoryRepository.is_in_memory is False
@@ -636,7 +636,8 @@ def test_unit_production_guard_qualification(monkeypatch):
 
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@db.prod.internal:5432/amsc")
+    # Keep this a unit test: do not let lifespan auto-wire a database repository.
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
     monkeypatch.setenv("AUTH_BACKEND", "database")
@@ -644,6 +645,7 @@ def test_unit_production_guard_qualification(monkeypatch):
     monkeypatch.setenv("RATE_LIMITER_BACKEND", "redis")
 
     from backend.app.core.config import get_settings
+    request.addfinalizer(get_settings.cache_clear)
     from backend.app.main import create_app
     from fastapi.testclient import TestClient
 
