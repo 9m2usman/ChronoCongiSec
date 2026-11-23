@@ -247,7 +247,13 @@ def main() -> None:
     parser.add_argument("--mode", choices=["live", "test_double"], default=None, help="Execution mode (defaults to .env)")
     parser.add_argument("--provider", choices=["gemini", "openai", "test_double"], default=None, help="LLM Provider (defaults to .env)")
     parser.add_argument("--model", default=None, help="LLM Model identifier (defaults to .env)")
+    parser.add_argument("--demo", type=int, choices=[1, 2, 3], default=None, help="Run specific scenario demo (e.g. 2 for Sandbox Adapter Demo)")
     args = parser.parse_args()
+
+    if args.demo == 2:
+        from demo.run_demo2 import run_demo2
+        exit_code = run_demo2(live=(args.mode == "live"))
+        sys.exit(exit_code)
 
     try:
         exit_code = run_synthetic_demonstration(

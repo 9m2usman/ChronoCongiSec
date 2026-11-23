@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from enum import Enum
+import asyncio
 import hashlib
 import json
 import logging
@@ -911,15 +912,30 @@ GatewayRepoDep = GatewayRepositoryProtocol
 
 @dataclass
 class ToolExecutionResult:
-    status: str  # SUCCESS, FAILED, TIMEOUT
+    status: str  # SUCCESS, FAILED, TIMEOUT, UNKNOWN
     status_code: int
     result_payload: Dict[str, Any]
     duration_ms: int
+
+    def __post_init__(self) -> None:
+        valid_statuses = {"SUCCESS", "FAILED", "TIMEOUT", "UNKNOWN"}
+        if self.status not in valid_statuses:
+            raise ValueError(f"ToolExecutionResult status must be one of {valid_statuses}, got '{self.status}'.")
+        if not (100 <= self.status_code <= 599):
+            raise ValueError(f"status_code must be a valid HTTP status code (100-599), got {self.status_code}.")
+        if self.duration_ms < 0:
+            raise ValueError(f"duration_ms cannot be negative, got {self.duration_ms}.")
+        if not isinstance(self.result_payload, dict):
+            raise ValueError(f"result_payload must be a dict, got {type(self.result_payload)}.")
 
 
 @runtime_checkable
 class ToolAdapterProtocol(Protocol):
     """Protocol for server-side tool execution adapter owned by M2."""
+
+    tool_name: str
+    allowed_operations: Tuple[str, ...]
+    timeout: float
 
     async def execute(
         self,
@@ -936,7 +952,11 @@ class SandboxTransferAdapter:
     Enforces destination allowlisting and parameter constraints.
     """
 
+    tool_name: str = "sandbox_transfer"
     ALLOWED_OPERATIONS = {"transfer_funds", "get_balance"}
+    allowed_operations: Tuple[str, ...] = ("transfer_funds", "get_balance")
+    timeout: float = 10.0
+    MAX_AMOUNT: Decimal = Decimal("1000000.00")
     FORBIDDEN_DESTINATIONS = {"ACC-ATTACKER-999", "ACC-BLOCKED-000"}
 
     @staticmethod
@@ -955,6 +975,17 @@ class SandboxTransferAdapter:
         context: Dict[str, Any],
     ) -> ToolExecutionResult:
         start_time = time.perf_counter()
+
+        # Direct agent-call prevention: adapter requires authorized server-side context
+        if not isinstance(context, dict) or not all(
+            context.get(k) for k in ("tenant_id", "agent_id", "idempotency_key", "trace_id")
+        ):
+            return self._failure(
+                "Missing authorized execution context. Adapter cannot be invoked directly outside authorized gateway controller.",
+                403,
+                start_time,
+            )
+
         if operation not in self.ALLOWED_OPERATIONS:
             return ToolExecutionResult(
                 status="FAILED",
@@ -967,7 +998,11 @@ class SandboxTransferAdapter:
             return self._failure("Transfer parameters must be an object.", 400, start_time)
 
         if operation == "get_balance":
-            account = parameters.get("account_id") or parameters.get("destination_account")
+            account = (
+                parameters.get("account_id")
+                or parameters.get("destination_account")
+                or parameters.get("account")
+            )
             if not isinstance(account, str) or not SAFE_ID_REGEX.fullmatch(account):
                 return self._failure("account_id must be a bounded account identifier.", 400, start_time)
             return ToolExecutionResult(
@@ -977,19 +1012,33 @@ class SandboxTransferAdapter:
                 duration_ms=int((time.perf_counter() - start_time) * 1000),
             )
 
-        destination = parameters.get("destination_account")
+        destination = (
+            parameters.get("destination_account")
+            or parameters.get("destination")
+            or parameters.get("account")
+            or parameters.get("account_id")
+        )
         currency = parameters.get("currency", "USD")
         if not isinstance(destination, str) or not SAFE_ID_REGEX.fullmatch(destination):
             return self._failure("destination_account must be a bounded account identifier.", 400, start_time)
         if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
             return self._failure("currency must be a three-letter uppercase ISO code.", 400, start_time)
 
+        raw_amount = (
+            parameters.get("amount")
+            if parameters.get("amount") is not None
+            else parameters.get("amount_usd")
+            if parameters.get("amount_usd") is not None
+            else parameters.get("refund_amount")
+            if parameters.get("refund_amount") is not None
+            else parameters.get("claim_amount_usd")
+        )
         try:
-            amount = Decimal(str(parameters.get("amount")))
+            amount = Decimal(str(raw_amount))
         except (InvalidOperation, TypeError, ValueError):
             return self._failure("amount must be a finite positive decimal.", 400, start_time)
-        if not amount.is_finite() or amount <= Decimal("0"):
-            return self._failure("amount must be a finite positive decimal.", 400, start_time)
+        if not amount.is_finite() or amount <= Decimal("0") or amount > self.MAX_AMOUNT:
+            return self._failure(f"amount must be a finite positive decimal up to {self.MAX_AMOUNT}.", 400, start_time)
 
         # Destination boundary check
         if destination in self.FORBIDDEN_DESTINATIONS:
@@ -1307,16 +1356,22 @@ async def propose_tool_action(
         raise SecurityDependencyError("Protected tool adapter is not registered.")
 
     async def executor(_grant: Any) -> ToolExecutionResult:
-        return await adapter.execute(
-            operation=body.operation,
-            parameters=body.parameters,
-            context={
-                "tenant_id": tenant_id,
-                "agent_id": body.agent_id,
-                "idempotency_key": body.idempotency_key,
-                "proposal_id": proposal_id,
-                "trace_id": body.trace_id,
-            },
+        timeout = float(getattr(adapter, "timeout", 10.0))
+        grant_id = getattr(_grant, "grant_id", None) if _grant is not None else None
+        return await asyncio.wait_for(
+            adapter.execute(
+                operation=body.operation,
+                parameters=body.parameters,
+                context={
+                    "tenant_id": tenant_id,
+                    "agent_id": body.agent_id,
+                    "idempotency_key": body.idempotency_key,
+                    "proposal_id": proposal_id,
+                    "trace_id": body.trace_id,
+                    "grant_id": grant_id,
+                },
+            ),
+            timeout=timeout,
         )
 
     outcome = await guard.execute(decision, proposal, context, persist_decision=persist_decision, executor=executor)

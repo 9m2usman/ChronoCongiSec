@@ -80,13 +80,18 @@ class GatewayToolFactory:
             logger.info(
                 f"Agent [{agent_id}] submitting expense proposal: ${amt:.2f} {currency} to '{dest}'."
             )
+            # Dual Trace Context Correlation
+            run_records = tracer.list_runs()
+            active_run = run_records[-1] if run_records else None
+            active_run_id = active_run.run_id if active_run else f"run-{uuid.uuid4().hex[:8]}"
+            trace_id = kwargs.get("trace_id") or (active_run.trace_id if active_run and active_run.trace_id else f"trace-exp-{uuid.uuid4().hex[:16]}")
             action_id = f"act-exp-{uuid.uuid4().hex[:8]}"
             idempotency_key = f"idem-exp-{uuid.uuid4().hex[:12]}"
-            trace_id = f"trace-exp-{uuid.uuid4().hex[:16]}"
             refs = memory_refs or kwargs.get("memory_references") or []
 
             parameters = {
                 "destination": dest,
+                "destination_account": dest,
                 "amount": float(amt),
                 "currency": currency,
                 "memo": memo,
@@ -111,8 +116,6 @@ class GatewayToolFactory:
             result_payload = response.get("result", {})
 
             # Record in Dual Trace telemetry
-            run_records = tracer.list_runs()
-            active_run_id = run_records[-1].run_id if run_records else f"run-{uuid.uuid4().hex[:8]}"
             tracer.record_tool_invocation(
                 run_id=active_run_id,
                 tool_name="sandbox_transfer",
@@ -190,13 +193,18 @@ class GatewayToolFactory:
             logger.info(
                 f"Agent [{agent_id}] submitting customer refund: ${amt:.2f} for ticket '{tkt}'."
             )
+            # Dual Trace Context Correlation
+            run_records = tracer.list_runs()
+            active_run = run_records[-1] if run_records else None
+            active_run_id = active_run.run_id if active_run else f"run-{uuid.uuid4().hex[:8]}"
+            trace_id = kwargs.get("trace_id") or (active_run.trace_id if active_run and active_run.trace_id else f"trace-ref-{uuid.uuid4().hex[:16]}")
             action_id = f"act-ref-{uuid.uuid4().hex[:8]}"
             idempotency_key = f"idem-ref-{uuid.uuid4().hex[:12]}"
-            trace_id = f"trace-ref-{uuid.uuid4().hex[:16]}"
             refs = memory_refs or kwargs.get("memory_references") or []
 
             parameters = {
                 "destination": dest,
+                "destination_account": dest,
                 "amount": float(amt),
                 "currency": "USD",
                 "memo": f"Refund for ticket {tkt}: {reason}",
@@ -219,8 +227,6 @@ class GatewayToolFactory:
             exec_status = response.get("execution_status", "NOT_EXECUTED")
 
             # Telemetry
-            run_records = tracer.list_runs()
-            active_run_id = run_records[-1].run_id if run_records else f"run-{uuid.uuid4().hex[:8]}"
             tracer.record_tool_invocation(
                 run_id=active_run_id,
                 tool_name="sandbox_transfer",

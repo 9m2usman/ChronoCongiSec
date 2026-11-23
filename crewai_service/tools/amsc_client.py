@@ -386,7 +386,17 @@ class ChronoCogniSecClient:
             }
 
         url = f"{self.base_url}/gateway/actions/propose" if self._app is None else "/api/v1/gateway/actions/propose"
-        res = self._send_request("POST", url, json=payload)
+        import hashlib, re
+        if re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+            w3c_trace_id = trace_id.lower()
+        else:
+            w3c_trace_id = hashlib.sha256(trace_id.encode("utf-8")).hexdigest()[:32]
+        w3c_span_id = uuid.uuid4().hex[:16]
+        trace_headers = {
+            "X-Trace-ID": trace_id,
+            "traceparent": f"00-{w3c_trace_id}-{w3c_span_id}-01",
+        }
+        res = self._send_request("POST", url, json=payload, headers=trace_headers)
         if res is not None:
             if res.status_code in (200, 201):
                 return res.json()
