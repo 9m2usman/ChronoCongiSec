@@ -40,7 +40,7 @@ def test_client_authenticate_success():
     mock_resp.json.return_value = {
         "access_token": "mock-jwt-token-12345",
         "token_type": "bearer",
-        "tenant_id": "tenant-a-uuid-001",
+        "active_tenant": {"id": "tenant-a-uuid-001", "name": "Test Tenant", "slug": "ci-test-tenant"},
     }
 
     with patch.object(client, "_is_test_double_mode", return_value=False):
@@ -97,7 +97,7 @@ def test_client_send_request_refreshes_token_on_401():
     auth_resp.status_code = 200
     auth_resp.json.return_value = {
         "access_token": "fresh-refreshed-token",
-        "tenant_id": "tenant-a-uuid-001",
+        "active_tenant": {"id": "tenant-a-uuid-001", "name": "Test Tenant", "slug": "ci-test-tenant"},
     }
 
     with patch.object(client, "_is_test_double_mode", return_value=False):
