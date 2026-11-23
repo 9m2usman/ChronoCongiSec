@@ -636,8 +636,7 @@ def test_unit_production_guard_qualification(monkeypatch, request):
 
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
-    # Keep this a unit test: do not let lifespan auto-wire a database repository.
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://prod_user:strong_prod_password@db.prod.internal:5432/amsc")
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
     monkeypatch.setenv("AUTH_BACKEND", "database")
