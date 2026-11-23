@@ -732,9 +732,13 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "ENABLE TRIGGER trg_audit_events_no_update_delete",   # 0009
         "trg_audit_events_chain",                          # 0009
         "trg_policy_decisions_permanent",                  # 0009
+        "fk_memberships_branch_tenant",                       # 0012
+        "fk_registration_requests_reviewed_by_membership",    # 0012
+        "fk_registration_requests_assigned_branch_tenant",    # 0012
+        "trg_forbid_tenant_id_change",                         # 0012 registration_requests trigger
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
-    assert "UPDATE alembic_version SET version_num='0009'" in sql
+    assert "UPDATE alembic_version SET version_num='0012'" in sql
 
 
 def test_offline_downgrade_generates_sql_back_to_base() -> None:
@@ -742,6 +746,10 @@ def test_offline_downgrade_generates_sql_back_to_base() -> None:
 
     for marker in (
         "DROP TRIGGER trg_policy_decisions_permanent",                   # 0009
+        "DROP TRIGGER trg_forbid_tenant_id_change ON registration_requests", # 0012
+        "DROP CONSTRAINT fk_registration_requests_reviewed_by_membership", # 0012
+        "DROP CONSTRAINT fk_registration_requests_assigned_branch_tenant", # 0012
+        "DROP CONSTRAINT fk_memberships_branch_tenant",                   # 0012
         "DROP COLUMN chain_seq",                                         # 0009
         "DROP TRIGGER trg_require_recovery_snapshot",                    # 0008
         "DROP COLUMN pre_recovery_snapshot_sha256",                      # 0008
