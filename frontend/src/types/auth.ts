@@ -77,6 +77,8 @@ export interface RegistrationRequestDetail {
   review_reason?: string | null;
   assigned_role?: string | null;
   assigned_branch_id?: string | null;
+  requested_role?: Role | string | null;
+  target_branch_id?: string | null;
 }
 
 export type Role = 'TENANT_ADMIN' | 'SECURITY_ANALYST' | 'AI_DEVELOPER' | 'AUDITOR';
@@ -90,11 +92,14 @@ export interface TenantMember {
   branch_name?: string | null;
   branch_code?: string | null;
   status: string;
+  is_active?: boolean;
 }
 
 export interface ApproveRegistrationPayload {
-  role: Role;
+  role?: Role;
+  assigned_role?: Role;
   branch_id?: string | null;
+  assigned_branch_id?: string | null;
   reason?: string;
 }
 

@@ -305,10 +305,15 @@ class ApiClient {
     requestId: string,
     payload: ApproveRegistrationPayload
   ): Promise<{ message: string; user_id: string; membership_id: string; role: string; branch_id?: string | null }> {
+    const effectivePayload = {
+      role: payload.role || payload.assigned_role,
+      branch_id: payload.branch_id || payload.assigned_branch_id,
+      reason: payload.reason,
+    };
     const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/registrations/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify(payload),
+      body: JSON.stringify(effectivePayload),
     });
     if (res.ok) {
       this.setApiStatus(true);
