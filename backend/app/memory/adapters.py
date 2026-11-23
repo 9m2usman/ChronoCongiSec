@@ -520,6 +520,11 @@ class SqlAlchemyMemoryRepository(MemoryRepository):
         """Fetch an agent entity by ID within tenant boundary."""
         self._assert_tenant(tenant_id)
         row = await self._agent_repo.get(agent_id)
+        if row is None:
+            from backend.app.memory.repository import AGENT_ALIASES
+            alias = AGENT_ALIASES.get(agent_id)
+            if alias:
+                row = await self._agent_repo.get(alias)
         return to_pydantic_agent_record(row) if row is not None else None
 
     async def create_agent(self, agent: AgentRecord) -> AgentRecord:

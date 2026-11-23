@@ -16,6 +16,7 @@ Security & Governance:
 - Cryptographic Integrity: SHA-256 verified on retrieval and detail endpoints.
 """
 
+import inspect
 import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
@@ -94,7 +95,7 @@ async def api_ingest_memory(
     Matches Document 05 Section 5.1 Route Catalog.
     Tenant ID is strictly derived from verified authentication context.
     """
-    record, version = ingest_memory(
+    res = ingest_memory(
         tenant_id=tenant_id,
         content=payload.content,
         agent_id=payload.agent_id,
@@ -103,6 +104,10 @@ async def api_ingest_memory(
         parent_record_id=payload.parent_record_id,
         repository=repo,
     )
+    if inspect.isawaitable(res):
+        record, version = await res
+    else:
+        record, version = res
     return MemoryRecordResponse(
         id=record.id,
         tenant_id=record.tenant_id,
@@ -150,10 +155,14 @@ async def api_query_memory(
         offset=offset,
         repository=repo,
     )
+    if inspect.isawaitable(records):
+        records = await records
 
     responses: List[MemoryRecordResponse] = []
     for rec in records:
         latest_ver = repo.get_latest_version(rec.id, tenant_id)
+        if inspect.isawaitable(latest_ver):
+            latest_ver = await latest_ver
         responses.append(
             MemoryRecordResponse(
                 id=rec.id,
@@ -188,12 +197,16 @@ async def api_get_memory_detail(
     Normal agent access is strictly restricted to TRUSTED records (returns 404 for non-trusted).
     Forensic access is reserved for authorized M4 investigation workflows.
     """
-    record, versions, provenance = get_memory_detail(
+    res = get_memory_detail(
         tenant_id=tenant_id,
         record_id=id,
         for_forensic=False,
         repository=repo,
     )
+    if inspect.isawaitable(res):
+        record, versions, provenance = await res
+    else:
+        record, versions, provenance = res
 
     return MemoryDetailResponse(
         record=record,
