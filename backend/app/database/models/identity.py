@@ -43,6 +43,7 @@ class Branch(Base):
     created_at: Mapped[datetime] = created_at_column()
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_branches_tenant_id_id"),
         UniqueConstraint("tenant_id", "code", name="uq_tenant_branch_code"),
         Index("idx_branches_tenant", "tenant_id"),
     )
