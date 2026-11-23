@@ -411,8 +411,7 @@ def test_production_rejects_missing_memory_repository(monkeypatch, request):
     """In production, application startup must fail if memory_repo is missing."""
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
-    # Exercise the explicitly injected repository, not lifespan auto-wiring.
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://prod_user:strong_prod_password@db.prod.internal:5432/amsc")
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
     monkeypatch.setenv("AUTH_BACKEND", "database")
@@ -425,6 +424,8 @@ def test_production_rejects_missing_memory_repository(monkeypatch, request):
     get_settings.cache_clear()
 
     settings = get_settings()
+    # Disable lifespan auto-wiring so this test exercises the missing-repository guard.
+    settings.DATABASE_URL = ""
     app = create_app(settings)
     app.state.auth_repo = object()  # Mock real auth repo
     app.state.rate_limiter = object()  # Mock real rate limiter
@@ -444,8 +445,7 @@ def test_production_rejects_in_memory_memory_repository(monkeypatch, request):
     """In production, application startup must fail if memory_repo is an in-memory repository."""
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
-    # Exercise the explicitly injected repository, not lifespan auto-wiring.
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://prod_user:strong_prod_password@db.prod.internal:5432/amsc")
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
     monkeypatch.setenv("AUTH_BACKEND", "database")
@@ -476,8 +476,7 @@ def test_production_startup_succeeds_with_approved_persistent_repository(monkeyp
     """In production, application startup succeeds when an approved persistent repository is attached."""
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("JWT_SECRET", "super_secret_jwt_key_that_is_32_chars_long_prod")
-    # Exercise the explicitly injected repository, not lifespan auto-wiring.
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://prod_user:strong_prod_password@db.prod.internal:5432/amsc")
     monkeypatch.setenv("REDIS_URL", "redis://redis.prod.internal:6379/0")
     monkeypatch.setenv("ALLOW_IN_MEMORY_AUTH", "false")
     monkeypatch.setenv("AUTH_BACKEND", "database")
