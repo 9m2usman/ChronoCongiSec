@@ -615,7 +615,13 @@ class ApiClient {
       });
       if (res.ok) {
         this.setApiStatus(true);
-        return await res.json();
+        const data = await res.json();
+        const rawList: any[] = Array.isArray(data) ? data : (data?.items || []);
+        return rawList.map((a: any) => ({
+          ...a,
+          tools: a.tools || a.tool_permissions?.map((tp: any) => tp.tool_name || tp.tool_id) || ['amsc_gateway', 'memory_retrieval'],
+          trust_tier: a.trust_tier || (a.status === 'ISOLATED' ? 'RESTRICTED' : 'STANDARD'),
+        }));
       }
       throw new ApiError(`GET /agents returned ${res.status}`, res.status);
     } catch {

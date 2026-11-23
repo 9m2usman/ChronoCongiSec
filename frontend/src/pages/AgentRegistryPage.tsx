@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useAgents, useMemories } from '@/hooks';
 import { StateBanner } from '@/components/common/StateBanner';
+import { Agent } from '@/types';
 import {
   Bot,
   ArrowUpRight,
@@ -27,30 +28,38 @@ export const AgentRegistryPage: React.FC = () => {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
+  // Safely extract agent array whether returned as array or paginated envelope { items: [...] }
+  const agentList: Agent[] = React.useMemo(() => {
+    if (!agents) return [];
+    if (Array.isArray(agents)) return agents;
+    if (Array.isArray((agents as any)?.items)) return (agents as any).items;
+    return [];
+  }, [agents]);
+
   // Filtered agents
   const filteredAgents = React.useMemo(() => {
-    if (!agents) return [];
-    return agents.filter((agent) => {
+    return agentList.filter((agent) => {
       const matchesTier = tierFilter === 'ALL' || agent.trust_tier === tierFilter;
       const q = searchQuery.toLowerCase();
+      const agentTools = Array.isArray(agent.tools) ? agent.tools : [];
       const matchesSearch =
         !searchQuery ||
-        agent.name.toLowerCase().includes(q) ||
-        agent.id.toLowerCase().includes(q) ||
-        agent.model.toLowerCase().includes(q) ||
-        agent.tools.some((t) => t.toLowerCase().includes(q));
+        (agent.name && agent.name.toLowerCase().includes(q)) ||
+        (agent.id && agent.id.toLowerCase().includes(q)) ||
+        (agent.model && agent.model.toLowerCase().includes(q)) ||
+        agentTools.some((t: string) => typeof t === 'string' && t.toLowerCase().includes(q));
       return matchesTier && matchesSearch;
     });
-  }, [agents, tierFilter, searchQuery]);
+  }, [agentList, tierFilter, searchQuery]);
 
   // Compute active memory count per agent
   const getAgentMemoryCount = (agentId: string) => {
-    if (!memories) return 0;
+    if (!memories || !Array.isArray(memories)) return 0;
     return memories.filter((m) => m.agent_id === agentId).length;
   };
 
   // Blocked tools by trust tier (fail-closed security architecture)
-  const getBlockedToolsForTier = (tier: string) => {
+  const getBlockedToolsForTier = (tier?: string) => {
     if (tier === 'RESTRICTED') {
       return ['shell_exec (FAIL_CLOSED)', 'direct_db_write (BLOCKED)', 'export_raw_pii (BLOCKED)'];
     }
@@ -206,7 +215,7 @@ export const AgentRegistryPage: React.FC = () => {
                     {/* Allowed Tool Adapters */}
                     <td className="py-3 px-4">
                       <div className="flex flex-wrap gap-1 max-w-[240px]">
-                        {agent.tools.map((t) => (
+                        {(agent.tools || []).map((t: string) => (
                           <span
                             key={t}
                             className="px-1.5 py-0.5 rounded bg-emerald-950/30 border border-emerald-500/40 text-[10px] text-emerald-300 font-mono"
