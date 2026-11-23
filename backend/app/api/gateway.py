@@ -15,6 +15,7 @@ Canonical References:
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -50,7 +51,7 @@ from backend.app.security.runtime import get_gateway_enforcement
 logger = logging.getLogger("amsc.api.gateway")
 
 # Strict ID validation regex
-SAFE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+SAFE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 
 # Maximum parameters payload serialization length (64 KB)
 MAX_PARAMETERS_JSON_BYTES = 65536
@@ -101,7 +102,12 @@ def _validate_finite_and_depth(val: Any, current_depth: int = 1) -> None:
     if isinstance(val, float):
         if not math.isfinite(val):
             raise ValueError("Numeric parameters must be finite (NaN and Infinity are forbidden).")
+    elif isinstance(val, str):
+        if len(val) > 8192:
+            raise ValueError("Parameter strings must not exceed 8192 characters.")
     elif isinstance(val, dict):
+        if len(val) > 200:
+            raise ValueError("Parameter objects must not exceed 200 keys.")
         for k, v in val.items():
             if not isinstance(k, str) or len(k) > 128:
                 raise ValueError("Parameter keys must be strings with length <= 128.")
@@ -139,6 +145,8 @@ class ActionProposalRequest(BaseModel):
             raise ValueError("Identifiers cannot be empty or whitespace only.")
         if any(c in s for c in ("\x00", "\r", "\n")):
             raise ValueError("Identifiers cannot contain control characters.")
+        if not SAFE_ID_REGEX.fullmatch(s):
+            raise ValueError("Identifiers may only contain letters, digits, '.', '_', ':', and '-'.")
         return s
 
     @field_validator("memory_refs")
@@ -931,6 +939,15 @@ class SandboxTransferAdapter:
     ALLOWED_OPERATIONS = {"transfer_funds", "get_balance"}
     FORBIDDEN_DESTINATIONS = {"ACC-ATTACKER-999", "ACC-BLOCKED-000"}
 
+    @staticmethod
+    def _failure(message: str, status_code: int, start_time: float) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            status="FAILED",
+            status_code=status_code,
+            result_payload={"error": message},
+            duration_ms=int((time.perf_counter() - start_time) * 1000),
+        )
+
     async def execute(
         self,
         operation: str,
@@ -946,27 +963,54 @@ class SandboxTransferAdapter:
                 duration_ms=int((time.perf_counter() - start_time) * 1000),
             )
 
-        destination = str(parameters.get("destination_account", ""))
-        amount = float(parameters.get("amount", 0.0))
-        currency = str(parameters.get("currency", "USD"))
+        if not isinstance(parameters, dict):
+            return self._failure("Transfer parameters must be an object.", 400, start_time)
 
-        # Destination boundary check
-        if destination in self.FORBIDDEN_DESTINATIONS:
+        if operation == "get_balance":
+            account = parameters.get("account_id") or parameters.get("destination_account")
+            if not isinstance(account, str) or not SAFE_ID_REGEX.fullmatch(account):
+                return self._failure("account_id must be a bounded account identifier.", 400, start_time)
             return ToolExecutionResult(
-                status="FAILED",
-                status_code=403,
-                result_payload={"error": f"Destination account '{destination}' is blacklisted."},
+                status="SUCCESS",
+                status_code=200,
+                result_payload={"account_id": account, "balance": 0.0, "currency": "USD", "status": "SANDBOX"},
                 duration_ms=int((time.perf_counter() - start_time) * 1000),
             )
 
+        destination = parameters.get("destination_account")
+        currency = parameters.get("currency", "USD")
+        if not isinstance(destination, str) or not SAFE_ID_REGEX.fullmatch(destination):
+            return self._failure("destination_account must be a bounded account identifier.", 400, start_time)
+        if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
+            return self._failure("currency must be a three-letter uppercase ISO code.", 400, start_time)
+
+        try:
+            amount = Decimal(str(parameters.get("amount")))
+        except (InvalidOperation, TypeError, ValueError):
+            return self._failure("amount must be a finite positive decimal.", 400, start_time)
+        if not amount.is_finite() or amount <= Decimal("0"):
+            return self._failure("amount must be a finite positive decimal.", 400, start_time)
+
+        # Destination boundary check
+        if destination in self.FORBIDDEN_DESTINATIONS:
+            return self._failure("Destination account is not eligible for sandbox transfer.", 403, start_time)
+
         duration = int((time.perf_counter() - start_time) * 1000)
+        # The transaction ID is deterministic for a protected proposal.  It
+        # lets callers safely reconcile a retry without exposing any credential
+        # or reaching a real payment system.
+        transaction_material = ":".join(
+            str(context.get(key, ""))
+            for key in ("tenant_id", "agent_id", "idempotency_key", "trace_id")
+        )
+        transaction_id = f"tx-sbx-{hashlib.sha256(transaction_material.encode('utf-8')).hexdigest()[:16]}"
         return ToolExecutionResult(
             status="SUCCESS",
             status_code=200,
             result_payload={
-                "transaction_id": f"tx-sbx-{uuid.uuid4().hex[:12]}",
+                "transaction_id": transaction_id,
                 "destination_account": destination,
-                "amount": amount,
+                "amount": float(amount),
                 "currency": currency,
                 "status": "SETTLED_IN_SANDBOX",
             },
@@ -1266,7 +1310,13 @@ async def propose_tool_action(
         return await adapter.execute(
             operation=body.operation,
             parameters=body.parameters,
-            context={"tenant_id": tenant_id, "agent_id": body.agent_id, "trace_id": body.trace_id},
+            context={
+                "tenant_id": tenant_id,
+                "agent_id": body.agent_id,
+                "idempotency_key": body.idempotency_key,
+                "proposal_id": proposal_id,
+                "trace_id": body.trace_id,
+            },
         )
 
     outcome = await guard.execute(decision, proposal, context, persist_decision=persist_decision, executor=executor)
@@ -1301,7 +1351,13 @@ async def propose_tool_action(
     # 8. Adapter was invoked: record the honest outcome (a timeout is UNKNOWN, never success).
     if outcome.status == "EXECUTED" and isinstance(outcome.result, ToolExecutionResult):
         exec_res = outcome.result
-        execution_status = ExecutionStatus.EXECUTED.value
+        execution_status = (
+            ExecutionStatus.EXECUTED.value
+            if exec_res.status == "SUCCESS"
+            else ExecutionStatus.UNKNOWN.value
+            if exec_res.status == "TIMEOUT"
+            else ExecutionStatus.FAILED.value
+        )
         result_payload = exec_res.result_payload
         execution_entity = ToolExecutionEntity(
             id=str(uuid.uuid4()), tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,

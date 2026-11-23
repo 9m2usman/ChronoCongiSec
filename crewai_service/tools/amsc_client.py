@@ -135,45 +135,16 @@ class ChronoCogniSecClient:
                 )
                 return True
             elif res.status_code == 401:
-                # Try fallback canonical enterprise credential pair if primary fails
-                fallback_pairs = [
-                    ("alex.analyst@alphacorp.com", "SecurePassword123!", "alphacorp"),
-                    ("analyst@company-a.com", "SecurePassword123!", "company-a"),
-                    ("alex.analyst@alphacorp.com", "CorrectHorseBatteryStaple2026!", "alphacorp"),
-                ]
-                for fb_email, fb_pass, fb_slug in fallback_pairs:
-                    if fb_email == use_email and fb_slug == use_slug and fb_pass == use_password:
-                        continue
-                    fb_payload = {"email": fb_email, "password": fb_pass, "tenant_slug": fb_slug}
-                    try:
-                        if self._app is not None:
-                            fb_res = client.post(url, headers={"Accept": "application/json", "Content-Type": "application/json"}, json=fb_payload)
-                        else:
-                            with httpx.Client(timeout=self.timeout) as fb_client:
-                                fb_res = fb_client.post(url, headers={"Accept": "application/json", "Content-Type": "application/json"}, json=fb_payload)
-                        if fb_res.status_code == 200:
-                            fb_data = fb_res.json()
-                            self.auth_token = fb_data.get("access_token")
-                            self.email = fb_email
-                            self.password = fb_pass
-                            self.tenant_slug = fb_slug
-                            active_t = fb_data.get("active_tenant", {})
-                            if active_t and "id" in active_t:
-                                self.tenant_id = active_t["id"]
-                            logger.info(
-                                f"Authentication successful via enterprise credential for '{fb_data.get('user_id')}' "
-                                f"(role: {fb_data.get('role')}, tenant: {self.tenant_id})."
-                            )
-                            return True
-                    except Exception:
-                        pass
-                logger.error(f"Authentication failed (HTTP 401): {res.text}")
+                # Never retry with embedded or fallback credentials.  Aside
+                # from leaking a credential into source, that would let an
+                # agent silently change its principal/tenant.
+                logger.warning("Authentication rejected by the configured backend principal.")
                 return False
             elif res.status_code == 403:
-                logger.error(f"Authorization failed (HTTP 403): {res.text}")
+                logger.warning("Authentication principal is not authorized by the backend.")
                 return False
             else:
-                logger.warning(f"Authentication endpoint returned status {res.status_code}: {res.text}")
+                logger.warning("Authentication endpoint returned status %s.", res.status_code)
                 return False
         except (httpx.HTTPError, OSError) as exc:
             logger.warning(f"Backend authentication network failure at {url}: {exc}")

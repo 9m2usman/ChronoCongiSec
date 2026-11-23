@@ -94,7 +94,11 @@ class CrewAISettings(BaseSettings):
     CHRONOCONGISEC_TENANT_ID: str = "tenant-a-uuid-001"
     CHRONOCONGISEC_AUTH_TOKEN: Optional[str] = None
     CHRONOCONGISEC_AUTH_EMAIL: str = "analyst@company-a.com"
-    CHRONOCONGISEC_AUTH_PASSWORD: str = "SecurePassword123!"
+    # Passwords are deliberately never given a default.  A CrewAI runtime must
+    # either receive an explicit service token or obtain credentials from its
+    # configured environment/secret store.  A missing value fails closed in the
+    # API client instead of selecting a demo account.
+    CHRONOCONGISEC_AUTH_PASSWORD: Optional[str] = None
     CHRONOCONGISEC_TENANT_SLUG: str = "company-a"
 
     # --- LLM Rate Limiting, Pacing & Resilience ---
