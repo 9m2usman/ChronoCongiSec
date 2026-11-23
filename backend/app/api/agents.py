@@ -264,11 +264,109 @@ class InMemoryAgentRepository:
 _default_agent_repo: Optional[AgentRepositoryProtocol] = None
 
 
+def seed_demo_agents(repo: InMemoryAgentRepository) -> InMemoryAgentRepository:
+    """Seed canonical five enterprise business agents for demo and dev/test environments."""
+    t_a = "tenant-a-uuid-001"
+    now = datetime.now(timezone.utc)
+    agents_data = [
+        (
+            "agent-crew-support-001",
+            "Customer Support Specialist",
+            "CREWAI",
+            "gemini-1.5-flash",
+            "branch-ho-001",
+            "Customer Support Specialist handling ticket resolution and refunds under governance.",
+        ),
+        (
+            "agent-crew-hr-002",
+            "HR Operations Specialist",
+            "CREWAI",
+            "gemini-1.5-flash",
+            "branch-isb-004",
+            "HR Operations Specialist answering policy inquiries and leave requests.",
+        ),
+        (
+            "agent-crew-finance-003",
+            "Finance Operations Specialist",
+            "CREWAI",
+            "gemini-1.5-flash",
+            "branch-lhr-002",
+            "Finance Operations Specialist auditing corporate expenses and submitting disbursements.",
+        ),
+        (
+            "agent-crew-branch-004",
+            "Branch Operations Specialist",
+            "CREWAI",
+            "gemini-1.5-flash",
+            "branch-khi-003",
+            "Branch Operations Specialist managing regional branch operations and Head Office synchronization.",
+        ),
+        (
+            "agent-crew-coord-005",
+            "Enterprise Workflow Coordinator",
+            "CREWAI",
+            "gemini-1.5-flash",
+            "branch-ho-001",
+            "Enterprise Workflow Coordinator delegating cross-department initiatives.",
+        ),
+    ]
+
+    for aid, name, rtime, mdl, bid, prompt in agents_data:
+        agent = AgentEntity(
+            id=aid,
+            tenant_id=t_a,
+            name=name,
+            runtime=rtime,
+            model=mdl,
+            status="ACTIVE",
+            config_version="v1.0.0",
+            system_prompt=prompt,
+            branch_id=bid,
+            created_at=now,
+            updated_at=now,
+        )
+        version = AgentVersionEntity(
+            id=f"ver-{aid}-1.0.0",
+            tenant_id=t_a,
+            agent_id=aid,
+            version="v1.0.0",
+            config_payload={"model": mdl, "system_prompt": prompt},
+            created_at=now,
+        )
+        repo._agents[aid] = agent
+        repo._versions[(aid, "v1.0.0")] = version
+
+    # Seed tool permissions for sandbox_transfer
+    repo._tool_permissions["agent-crew-support-001"] = [
+        {
+            "tool_id": "tool-sandbox-transfer",
+            "tool_name": "sandbox_transfer",
+            "adapter_type": "INTERNAL",
+            "allowed_operations": ["transfer_funds"],
+            "constraints": {"max_amount": 300.0, "approval_threshold_amount": 300.0},
+            "is_protected": True,
+        }
+    ]
+    repo._tool_permissions["agent-crew-finance-003"] = [
+        {
+            "tool_id": "tool-sandbox-transfer",
+            "tool_name": "sandbox_transfer",
+            "adapter_type": "INTERNAL",
+            "allowed_operations": ["transfer_funds"],
+            "constraints": {"max_amount": 10000.0, "approval_threshold_amount": 300.0},
+            "is_protected": True,
+        }
+    ]
+    return repo
+
+
 def get_default_agent_repository() -> AgentRepositoryProtocol:
     """Factory returning singleton in-memory repository for dev/test."""
     global _default_agent_repo
     if _default_agent_repo is None:
-        _default_agent_repo = InMemoryAgentRepository()
+        repo = InMemoryAgentRepository()
+        seed_demo_agents(repo)
+        _default_agent_repo = repo
     return _default_agent_repo
 
 
@@ -380,6 +478,13 @@ async def get_agent_repo(
     is strictly forbidden and fails closed with SecurityDependencyError.
     """
     repo = getattr(request.app.state, "agent_repo", None)
+    if repo is None:
+        session_factory = getattr(request.app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
+            repo = SqlAlchemyAgentRepository(session_factory)
+            request.app.state.agent_repo = repo
+
     if repo is not None:
         if settings.APP_ENV == "production":
             if getattr(repo, "is_in_memory", True) or not getattr(repo, "is_persistent", False):

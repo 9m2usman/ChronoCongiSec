@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Dict, List, Optional
 
-from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, SourceRecord, TrustState
+from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, RecordType, SourceRecord, TrustState
 
 
 class _AwaitableNone:
@@ -424,3 +424,78 @@ def reset_default_repository() -> None:
     """Reset repository storage, primarily used for test fixture cleanup."""
     global _default_repository
     _default_repository = InMemoryMemoryRepository()
+
+
+def seed_enterprise_demo_memories(repo: MemoryRepository) -> None:
+    """Seed canonical trusted memories for tenant-a-uuid-001 business agents."""
+    t_a = "tenant-a-uuid-001"
+    from backend.app.memory.integrity import sha256_hex
+
+    policies = [
+        (
+            "mem-supp-faq-001",
+            "agent-crew-support-001",
+            (
+                "ChronoCogniSec Return & Refund Policy:\n"
+                "Full refund permitted within 14 calendar days of purchase with valid receipt. "
+                "Disbursements over $300 require dual-custody managerial approval."
+            ),
+        ),
+        (
+            "mem-hr-pol-001",
+            "agent-crew-hr-002",
+            (
+                "ChronoCogniSec HR Handbook:\n"
+                "Annual leave entitlement is 22 working days per year for full-time employees. "
+                "Sick leave up to 10 days with certificate required after 2 days."
+            ),
+        ),
+        (
+            "mem-fin-proc-001",
+            "agent-crew-finance-003",
+            (
+                "ChronoCogniSec Financial Governance:\n"
+                "Disbursements and reimbursements over $300.00 USD strictly require dual-custody "
+                "approval from a Finance Manager. Self-approval is strictly forbidden."
+            ),
+        ),
+        (
+            "mem-branch-ops-001",
+            "agent-crew-branch-004",
+            (
+                "ChronoCogniSec Branch Operations Protocol:\n"
+                "Regional branches must synchronize daily facility status and vault inventory with Head Office. "
+                "Cross-branch access to facility records without Head Office authorization is strictly prohibited."
+            ),
+        ),
+        (
+            "mem-coord-pol-001",
+            "agent-crew-coord-005",
+            (
+                "ChronoCogniSec Cross-Department Workflow Governance:\n"
+                "Multi-department initiatives must be decomposed into bounded tasks assigned to designated specialists. "
+                "All tool actions must be routed through the Security Gateway and validated against trusted policies."
+            ),
+        ),
+    ]
+
+    for mid, aid, content in policies:
+        rec = MemoryRecord(
+            id=mid,
+            tenant_id=t_a,
+            agent_id=aid,
+            source_id="src-doc-001",
+            record_type=RecordType.KNOWLEDGE.value,
+            trust_state=TrustState.TRUSTED.value,
+            current_version=1,
+        )
+        repo.create_record(rec)
+        ver = MemoryVersion(
+            id=f"ver-{mid}-1",
+            tenant_id=t_a,
+            record_id=mid,
+            version=1,
+            content=content,
+            checksum=sha256_hex(content),
+        )
+        repo.create_version(ver)

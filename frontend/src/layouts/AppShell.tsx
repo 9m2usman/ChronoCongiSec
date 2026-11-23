@@ -1,6 +1,7 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useHealthCheck } from '@/hooks';
+import { apiClient } from '@/services/apiClient';
 import { DualModeBadge } from '@/components/common/DualModeBadge';
 import { CommandPalette } from '@/components/common/CommandPalette';
 import { AttackReplayModal } from '@/components/common/AttackReplayModal';
@@ -23,10 +24,12 @@ import {
   Shield,
   Menu,
   ChevronLeft,
+  LogOut,
 } from 'lucide-react';
 
 export const AppShell: React.FC = () => {
   useHealthCheck();
+  const navigate = useNavigate();
 
   const {
     activeTenant,
@@ -38,6 +41,14 @@ export const AppShell: React.FC = () => {
     setCommandPaletteOpen,
     setAttackReplayOpen,
   } = useWorkstationStore();
+
+  const handleLogout = async () => {
+    try {
+      await apiClient.logout();
+    } finally {
+      navigate('/login');
+    }
+  };
 
   const NAV_SECTIONS = [
     {
@@ -219,7 +230,22 @@ export const AppShell: React.FC = () => {
                 <span className="text-slate-200 font-semibold">{currentUser?.full_name || 'Sarah (SecOps)'}</span>
                 <span className="text-[9px] text-emerald-400 font-mono">{currentUser?.role || 'MEMBER_M5'}</span>
               </div>
+              {currentUser?.branch_id && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-300 font-mono">
+                  {currentUser.branch_id.replace('branch-', '').toUpperCase()}
+                </span>
+              )}
             </div>
+
+            {/* Logout Button */}
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 text-xs transition-colors"
+              title="Logout from AMSC Workstation"
+            >
+              <LogOut className="w-3.5 h-3.5 text-slate-400" />
+              <span className="hidden md:inline">Logout</span>
+            </button>
           </div>
         </header>
 

@@ -12,7 +12,7 @@ Shape (TRD section 12.1: one company with branches; OD-28 covers the "3 tenants"
 - tenant A "ChronoCongiSec Enterprise" with branches Head Office, Lahore, Karachi, Islamabad;
 - tenant B "Isolation Check Co", only so that cross-tenant isolation can be observed.
 
-Every one of the 36 tables gets at least one row. The gateway chain is written through
+Every one of the 37 tables gets at least one row. The gateway chain is written through
 ``UnitOfWork``, the rewind through ``RewindCoordinator`` and audit events through
 ``AuditEventRepository``, so the real M6 code paths are exercised while seeding.
 """
@@ -47,6 +47,7 @@ from backend.app.database.models import (
     Quarantine,
     RecoveryPlan,
     RetrievalEvent,
+    RegistrationRequest,
     Role,
     RolePermission,
     Source,
@@ -110,6 +111,15 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
             Membership(id=_id(), tenant_id=a, user_id=ids["u_auditor"], role="AUDITOR", status="SUSPENDED"),
             Membership(id=_id(), tenant_id=b, user_id=ids["u_analyst"], role="SECURITY_ANALYST", status="ACTIVE"),
         ])
+        session.add(RegistrationRequest(
+            id=_id(),
+            tenant_id=a,
+            full_name="Pending Employee",
+            email="pending.employee@example.test",
+            hashed_password="x",
+            requested_branch_code="HO",
+            status="PENDING",
+        ))
         session.add_all([
             Agent(id=ids["agent"], tenant_id=a, name="Treasury Bot"),
             Agent(id=ids["agent_isolated"], tenant_id=a, name="Old Bot", status="ISOLATED"),

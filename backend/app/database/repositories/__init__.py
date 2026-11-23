@@ -15,6 +15,8 @@ from backend.app.database.repositories.gateway import (
     ToolExecutionRepository,
     ToolProposalRepository,
 )
+from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
+from backend.app.database.repositories.auth import DatabaseAuthRepository
 from backend.app.database.repositories.memberships import MembershipRepository
 from backend.app.database.repositories.memory import (
     EdgePage,
@@ -28,11 +30,13 @@ __all__ = [
     "AppendOnlyError",
     "ApprovalRepository",
     "AuditEventRepository",
+    "DatabaseAuthRepository",
     "EdgePage",
     "MembershipRepository",
     "MemoryVersionRepository",
     "PolicyDecisionRepository",
     "ProvenanceEdgeRepository",
+    "SqlAlchemyAgentRepository",
     "TenantScopeError",
     "TenantScopedRepository",
     "ToolExecutionRepository",

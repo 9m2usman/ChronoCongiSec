@@ -74,7 +74,7 @@ from typing import List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.database.models.agents import Agent as OrmAgent
 from backend.app.database.models.memory import (
@@ -551,3 +551,181 @@ class SqlAlchemyMemoryRepository(MemoryRepository):
                 return to_pydantic_source_record(orm_source)
         except IntegrityError as exc:
             raise sanitize_integrity_error(exc)
+
+
+class DatabaseTransactionalMemoryRepository(MemoryRepository):
+    """Transactional session-bound memory repository for multi-entity writes."""
+
+    is_persistent: bool = True
+    is_in_memory: bool = False
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator["DatabaseTransactionalMemoryRepository"]:
+        yield self
+
+    async def create_record(self, record: MemoryRecord) -> MemoryRecord:
+        adapter = SqlAlchemyMemoryRepository(self.session, record.tenant_id)
+        return await adapter.create_record(record)
+
+    async def get_record(self, record_id: str, tenant_id: str) -> Optional[MemoryRecord]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_record(record_id, tenant_id)
+
+    async def list_records(
+        self,
+        tenant_id: str,
+        agent_id: Optional[str] = None,
+        trust_state: Optional[str] = None,
+        only_trusted: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[MemoryRecord]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.list_records(
+            tenant_id,
+            agent_id=agent_id,
+            trust_state=trust_state,
+            only_trusted=only_trusted,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def update_record(self, record: MemoryRecord) -> MemoryRecord:
+        adapter = SqlAlchemyMemoryRepository(self.session, record.tenant_id)
+        return await adapter.update_record(record)
+
+    async def create_version(self, version: MemoryVersion) -> MemoryVersion:
+        adapter = SqlAlchemyMemoryRepository(self.session, version.tenant_id)
+        return await adapter.create_version(version)
+
+    async def get_versions(self, record_id: str, tenant_id: str) -> List[MemoryVersion]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_versions(record_id, tenant_id)
+
+    async def get_version(self, record_id: str, version: int, tenant_id: str) -> Optional[MemoryVersion]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_version(record_id, version, tenant_id)
+
+    async def get_latest_version(self, record_id: str, tenant_id: str) -> Optional[MemoryVersion]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_latest_version(record_id, tenant_id)
+
+    async def create_edge(self, edge: ProvenanceEdge) -> ProvenanceEdge:
+        adapter = SqlAlchemyMemoryRepository(self.session, edge.tenant_id)
+        return await adapter.create_edge(edge)
+
+    async def get_edges_for_record(self, record_id: str, tenant_id: str) -> List[ProvenanceEdge]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_edges_for_record(record_id, tenant_id)
+
+    async def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_agent(agent_id, tenant_id)
+
+    async def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        adapter = SqlAlchemyMemoryRepository(self.session, agent.tenant_id)
+        return await adapter.create_agent(agent)
+
+    async def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        adapter = SqlAlchemyMemoryRepository(self.session, tenant_id)
+        return await adapter.get_source(source_id, tenant_id)
+
+    async def create_source(self, source: SourceRecord) -> SourceRecord:
+        adapter = SqlAlchemyMemoryRepository(self.session, source.tenant_id)
+        return await adapter.create_source(source)
+
+
+class DatabaseMemoryRepository(MemoryRepository):
+    """Production database memory repository backed by async sessionmaker."""
+
+    is_persistent: bool = True
+    is_in_memory: bool = False
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[DatabaseTransactionalMemoryRepository]:
+        async with self.session_factory() as session:
+            async with session.begin():
+                yield DatabaseTransactionalMemoryRepository(session)
+
+    async def create_record(self, record: MemoryRecord) -> MemoryRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).create_record(record)
+
+    async def get_record(self, record_id: str, tenant_id: str) -> Optional[MemoryRecord]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_record(record_id, tenant_id)
+
+    async def list_records(
+        self,
+        tenant_id: str,
+        agent_id: Optional[str] = None,
+        trust_state: Optional[str] = None,
+        only_trusted: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[MemoryRecord]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).list_records(
+                tenant_id,
+                agent_id=agent_id,
+                trust_state=trust_state,
+                only_trusted=only_trusted,
+                limit=limit,
+                offset=offset,
+            )
+
+    async def update_record(self, record: MemoryRecord) -> MemoryRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).update_record(record)
+
+    async def create_version(self, version: MemoryVersion) -> MemoryVersion:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).create_version(version)
+
+    async def get_versions(self, record_id: str, tenant_id: str) -> List[MemoryVersion]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_versions(record_id, tenant_id)
+
+    async def get_version(self, record_id: str, version: int, tenant_id: str) -> Optional[MemoryVersion]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_version(record_id, version, tenant_id)
+
+    async def get_latest_version(self, record_id: str, tenant_id: str) -> Optional[MemoryVersion]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_latest_version(record_id, tenant_id)
+
+    async def create_edge(self, edge: ProvenanceEdge) -> ProvenanceEdge:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).create_edge(edge)
+
+    async def get_edges_for_record(self, record_id: str, tenant_id: str) -> List[ProvenanceEdge]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_edges_for_record(record_id, tenant_id)
+
+    async def get_agent(self, agent_id: str, tenant_id: str) -> Optional[AgentRecord]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_agent(agent_id, tenant_id)
+
+    async def create_agent(self, agent: AgentRecord) -> AgentRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).create_agent(agent)
+
+    async def get_source(self, source_id: str, tenant_id: str) -> Optional[SourceRecord]:
+        async with self.session_factory() as session:
+            return await DatabaseTransactionalMemoryRepository(session).get_source(source_id, tenant_id)
+
+    async def create_source(self, source: SourceRecord) -> SourceRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                return await DatabaseTransactionalMemoryRepository(session).create_source(source)

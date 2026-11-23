@@ -4,6 +4,14 @@ import {
   LoginRequest,
   LoginResponse,
   UserProfileResponse,
+  BranchInfo,
+  RegisterRequest,
+  RegisterResponse,
+  RegistrationStatusResponse,
+  RegistrationRequestDetail,
+  TenantMember,
+  ApproveRegistrationPayload,
+  UpdateMemberPayload,
   TenantWorkspaceSummary,
   MemoryRecordResponse,
   MemoryDetailResponse,
@@ -201,6 +209,176 @@ class ApiClient {
       throw new AuthorizationError('Access denied: Caller has no membership in target tenant.', 403);
     }
     throw new ApiError(`GET /auth/me returned HTTP ${res.status}`, res.status);
+  }
+
+  async logout(): Promise<void> {
+    try {
+      await this.fetchWithTimeout(`${API_BASE_URL}/auth/logout`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+      });
+    } catch {
+      // Best-effort server notification
+    } finally {
+      useWorkstationStore.getState().logout();
+    }
+  }
+
+  async register(payload: RegisterRequest): Promise<RegisterResponse> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+
+    let errMsg = `Registration failed with HTTP ${res.status}`;
+    try {
+      const errBody = await res.json();
+      if (errBody?.detail) errMsg = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
+      if (errBody?.message) errMsg = errBody.message;
+    } catch {
+      // Ignore body parsing failure
+    }
+    throw new ApiError(errMsg, res.status);
+  }
+
+  async getRegistrationStatus(requestId: string): Promise<RegistrationStatusResponse> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/auth/registration-status/${encodeURIComponent(requestId)}`);
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    let errMsg = `Status check failed with HTTP ${res.status}`;
+    try {
+      const errBody = await res.json();
+      if (errBody?.detail) errMsg = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
+      if (errBody?.message) errMsg = errBody.message;
+    } catch {}
+    if (res.status === 404) {
+      throw new ApiError('Registration request not found.', 404);
+    }
+    throw new ApiError(errMsg, res.status);
+  }
+
+  async getBranches(tenantSlug?: string): Promise<BranchInfo[]> {
+    const url = tenantSlug
+      ? `${API_BASE_URL}/branches?tenant_slug=${encodeURIComponent(tenantSlug)}`
+      : `${API_BASE_URL}/branches`;
+    try {
+      const res = await this.fetchWithTimeout(url);
+      if (res.ok) {
+        this.setApiStatus(true);
+        return await res.json();
+      }
+    } catch {}
+    return [
+      { id: 'branch-ho-001', tenant_id: 'tenant-a-uuid-001', name: 'Head Office - Core Security', code: 'HO', status: 'ACTIVE' },
+      { id: 'branch-lhr-002', tenant_id: 'tenant-a-uuid-001', name: 'Finance & Regional Operations Branch (Lahore)', code: 'LHR', status: 'ACTIVE' },
+      { id: 'branch-khi-003', tenant_id: 'tenant-a-uuid-001', name: 'Maritime & Logistics Operations Branch (Karachi)', code: 'KHI', status: 'ACTIVE' },
+      { id: 'branch-isb-004', tenant_id: 'tenant-a-uuid-001', name: 'Corporate Affairs & HR Branch (Islamabad)', code: 'ISB', status: 'ACTIVE' },
+    ];
+  }
+
+  async getPendingRegistrations(statusFilter?: string): Promise<RegistrationRequestDetail[]> {
+    const url = statusFilter
+      ? `${API_BASE_URL}/admin/registrations?status_filter=${encodeURIComponent(statusFilter)}`
+      : `${API_BASE_URL}/admin/registrations`;
+    const res = await this.fetchWithTimeout(url, {
+      headers: this.getHeaders(),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    if (res.status === 403) {
+      throw new AuthorizationError('Tenant administrator access required to review registrations.', 403);
+    }
+    throw new ApiError(`Failed to fetch registration requests (HTTP ${res.status})`, res.status);
+  }
+
+  async approveRegistration(
+    requestId: string,
+    payload: ApproveRegistrationPayload
+  ): Promise<{ message: string; user_id: string; membership_id: string; role: string; branch_id?: string | null }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/registrations/${encodeURIComponent(requestId)}/approve`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    let errMsg = `Approval failed (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err?.detail) errMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+      if (err?.message) errMsg = err.message;
+    } catch {}
+    if (res.status === 403) throw new AuthorizationError(errMsg, 403);
+    throw new ApiError(errMsg, res.status);
+  }
+
+  async rejectRegistration(requestId: string, reason: string): Promise<{ message: string; request_id: string }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/registrations/${encodeURIComponent(requestId)}/reject`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ reason }),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    let errMsg = `Rejection failed (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err?.detail) errMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+      if (err?.message) errMsg = err.message;
+    } catch {}
+    if (res.status === 403) throw new AuthorizationError(errMsg, 403);
+    throw new ApiError(errMsg, res.status);
+  }
+
+  async getUsers(): Promise<TenantMember[]> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/users`, {
+      headers: this.getHeaders(),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    if (res.status === 403) {
+      throw new AuthorizationError('Tenant administrator access required to view members.', 403);
+    }
+    throw new ApiError(`Failed to fetch tenant members (HTTP ${res.status})`, res.status);
+  }
+
+  async updateUserMembership(
+    userId: string,
+    payload: UpdateMemberPayload
+  ): Promise<{ message: string; user_id: string; role: string; branch_id?: string | null; status: string }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/admin/users/${encodeURIComponent(userId)}/membership`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    let errMsg = `Failed to update member (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err?.detail) errMsg = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+      if (err?.message) errMsg = err.message;
+    } catch {}
+    if (res.status === 403) throw new AuthorizationError(errMsg, 403);
+    throw new ApiError(errMsg, res.status);
   }
 
   // --- 3. Tenants Endpoints ---

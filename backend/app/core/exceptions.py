@@ -72,6 +72,38 @@ class ValidationError(AMSCException):
         )
 
 
+class BadRequestError(AMSCException):
+    """Raised on bad request parameters."""
+
+    def __init__(
+        self,
+        message: str = "Invalid request parameters.",
+        details: Optional[Union[Dict[str, Any], List[Any], str]] = None,
+    ):
+        super().__init__(
+            message=message,
+            code="BAD_REQUEST",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=details,
+        )
+
+
+class ConflictError(AMSCException):
+    """Raised when an operation conflicts with existing resource state."""
+
+    def __init__(
+        self,
+        message: str = "The requested operation conflicts with existing state.",
+        details: Optional[Union[Dict[str, Any], List[Any], str]] = None,
+    ):
+        super().__init__(
+            message=message,
+            code="CONFLICT",
+            status_code=status.HTTP_409_CONFLICT,
+            details=details,
+        )
+
+
 class AuthenticationError(AMSCException):
     """Raised when authentication credentials are missing, invalid, or expired."""
 
