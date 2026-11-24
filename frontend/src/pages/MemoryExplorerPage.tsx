@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { useMemories, useIngestMemoryMutation } from '@/hooks';
+import { useMemories, useIngestMemoryMutation, useBaselineRecords } from '@/hooks';
 import { StateBanner } from '@/components/common/StateBanner';
 import {
   Database,
@@ -14,12 +14,16 @@ import {
   Filter,
   FileText,
   AlertCircle,
+  FileCheck,
+  ShieldCheck,
 } from 'lucide-react';
 
 export const MemoryExplorerPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const { activeTenant, openInspector } = useWorkstationStore();
+  const [activeTab, setActiveTab] = useState<'MEMORY' | 'BASELINE'>('MEMORY');
   const { data: memories, isLoading, error } = useMemories();
+  const { data: baselineRecords, isLoading: isBaselineLoading } = useBaselineRecords();
   const ingestMutation = useIngestMemoryMutation();
 
   // Status Filter: URL query param sync
@@ -144,118 +148,260 @@ export const MemoryExplorerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Filter Tabs Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-900 border border-slate-800 rounded-lg">
-        <div className="flex items-center gap-1.5">
-          <Filter className="w-4 h-4 text-slate-400 mr-1" />
-          <span className="text-[11px] text-slate-400 font-bold uppercase tracking-wider mr-2">Trust State:</span>
-          {(['ALL', 'TRUSTED', 'SUSPICIOUS', 'QUARANTINED', 'SUPERSEDED'] as const).map((status) => (
-            <button
-              key={status}
-              onClick={() => handleFilterChange(status)}
-              className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
-                statusFilter === status
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
-            >
-              {status}
-            </button>
-          ))}
-        </div>
-
-        <div className="text-xs text-slate-400">
-          Showing <strong className="text-slate-200">{filteredMemories.length}</strong> of{' '}
-          <strong className="text-slate-200">{memories?.length || 0}</strong> chunks
-        </div>
+      {/* Category Tabs: Mutable Agent Memory vs Authoritative Enterprise Baseline */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+        <button
+          onClick={() => setActiveTab('MEMORY')}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-semibold transition-colors ${
+            activeTab === 'MEMORY'
+              ? 'bg-slate-800 text-emerald-400 border border-slate-700'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Database className="w-3.5 h-3.5" />
+          Mutable Agent Memory ({memories?.length || 0})
+        </button>
+        <button
+          onClick={() => setActiveTab('BASELINE')}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs font-semibold transition-colors ${
+            activeTab === 'BASELINE'
+              ? 'bg-slate-800 text-blue-400 border border-slate-700'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <FileCheck className="w-3.5 h-3.5" />
+          Authoritative Enterprise Baseline ({baselineRecords?.length || 0})
+        </button>
       </div>
 
-      {/* Memory Data Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
-        {isLoading ? (
-          <StateBanner type="loading" title="Querying Tenant Knowledge Chunks..." message="Fetching cryptographic checksums and trust assertions..." />
-        ) : error ? (
-          <StateBanner
-            type="unauthorized"
-            title="Knowledge Retrieval Restrained"
-            statusCode={403}
-            message="Quarantined records are isolated under SEC-004. Standard agent queries cannot retrieve them."
-          />
-        ) : filteredMemories.length === 0 ? (
-          <StateBanner
-            type="empty"
-            title="No Knowledge Chunks Located"
-            message={`No records in ${activeTenant.name} match status '${statusFilter}' and search '${searchQuery}'.`}
-            actionText="+ Ingest First Record"
-            onAction={() => setIngestModalOpen(true)}
-          />
-        ) : (
-          <table className="w-full text-left text-xs">
-            <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
-              <tr>
-                <th className="py-3 px-4">Chunk ID</th>
-                <th className="py-3 px-4">Source ID / Document</th>
-                <th className="py-3 px-4">SHA-256 Checksum</th>
-                <th className="py-3 px-4">Trust State</th>
-                <th className="py-3 px-4">Version</th>
-                <th className="py-3 px-4">Content Preview</th>
-                <th className="py-3 px-4 text-right">Inspect</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {filteredMemories.map((chunk) => (
-                <tr key={chunk.id} className="hover:bg-slate-800/40 transition-colors">
-                  <td className="py-3 px-4 font-bold text-slate-200">{chunk.id}</td>
-                  <td className="py-3 px-4 text-slate-300 font-mono flex items-center gap-1.5">
-                    <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                    <span className="truncate max-w-[160px]">{chunk.source_id || 'unassigned'}</span>
-                  </td>
-                  <td className="py-3 px-4 text-[10px] text-emerald-400 font-mono">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 truncate block max-w-[140px]">
-                      {chunk.checksum || 'pending_calculation'}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                        chunk.trust_state === 'TRUSTED'
-                          ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
-                          : chunk.trust_state === 'QUARANTINED'
-                          ? 'bg-red-950/40 border-red-500/50 text-red-300 font-extrabold'
-                          : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
-                      }`}
-                    >
-                      {chunk.trust_state}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 text-slate-400">v{chunk.current_version}</td>
-                  <td className="py-3 px-4 text-slate-300 max-w-[220px] truncate font-sans">
-                    {chunk.content || 'Protected chunk content block'}
-                  </td>
-                  <td className="py-3 px-4 text-right">
-                    <button
-                      onClick={() =>
-                        openInspector({
-                          title: `Memory Chunk: ${chunk.id}`,
-                          type: 'RECORD',
-                          id: chunk.id,
-                          sha256: chunk.checksum || undefined,
-                          trustState: chunk.trust_state as any,
-                          details: chunk,
-                        })
-                      }
-                      className="p-1 hover:text-blue-400 text-slate-400 transition-colors"
-                      title="Inspect Chunk Provenance & Lineage"
-                    >
-                      <ArrowUpRight className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
+      {activeTab === 'BASELINE' ? (
+        <div className="space-y-4">
+          <div className="p-3 bg-blue-950/30 border border-blue-500/30 rounded-lg flex items-center justify-between text-xs text-blue-300">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>
+                <strong>Independently Governed Enterprise Baseline:</strong> Authoritative enterprise policies, operational procedures, and approved knowledge. Governed via formal cryptographic lifecycle (Draft → Review → Approve → Activate). Agent memory writes cannot modify or supersede baseline records.
+              </span>
+            </div>
+            <span className="px-2 py-0.5 rounded bg-blue-900/50 border border-blue-600 text-[10px] font-bold shrink-0">
+              SHA-256 Digest Signed
+            </span>
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+            {isBaselineLoading ? (
+              <StateBanner type="loading" title="Loading Enterprise Baseline..." message="Fetching authoritative policies and cryptographic digests..." />
+            ) : (!baselineRecords || baselineRecords.length === 0) ? (
+              <StateBanner
+                type="empty"
+                title="No Baseline Records Found"
+                message={`No baseline policies found for tenant ${activeTenant.name}.`}
+              />
+            ) : (
+              <table className="w-full text-left text-xs">
+                <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
+                  <tr>
+                    <th className="py-3 px-4">Policy / Baseline Record</th>
+                    <th className="py-3 px-4">Category</th>
+                    <th className="py-3 px-4">Status</th>
+                    <th className="py-3 px-4">Version</th>
+                    <th className="py-3 px-4">Branch Scope</th>
+                    <th className="py-3 px-4">SHA-256 Digest</th>
+                    <th className="py-3 px-4">Classification</th>
+                    <th className="py-3 px-4 text-right">Inspect</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {baselineRecords.map((rec) => (
+                    <tr key={rec.id} className="hover:bg-slate-800/40 transition-colors">
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-100 flex items-center gap-1.5">
+                          <FileCheck className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                          {rec.title}
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                          {rec.id} • {rec.source_type}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-950 border border-slate-800 text-cyan-300">
+                          {rec.category}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            rec.lifecycle_status === 'ACTIVE'
+                              ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                              : rec.lifecycle_status === 'APPROVED'
+                              ? 'bg-blue-950/40 border-blue-500/50 text-blue-300'
+                              : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
+                          }`}
+                        >
+                          {rec.lifecycle_status}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 font-mono text-slate-300">{rec.current_version}</td>
+                      <td className="py-3 px-4">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-400 font-mono">
+                          {rec.branch_id || 'ENTERPRISE_WIDE'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-[10px] text-emerald-400 font-mono">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 truncate block max-w-[130px]" title={rec.content_digest}>
+                          {rec.content_digest}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-950/40 border border-purple-500/40 text-purple-300 font-bold">
+                          {rec.classification}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          onClick={() =>
+                            openInspector({
+                              title: `Baseline: ${rec.title}`,
+                              type: 'RECORD',
+                              id: rec.id,
+                              sha256: rec.content_digest,
+                              trustState: rec.lifecycle_status === 'ACTIVE' ? 'TRUSTED' : 'UNVERIFIED',
+                              details: {
+                                ...rec,
+                                governance_type: 'INDEPENDENT_ENTERPRISE_BASELINE',
+                                immutability: 'CRYPTOGRAPHICALLY_SEALED',
+                              },
+                            })
+                          }
+                          className="p-1 hover:text-blue-400 text-slate-400 transition-colors"
+                          title="Inspect Baseline Governance Record"
+                        >
+                          <ArrowUpRight className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Filter Tabs Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-900 border border-slate-800 rounded-lg">
+            <div className="flex items-center gap-1.5">
+              <Filter className="w-4 h-4 text-slate-400 mr-1" />
+              <span className="text-[11px] text-slate-400 font-bold uppercase tracking-wider mr-2">Trust State:</span>
+              {(['ALL', 'TRUSTED', 'SUSPICIOUS', 'QUARANTINED', 'SUPERSEDED'] as const).map((status) => (
+                <button
+                  key={status}
+                  onClick={() => handleFilterChange(status)}
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
+                    statusFilter === status
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  }`}
+                >
+                  {status}
+                </button>
               ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+            </div>
+
+            <div className="text-xs text-slate-400">
+              Showing <strong className="text-slate-200">{filteredMemories.length}</strong> of{' '}
+              <strong className="text-slate-200">{memories?.length || 0}</strong> chunks
+            </div>
+          </div>
+
+          {/* Memory Data Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+            {isLoading ? (
+              <StateBanner type="loading" title="Querying Tenant Knowledge Chunks..." message="Fetching cryptographic checksums and trust assertions..." />
+            ) : error ? (
+              <StateBanner
+                type="unauthorized"
+                title="Knowledge Retrieval Restrained"
+                statusCode={403}
+                message="Quarantined records are isolated under SEC-004. Standard agent queries cannot retrieve them."
+              />
+            ) : filteredMemories.length === 0 ? (
+              <StateBanner
+                type="empty"
+                title="No Knowledge Chunks Located"
+                message={`No records in ${activeTenant.name} match status '${statusFilter}' and search '${searchQuery}'.`}
+                actionText="+ Ingest First Record"
+                onAction={() => setIngestModalOpen(true)}
+              />
+            ) : (
+              <table className="w-full text-left text-xs">
+                <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
+                  <tr>
+                    <th className="py-3 px-4">Chunk ID</th>
+                    <th className="py-3 px-4">Source ID / Document</th>
+                    <th className="py-3 px-4">SHA-256 Checksum</th>
+                    <th className="py-3 px-4">Trust State</th>
+                    <th className="py-3 px-4">Version</th>
+                    <th className="py-3 px-4">Content Preview</th>
+                    <th className="py-3 px-4 text-right">Inspect</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {filteredMemories.map((chunk) => (
+                    <tr key={chunk.id} className="hover:bg-slate-800/40 transition-colors">
+                      <td className="py-3 px-4 font-bold text-slate-200">{chunk.id}</td>
+                      <td className="py-3 px-4 text-slate-300 font-mono flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                        <span className="truncate max-w-[160px]">{chunk.source_id || 'unassigned'}</span>
+                      </td>
+                      <td className="py-3 px-4 text-[10px] text-emerald-400 font-mono">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 truncate block max-w-[140px]">
+                          {chunk.checksum || 'pending_calculation'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            chunk.trust_state === 'TRUSTED'
+                              ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                              : chunk.trust_state === 'QUARANTINED'
+                              ? 'bg-red-950/40 border-red-500/50 text-red-300 font-extrabold'
+                              : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
+                          }`}
+                        >
+                          {chunk.trust_state}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-slate-400">v{chunk.current_version}</td>
+                      <td className="py-3 px-4 text-slate-300 max-w-[220px] truncate font-sans">
+                        {chunk.content || 'Protected chunk content block'}
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <button
+                          onClick={() =>
+                            openInspector({
+                              title: `Memory Chunk: ${chunk.id}`,
+                              type: 'RECORD',
+                              id: chunk.id,
+                              sha256: chunk.checksum || undefined,
+                              trustState: chunk.trust_state as any,
+                              details: chunk,
+                            })
+                          }
+                          className="p-1 hover:text-blue-400 text-slate-400 transition-colors"
+                          title="Inspect Chunk Provenance & Lineage"
+                        >
+                          <ArrowUpRight className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
 
       {/* + Ingest Memory Record Modal */}
       {ingestModalOpen && (

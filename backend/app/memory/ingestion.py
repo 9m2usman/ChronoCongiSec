@@ -48,6 +48,7 @@ def ingest_memory(
     record_type: str = "KNOWLEDGE",
     source_id: Optional[str] = None,
     parent_record_id: Optional[str] = None,
+    provenance_relation: Optional[str] = None,
     repository: Optional[MemoryRepository] = None,
 ) -> Tuple[MemoryRecord, MemoryVersion]:
     """Ingest a new memory chunk.
@@ -145,7 +146,7 @@ def ingest_memory(
                     tenant_id=tenant_id,
                     from_record_id=parent_record_id,
                     to_record_id=record_id,
-                    relation_type=ProvenanceRelationType.DERIVED_FROM.value,
+                    relation_type=provenance_relation or ProvenanceRelationType.DERIVED_FROM.value,
                     repository=repo,
                 )
         return AwaitableTuple((record, version))
@@ -210,7 +211,7 @@ def ingest_memory(
                     tenant_id=tenant_id,
                     from_record_id=parent_record_id,
                     to_record_id=record_id,
-                    relation_type=ProvenanceRelationType.DERIVED_FROM.value,
+                    relation_type=provenance_relation or ProvenanceRelationType.DERIVED_FROM.value,
                     repository=repo,
                 )
                 if inspect.isawaitable(res):

@@ -19,13 +19,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+import backend.app.core.windows_compat  # noqa: F401 - Windows compatibility
+
 from backend.app.api.admin import router as admin_router
 from backend.app.api.agents import router as agents_router
 from backend.app.api.audit import router as audit_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.baseline import router as baseline_router
 from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.containment import router as containment_router
+from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
 from backend.app.api.gateway import router as gateway_router
 from backend.app.api.incident_management import (
@@ -34,6 +38,7 @@ from backend.app.api.incident_management import (
 )
 from backend.app.api.knowledge import router as knowledge_router
 from backend.app.api.memory import router as memory_router
+from backend.app.api.observation import router as observation_router
 from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.api.traces import router as traces_router
@@ -215,6 +220,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.api.traces import SqlAlchemyTraceRepository
             app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
 
+        if getattr(app.state, "baseline_repo", None) is None:
+            from backend.app.database.repositories.baseline import SqlAlchemyBaselineRepository
+            app.state.baseline_repo = SqlAlchemyBaselineRepository(session_factory)
+
+        if getattr(app.state, "observation_repo", None) is None:
+            from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
+            app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
+
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
@@ -312,13 +325,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
-    if session_factory is not None and getattr(app.state, "recovery_service", None) is None:
-        from backend.app.recovery.store import create_recovery_service
-        app.state.recovery_service = create_recovery_service(
-            session_factory,
-            memory_repo=getattr(app.state, "memory_repo", None),
-            trust_evaluator=getattr(app.state, "trust_evaluator", None),
-        )
+    if getattr(app.state, "recovery_service", None) is None:
+        if session_factory is not None:
+            from backend.app.recovery.store import create_recovery_service
+            app.state.recovery_service = create_recovery_service(
+                session_factory,
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
+        elif settings.APP_ENV != "production":
+            from backend.app.recovery.store import create_in_memory_recovery_service
+            app.state.recovery_service = create_in_memory_recovery_service(
+                memory_repo=getattr(app.state, "memory_repo", None),
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
 
     yield
     from backend.app.core.security import shutdown_auth_executor
@@ -370,8 +390,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Memory repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
-        from backend.app.memory.repository import get_default_repository
+        from backend.app.memory.repository import get_default_repository, seed_enterprise_demo_memories
         app.state.memory_repo = get_default_repository()
+        seed_enterprise_demo_memories(app.state.memory_repo)
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -428,9 +449,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.trace_repo = None
 
+    # Baseline repository initialization (Phase 1 §2)
+    if settings.APP_ENV != "production":
+        from backend.app.api.baseline import get_default_baseline_repository
+        app.state.baseline_repo = get_default_baseline_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.database.repositories.baseline import SqlAlchemyBaselineRepository
+            app.state.baseline_repo = SqlAlchemyBaselineRepository(session_factory)
+        else:
+            app.state.baseline_repo = None
+
+    # Observation repository initialization (Phase 1 §3 & §4)
+    if settings.APP_ENV != "production":
+        from backend.app.api.observation import get_default_observation_repository
+        app.state.observation_repo = get_default_observation_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
+            app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
+        else:
+            app.state.observation_repo = None
+
+    # Detection repository and engine initialization (Phase 2)
+    if settings.APP_ENV != "production":
+        from backend.app.database.repositories.detection import get_default_detection_repository
+        from backend.app.security.detection import DetectionEngine
+        app.state.detection_repo = get_default_detection_repository()
+        app.state.detection_engine = DetectionEngine(
+            detection_repo=app.state.detection_repo,
+            baseline_repo=app.state.baseline_repo,
+            agent_repo=app.state.agent_repo,
+        )
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.database.repositories.detection import SqlAlchemyDetectionRepository
+            from backend.app.security.detection import DetectionEngine
+            app.state.detection_repo = SqlAlchemyDetectionRepository(session_factory)
+            app.state.detection_engine = DetectionEngine(
+                detection_repo=app.state.detection_repo,
+                baseline_repo=app.state.baseline_repo,
+                agent_repo=app.state.agent_repo,
+            )
+        else:
+            app.state.detection_repo = None
+            app.state.detection_engine = None
+
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
     app.state.quarantine_service = get_default_quarantine_service()
+
+    # Recovery service initialization
+    if getattr(app.state, "recovery_service", None) is None:
+        if settings.APP_ENV != "production":
+            from backend.app.recovery.store import create_in_memory_recovery_service
+            app.state.recovery_service = create_in_memory_recovery_service(
+                memory_repo=app.state.memory_repo,
+                trust_evaluator=getattr(app.state, "trust_evaluator", None),
+            )
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
@@ -583,6 +662,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             deps["revocation_store"] = "ready"
 
+        # Baseline Repo Check (Phase 1 §2)
+        base_repo = getattr(app_instance.state, "baseline_repo", None)
+        if base_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["baseline_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["baseline_repo"] = "ready (dev/test in-memory)"
+        else:
+            deps["baseline_repo"] = "ready"
+
+        # Observation Repo Check (Phase 1 §3 & §4)
+        obs_repo = getattr(app_instance.state, "observation_repo", None)
+        if obs_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["observation_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["observation_repo"] = "ready (dev/test in-memory)"
+        else:
+            deps["observation_repo"] = "ready"
+
+        # Detection Repo Check (Phase 2)
+        det_repo = getattr(app_instance.state, "detection_repo", None)
+        if det_repo is None:
+            if cfg.APP_ENV == "production":
+                deps["detection_repo"] = "unavailable"
+                all_ready = False
+            else:
+                deps["detection_repo"] = "ready (dev/test in-memory)"
+        else:
+            deps["detection_repo"] = "ready"
+
         return all_ready, deps
 
     @app.get(
@@ -656,6 +768,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(admin_router)
     api_router.include_router(tenants_router)
     api_router.include_router(agents_router)
+    api_router.include_router(baseline_router)
+    api_router.include_router(observation_router)
+    api_router.include_router(detection_router)
     api_router.include_router(gateway_router)
     api_router.include_router(memory_router)
     api_router.include_router(incident_router)

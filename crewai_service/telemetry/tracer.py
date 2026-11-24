@@ -121,8 +121,12 @@ class AgentRunRecord:
 class ExecutionTracer:
     """Singleton telemetry accumulator coordinating Dual Trace metadata."""
 
-    def __init__(self) -> None:
+    def __init__(self, amsc_client: Optional[Any] = None) -> None:
         self._runs: Dict[str, AgentRunRecord] = {}
+        self._client = amsc_client
+
+    def set_client(self, amsc_client: Any) -> None:
+        self._client = amsc_client
 
     def start_run(
         self,
@@ -150,6 +154,21 @@ class ExecutionTracer:
             start_time=datetime.now(timezone.utc),
         )
         self._runs[run_id] = record
+
+        if self._client is not None and hasattr(self._client, "emit_observation_event"):
+            try:
+                self._client.emit_observation_event(
+                    event_type="AGENT_EXECUTION_START",
+                    event_category="AGENT_EXECUTION_LIFECYCLE",
+                    agent_id=agent_id,
+                    agent_runtime="CREWAI",
+                    execution_id=run_id,
+                    trace_id=record.trace_id,
+                    payload={"task_id": task_id, "agent_role": agent_role},
+                )
+            except Exception as exc:
+                logger.debug("Tracer client start observation emit failed: %s", exc)
+
         return record
 
     def record_tool_invocation(
@@ -202,6 +221,22 @@ class ExecutionTracer:
             if error:
                 rec.errors.append(error)
             logger.info(f"Finished run [{run_id}] with status [{status}].")
+
+            if self._client is not None and hasattr(self._client, "emit_observation_event"):
+                try:
+                    self._client.emit_observation_event(
+                        event_type="AGENT_EXECUTION_COMPLETION",
+                        event_category="AGENT_EXECUTION_LIFECYCLE",
+                        agent_id=rec.agent_id,
+                        agent_runtime="CREWAI",
+                        execution_id=run_id,
+                        trace_id=rec.trace_id,
+                        outcome=status,
+                        payload={"errors": rec.errors, "output_summary": output_summary},
+                    )
+                except Exception as exc:
+                    logger.debug("Tracer client finish observation emit failed: %s", exc)
+
             return rec
         return None
 
