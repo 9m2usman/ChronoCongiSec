@@ -273,15 +273,32 @@ class DetectionEngine:
         detection_repo: Optional[Any] = None,
         baseline_repo: Optional[Any] = None,
         agent_repo: Optional[Any] = None,
+        ml_detector: Optional[Any] = None,
+        enable_ml_advisory: bool = True,
     ) -> None:
         self.detection_repo = detection_repo
         self.baseline_repo = baseline_repo
         self.agent_repo = agent_repo
+        self.ml_detector = ml_detector
+        self.enable_ml_advisory = enable_ml_advisory
         # Process-local sequence tracker for abnormal repeated action detection:
         # Key: (tenant_id, agent_id) -> list of timestamps of blocked events
         self._recent_blocks: Dict[Tuple[str, str], List[float]] = {}
         # Key: (tenant_id, agent_id) -> list of (timestamp, action_signature)
         self._recent_actions: Dict[Tuple[str, str], List[Tuple[float, str]]] = {}
+
+    def _get_ml_detector(self) -> Optional[Any]:
+        if not self.enable_ml_advisory:
+            return None
+        if self.ml_detector is not None:
+            return self.ml_detector
+        try:
+            from backend.app.security.ml_intelligence import MLAdvisoryDetector
+            self.ml_detector = MLAdvisoryDetector()
+            return self.ml_detector
+        except Exception as exc:
+            logger.warning("ML advisory detector unavailable: %s", exc)
+            return None
 
     def _track_block(self, tenant_id: str, agent_id: str, now_ts: float) -> int:
         """Record a blocked action and return recent count within 60 seconds."""
@@ -810,6 +827,25 @@ class DetectionEngine:
                                     ))
                                     break
 
+        # 5. Phase 4 ML Advisory: Indirect Prompt Injection & Memory Poisoning
+        if content:
+            ml_det = self._get_ml_detector()
+            if ml_det is not None:
+                try:
+                    ml_finding = ml_det.evaluate_content(
+                        tenant_id=tenant_id,
+                        content=content,
+                        branch_id=branch_id,
+                        agent_id=agent_id,
+                        trace_id=trace_id,
+                        action_id=action_id,
+                        memory_refs=[target_record_id] if target_record_id != "unrecorded" else [],
+                    )
+                    if ml_finding is not None:
+                        findings.append(ml_finding)
+                except Exception as exc:
+                    logger.warning("ML content advisory check failed safely: %s", exc)
+
         return findings
 
     # -------------------------------------------------------------------------
@@ -1212,6 +1248,39 @@ class DetectionEngine:
                 ],
                 details={"reason_code": "UNGROUNDED_POLICY_ASSERTION"},
             ))
+
+        # 5. Phase 4 ML Advisory: Semantic Drift & Unsupported-Claim Analysis
+        if claim_text and (source_text or (referenced_baseline_id and self.baseline_repo)):
+            ref_for_ml = source_text
+            if not ref_for_ml and referenced_baseline_id and self.baseline_repo:
+                try:
+                    if hasattr(self.baseline_repo, "get_baseline_versions"):
+                        v_res = self.baseline_repo.get_baseline_versions(tenant_id, referenced_baseline_id)
+                        import inspect
+                        if inspect.isawaitable(v_res):
+                            v_res = await v_res
+                        if v_res and isinstance(v_res, list):
+                            ref_for_ml = v_res[-1].get("content")
+                except Exception:
+                    ref_for_ml = None
+            if ref_for_ml:
+                ml_det = self._get_ml_detector()
+                if ml_det is not None:
+                    try:
+                        ml_finding = ml_det.evaluate_semantic_pair(
+                            tenant_id=tenant_id,
+                            claim_text=claim_text,
+                            reference_text=ref_for_ml,
+                            branch_id=branch_id,
+                            agent_id=agent_id,
+                            trace_id=trace_id,
+                            action_id=action_id,
+                            baseline_refs=[referenced_baseline_id] if referenced_baseline_id else [],
+                        )
+                        if ml_finding is not None:
+                            findings.append(ml_finding)
+                    except Exception as exc:
+                        logger.warning("ML semantic advisory check failed safely: %s", exc)
 
         return findings
 
@@ -1623,6 +1692,28 @@ class DetectionEngine:
                 ],
                 details={"reason_code": "IDENTICAL_ACTION_BURST", "count": identical_count},
             ))
+
+        # 7b. Phase 4 ML Advisory: Behavioral & Execution-Sequence Anomaly
+        if tool_name and operation:
+            ml_det = self._get_ml_detector()
+            if ml_det is not None:
+                try:
+                    ml_finding = ml_det.evaluate_behavior(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        tool_name=tool_name,
+                        operation=operation,
+                        parameters=params,
+                        branch_id=branch_id,
+                        department=dept,
+                        timestamp=now_ts,
+                        trace_id=trace_id,
+                        action_id=action_id,
+                    )
+                    if ml_finding is not None:
+                        findings.append(ml_finding)
+                except Exception as exc:
+                    logger.warning("ML behavioral advisory check failed safely: %s", exc)
 
         # 8. Benign Anomaly Handling (Normal variance within approved scope)
         if not findings and tool_name and operation:

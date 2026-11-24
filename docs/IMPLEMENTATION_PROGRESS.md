@@ -155,4 +155,21 @@ Phase 2 implements a framework-neutral security detection and action-enforcement
 
 ## Honest status
 
-Phase 1 Enterprise Baseline & Observation Foundation and Phase 2 Detection & Action Security are fully implemented, verified, and operational in local development. All detection capabilities (memory integrity, semantic claim validation, behavioral deviation, tool threat analysis) and deterministic policy enforcement controls (fail-closed, anti-self-approval, replay prevention) operate with 100% test pass rates across both backend and frontend suites. Phase 3 Automated Recovery and Investigation remains the subsequent milestone.
+Phase 1 Enterprise Baseline & Observation Foundation, Phase 2 Detection & Action Security, and Phase 4 ML Security Intelligence & Controlled Enterprise Validation are implemented and verified in local development. Phase 3 Automated Recovery remains independent.
+
+## Phase 4 — ML Security Intelligence, Evaluation & Controlled Enterprise Validation (2026-11-24)
+
+- [x] **Advisory ML Intelligence Layer (`ml/`, `backend/app/security/ml_intelligence.py`)**:
+  - `TfidfLinearInjectionClassifier` (word 1–2 + char 3–5 n-grams + structural markers + temperature scaling) for paraphrased indirect prompt injection and memory poisoning.
+  - `SemanticDriftAndClaimAnalyzer` for semantic drift, constraint omission, negation flips, and numeric ceiling expansion.
+  - `BehavioralSequenceAnomalyDetector` (unsupervised role-conditioned Markov transitions + action frequency + Welford amount z-score + burstiness) strictly isolated by `(tenant_id, branch_id, agent_id)`.
+  - `ModelRegistry` with SHA-256 artifact integrity verification and `MLSecurityIntelligenceService` with timeout enforcement and `INDETERMINATE` deterministic fallback.
+  - Wired into `DetectionEngine` (`backend/app/security/detection.py`) strictly as `SUSPICIOUS_INDICATOR` advisory signals (`advisory_only=True`); `PolicyEngine` remains deterministic and authoritative.
+- [x] **Reproducible Evaluation & Enterprise Benchmark (`ml/datasets/enterprise_benchmark.py`, `ml/evaluation/evaluator.py`)**:
+  - Template-disjoint train/val/test splits and 12-scenario enterprise suite (`tenant-chronocorp-001`: HO, Lahore, Karachi, Islamabad).
+  - Measurable improvement over deterministic baseline: Injection held-out F1 `0.3333 -> 1.0000`, Semantic Drift F1 `0.5714 -> 0.8889`, 12-Scenario Recall `0.6000 -> 1.0000`, Adversarial Perturbation Recall `0.1667 -> 0.9333`, p50 latency `2.644 ms`.
+- [x] **Verification**:
+  - 11/11 tests in `backend/tests/unit/test_phase4_ml_intelligence.py` passing.
+  - 38/38 tests in `backend/tests/unit/test_phase2_detection_and_action_security.py` passing.
+  - 167/167 tests in `backend/tests/security/test_policy_engine.py` passing.
+  - `ruff check backend/app ml backend/tests/unit/test_phase4_ml_intelligence.py` clean.
