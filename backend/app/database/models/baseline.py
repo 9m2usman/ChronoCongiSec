@@ -92,7 +92,7 @@ class TrustDecisionModel(Base):
     __table_args__ = (
         Index("idx_trust_decisions_tenant_record", "tenant_id", "record_id"),
         Index("idx_trust_decisions_tenant_created", "tenant_id", "created_at"),
-        *tenant_fk("trust_decisions", "record_id", "memory_records", "CASCADE"),
+        *tenant_fk("trust_decisions", "record_id", "memory_records", "CASCADE", index=False),
     )
 
 

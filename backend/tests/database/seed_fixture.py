@@ -110,7 +110,9 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
         session.add(Permission(id=ids["permission"], key="memory:quarantine", description=ILLUSTRATIVE))
         await session.flush()
         session.add(RolePermission(role_id=ids["role"], permission_id=ids["permission"]))
-        session.add_all([Branch(id=_id(), tenant_id=a, name=n, code=c) for n, c in BRANCHES])
+        branch_ids = [_id() for _ in BRANCHES]
+        ids["branches"] = branch_ids
+        session.add_all([Branch(id=bid, tenant_id=a, name=n, code=c) for bid, (n, c) in zip(branch_ids, BRANCHES)])
         session.add(Branch(id=_id(), tenant_id=b, name="Head Office", code="HO"))
         session.add_all([
             Membership(id=_id(), tenant_id=a, user_id=ids["u_admin"], role="TENANT_ADMIN", status="ACTIVE"),
