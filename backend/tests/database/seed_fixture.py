@@ -24,15 +24,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.database.models import (
     Agent,
+    AgentSecurityProfile,
     AgentToolPermission,
     AgentVersion,
     Approval,
     AuditEvent,
+    BaselineGovernanceLog,
     Branch,
     Checkpoint,
     CheckpointItem,
+    DetectionResultModel,
     Document,
     DriftObservation,
+    EnterpriseBaselineRecord,
+    EnterpriseBaselineVersion,
     Incident,
     IncidentEvidence,
     KnowledgeEntity,
@@ -40,6 +45,7 @@ from backend.app.database.models import (
     Membership,
     MemoryRecord,
     MemoryVersion,
+    ObservationEvent,
     OutboxEvent,
     Permission,
     PolicyDecision,
@@ -58,6 +64,7 @@ from backend.app.database.models import (
     Trace,
     TraceSpan,
     Transformation,
+    TrustDecisionModel,
     User,
 )
 from backend.app.database.rewind import RewindCoordinator
@@ -103,7 +110,9 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
         session.add(Permission(id=ids["permission"], key="memory:quarantine", description=ILLUSTRATIVE))
         await session.flush()
         session.add(RolePermission(role_id=ids["role"], permission_id=ids["permission"]))
-        session.add_all([Branch(id=_id(), tenant_id=a, name=n, code=c) for n, c in BRANCHES])
+        branch_ids = [_id() for _ in BRANCHES]
+        ids["branches"] = branch_ids
+        session.add_all([Branch(id=bid, tenant_id=a, name=n, code=c) for bid, (n, c) in zip(branch_ids, BRANCHES)])
         session.add(Branch(id=_id(), tenant_id=b, name="Head Office", code="HO"))
         session.add_all([
             Membership(id=_id(), tenant_id=a, user_id=ids["u_admin"], role="TENANT_ADMIN", status="ACTIVE"),
@@ -176,6 +185,42 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
                            version_id=ids["r2v1"], checksum="c4"),
             RecoveryPlan(id=ids["plan"], tenant_id=a, incident_id=ids["incident"], checkpoint_id=ids["checkpoint"],
                          target_record_id=ids["rec1"]),
+        ])
+        base_id = _id()
+        session.add_all([
+            TrustDecisionModel(
+                id=_id(), tenant_id=a, record_id=ids["rec1"], from_state="PROPOSED", to_state="TRUSTED",
+                operation="INGEST", actor_id=ids["u_admin"], reason_code="VERIFIED", evidence_json={"note": ILLUSTRATIVE},
+            ),
+            EnterpriseBaselineRecord(
+                id=base_id, tenant_id=a, branch_id=ids["branches"][0], title="Enterprise Baseline",
+                category="POLICY", provenance=ILLUSTRATIVE, created_by_user_id=ids["u_admin"],
+            ),
+            AgentSecurityProfile(
+                id=_id(), tenant_id=a, agent_id=ids["agent"], owner_department="Finance",
+                approved_purpose=ILLUSTRATIVE, branch_id=ids["branches"][0], governed_by_user_id=ids["u_admin"],
+            ),
+            ObservationEvent(
+                id=_id(), tenant_id=a, event_type="OBSERVATION_RECORDED", event_category="AGENT_EXECUTION_LIFECYCLE",
+                outcome="SUCCESS", payload_json={"note": ILLUSTRATIVE},
+            ),
+            DetectionResultModel(
+                id=_id(), tenant_id=a, branch_id=ids["branches"][0], detection_category="MEMORY_INTEGRITY",
+                classification_type="OBSERVATION", detection_method="DETERMINISTIC_RULE", uncertainty_state="DEFINITIVE",
+                severity="LOW", recommended_outcome="ALLOW", title="Clean Memory", description=ILLUSTRATIVE,
+            ),
+        ])
+        await session.flush()
+        session.add_all([
+            EnterpriseBaselineVersion(
+                id=_id(), tenant_id=a, baseline_id=base_id, version=1, content=ILLUSTRATIVE,
+                content_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                change_summary="Initial", created_by_user_id=ids["u_admin"],
+            ),
+            BaselineGovernanceLog(
+                id=_id(), tenant_id=a, baseline_id=base_id, version=1, operation="CREATE",
+                actor_id=ids["u_admin"], actor_role="ADMIN", reason=ILLUSTRATIVE,
+            ),
         ])
 
     # 2. Gateway chain and audit trail through the unit of work (one transaction per action).

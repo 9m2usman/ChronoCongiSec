@@ -5,26 +5,36 @@ Owner: M6 (Database Architect & Governance) + M4 (Security Engine)
 Spec: AMSC-DOC-005 Section 3.5, AMSC-DOC-002 TRD Section 18
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+import copy
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import hashlib
+import inspect
+import json
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 import uuid
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from backend.app.database.models.baseline import TrustDecisionModel
 from backend.app.database.models.gateway import ToolExecution, ToolProposal
 from backend.app.database.models.memory import MemoryVersion
 from backend.app.database.models.observability import AuditEvent
 from backend.app.database.models.recovery import Checkpoint, CheckpointItem, RecoveryPlan
 from backend.app.database.rewind import RewindCoordinator
 from backend.app.memory.adapters import DatabaseMemoryRepository
+from backend.app.memory.integrity import sha256_hex
+from backend.app.memory.models import MemoryVersion as PydanticMemoryVersion
+from backend.app.memory.repository import get_default_repository
 from backend.app.recovery.orchestrator import (
     CheckpointItemView,
     CheckpointView,
     ExternalActionView,
     RecoveryPlanRecord,
     RecoveryService,
+    checkpoint_integrity_hash,
     _fingerprint,
 )
 from backend.app.security.trust import TrustDecision, TrustEvaluator
@@ -196,7 +206,11 @@ class SqlExternalActionReader:
 
 
 class SqlTrustDecisionStore:
-    """Persistent TrustDecisionStore implementation for production recovery services."""
+    """Persistent TrustDecisionStore implementation for production recovery services.
+
+    Persists decisions durably to PostgreSQL `trust_decisions` table while caching
+    in memory for synchronous evaluation compatibility.
+    """
 
     is_persistent: bool = True
 
@@ -204,13 +218,85 @@ class SqlTrustDecisionStore:
         self.session_factory = session_factory
         self._by_record: Dict[Tuple[str, str], List[TrustDecision]] = {}
 
-    def append(self, decision: TrustDecision) -> None:
+    async def _persist_decision(self, decision: TrustDecision) -> None:
+        if self.session_factory is None:
+            return
+        try:
+            now = datetime.now(timezone.utc)
+            async with self.session_factory() as session:
+                async with session.begin():
+                    db_row = TrustDecisionModel(
+                        id=f"td-{uuid.uuid4().hex[:12]}",
+                        tenant_id=decision.tenant_id,
+                        record_id=decision.record_id,
+                        from_state=decision.from_state,
+                        to_state=decision.to_state,
+                        operation=decision.operation,
+                        actor_id=decision.actor_id,
+                        reason_code=decision.reason_code,
+                        evidence_json=decision.evidence or {},
+                        created_at=now,
+                    )
+                    session.add(db_row)
+        except Exception as exc:
+            import logging
+            logging.getLogger("amsc.recovery.store").warning(
+                "Failed to persist trust decision to PostgreSQL: %s", exc
+            )
+
+    def _append_in_memory(self, decision: TrustDecision) -> None:
         if not decision.tenant_id:
             raise ValueError("Trust decisions must be tenant-scoped.")
         self._by_record.setdefault((decision.tenant_id, decision.record_id), []).append(decision)
 
+    def append(self, decision: TrustDecision) -> None:
+        self._append_in_memory(decision)
+        if self.session_factory is not None:
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_decision(decision))
+            except RuntimeError:
+                pass
+
+    async def aappend(self, decision: TrustDecision) -> None:
+        self._append_in_memory(decision)
+        await self._persist_decision(decision)
+
     def list_for_record(self, tenant_id: str, record_id: str) -> Sequence[TrustDecision]:
         return tuple(self._by_record.get((tenant_id, record_id), ()))
+
+    async def alist_for_record(self, tenant_id: str, record_id: str) -> Sequence[TrustDecision]:
+        if self.session_factory is not None:
+            try:
+                async with self.session_factory() as session:
+                    stmt = select(TrustDecisionModel).where(
+                        TrustDecisionModel.tenant_id == tenant_id,
+                        TrustDecisionModel.record_id == record_id,
+                    ).order_by(TrustDecisionModel.created_at.asc())
+                    rows = (await session.execute(stmt)).scalars().all()
+                    if rows:
+                        decisions = [
+                            TrustDecision(
+                                tenant_id=r.tenant_id,
+                                record_id=r.record_id,
+                                from_state=r.from_state,
+                                to_state=r.to_state,
+                                operation=r.operation,
+                                actor_id=r.actor_id,
+                                reason_code=r.reason_code,
+                                evidence=r.evidence_json or {},
+                            )
+                            for r in rows
+                        ]
+                        self._by_record[(tenant_id, record_id)] = decisions
+                        return tuple(decisions)
+            except Exception as exc:
+                import logging
+                logging.getLogger("amsc.recovery.store").warning(
+                    "Failed to query trust decisions from PostgreSQL: %s", exc
+                )
+        return self.list_for_record(tenant_id, record_id)
 
 
 def create_recovery_service(
@@ -246,6 +332,249 @@ def create_recovery_service(
                     occurred_at=datetime.now(timezone.utc),
                 )
                 session.add(event)
+
+    return RecoveryService(
+        trust=trust,
+        memory=memory,
+        checkpoints=checkpoints,
+        plans=plans,
+        rewind=rewind,
+        external_actions=external_actions,
+        persist_audit=persist_audit,
+    )
+
+
+class MemoryCheckpoints:
+    def __init__(self) -> None:
+        self.rows: Dict[Tuple[str, str], CheckpointView] = {}
+
+    def add(self, cp: CheckpointView) -> None:
+        self.rows[(cp.tenant_id, cp.id)] = cp
+
+    async def get_checkpoint(self, tenant_id: str, checkpoint_id: str) -> Optional[CheckpointView]:
+        return self.rows.get((tenant_id, checkpoint_id))
+
+
+class MemoryPlanStore:
+    def __init__(self) -> None:
+        self.rows: Dict[Tuple[str, str], RecoveryPlanRecord] = {}
+
+    async def create(self, plan: RecoveryPlanRecord) -> None:
+        self.rows[(plan.tenant_id, plan.id)] = plan
+
+    async def get(self, tenant_id: str, plan_id: str) -> Optional[RecoveryPlanRecord]:
+        return self.rows.get((tenant_id, plan_id))
+
+    async def transition(
+        self,
+        tenant_id: str,
+        plan_id: str,
+        *,
+        expected_status: str,
+        new_status: str,
+        snapshot_sha256: Optional[str] = None,
+    ) -> bool:
+        plan = self.rows.get((tenant_id, plan_id))
+        if plan is None or plan.status != expected_status:
+            return False
+        self.rows[(tenant_id, plan_id)] = replace(
+            plan,
+            status=new_status,
+            snapshot_sha256=snapshot_sha256 or plan.snapshot_sha256,
+        )
+        return True
+
+
+@dataclass
+class _MemoryReceipt:
+    plan_id: str
+    sha256: str
+
+
+class _MemoryRtx:
+    def __init__(self, rewind: "MemoryRewindCoordinator", tenant_id: str, plan: Any) -> None:
+        self.r = rewind
+        self.tenant_id = tenant_id
+        self.plan = plan
+        self.pending: List[Tuple[str, str, Optional[str]]] = []
+
+    async def checkpoint_item_for(self, record_id: str) -> Optional[CheckpointItemView]:
+        cp = self.r.checkpoints.rows.get((self.tenant_id, self.plan.checkpoint_id))
+        if cp:
+            for item in cp.items:
+                if item.record_id == record_id:
+                    return item
+        return None
+
+    async def append_version(self, record_id: str, *, content: str, checksum: str) -> Any:
+        repo = self.r.repo
+        rec = repo.get_record(record_id, self.tenant_id)
+        if inspect.isawaitable(rec):
+            rec = await rec
+        versions = repo.get_versions(record_id, self.tenant_id)
+        if inspect.isawaitable(versions):
+            versions = await versions
+        highest = max((v.version for v in versions), default=0)
+        v = PydanticMemoryVersion(
+            id=f"v-{record_id}-{highest + 1}",
+            tenant_id=self.tenant_id,
+            record_id=record_id,
+            version=highest + 1,
+            content=content,
+            checksum=checksum,
+            created_at=datetime.now(timezone.utc),
+        )
+        res = repo.create_version(v)
+        if inspect.isawaitable(res):
+            await res
+        return v
+
+    async def compare_and_set_current_version(self, record_id: str, *, expected: int, new: int) -> None:
+        rec = self.r.repo.get_record(record_id, self.tenant_id)
+        if inspect.isawaitable(rec):
+            rec = await rec
+        if rec.current_version != expected:
+            raise RuntimeError("ConcurrencyConflict")
+        updated = rec.model_copy(update={"current_version": new})
+        res = self.r.repo.update_record(updated)
+        if inspect.isawaitable(res):
+            await res
+
+    async def record_action(self, resource_id: str, action_taken: str, outcome: Optional[str] = None) -> None:
+        self.pending.append((resource_id, action_taken, outcome))
+
+
+class MemoryRewindCoordinator:
+    def __init__(self, repo: Any, plans: MemoryPlanStore, checkpoints: MemoryCheckpoints) -> None:
+        self.repo = repo
+        self.plans = plans
+        self.checkpoints = checkpoints
+        self.snapshots: Dict[Tuple[str, str], str] = {}
+        self.executed: Set[Tuple[str, str]] = set()
+        self.actions: List[Tuple[str, str, Optional[str]]] = []
+
+    async def capture_snapshot(self, tenant_id: str, plan_id: str, snapshot: Mapping[str, Any]) -> Any:
+        if (tenant_id, plan_id) in self.snapshots:
+            raise RuntimeError("SnapshotAlreadyCaptured")
+        if await self.plans.get(tenant_id, plan_id) is None:
+            raise RuntimeError("PlanNotFound")
+        sha = hashlib.sha256(json.dumps(dict(snapshot), sort_keys=True, default=str).encode()).hexdigest()
+        self.snapshots[(tenant_id, plan_id)] = sha
+        return _MemoryReceipt(plan_id, sha)
+
+    async def execute_rollback(
+        self,
+        tenant_id: str,
+        plan_id: str,
+        *,
+        expected_snapshot_sha256: str,
+        restore: Callable[[Any], Awaitable[None]],
+    ) -> Any:
+        if self.snapshots.get((tenant_id, plan_id)) != expected_snapshot_sha256:
+            raise RuntimeError("SnapshotMismatch")
+        if (tenant_id, plan_id) in self.executed:
+            raise RuntimeError("PlanAlreadyExecuted")
+        plan = await self.plans.get(tenant_id, plan_id)
+        saved_records = copy.deepcopy(getattr(self.repo, "_records", {}))
+        saved_versions = copy.deepcopy(getattr(self.repo, "_versions", {}))
+        rtx = _MemoryRtx(self, tenant_id, plan)
+        try:
+            await restore(rtx)
+        except BaseException:
+            if hasattr(self.repo, "_records"):
+                self.repo._records = saved_records
+                self.repo._versions = saved_versions
+            raise
+        self.actions.extend(rtx.pending)
+        self.executed.add((tenant_id, plan_id))
+
+
+class MemoryExternalActionReader:
+    def __init__(self, actions: Sequence[ExternalActionView] = ()) -> None:
+        self.actions = list(actions)
+
+    async def executions_referencing(
+        self, tenant_id: str, record_ids: Sequence[str], since: datetime
+    ) -> Sequence[ExternalActionView]:
+        return list(self.actions)
+
+
+def create_in_memory_recovery_service(
+    memory_repo: Optional[Any] = None,
+    trust_evaluator: Optional[TrustEvaluator] = None,
+) -> RecoveryService:
+    """Factory creating fully wired in-memory RecoveryService for non-production environments."""
+    try:
+        from backend.app.core.config import get_settings
+        settings = get_settings()
+        if settings.APP_ENV == "production":
+            raise RuntimeError(
+                "Production startup failure: Real database recovery service is required. "
+                "In-memory recovery service fallback is prohibited in production."
+            )
+    except ImportError:
+        pass
+
+    memory = memory_repo if memory_repo is not None else get_default_repository()
+    if trust_evaluator is None:
+        store = SqlTrustDecisionStore()
+        trust = TrustEvaluator(memory, store)
+    else:
+        trust = trust_evaluator
+
+    checkpoints = MemoryCheckpoints()
+    plans = MemoryPlanStore()
+    rewind = MemoryRewindCoordinator(memory, plans, checkpoints)
+    external_actions = MemoryExternalActionReader([ExternalActionView("exec-demo-001", "SUCCESS")])
+
+    # Ensure canonical demo memories are present in memory repository
+    t_a = "tenant-a-uuid-001"
+    existing_target = memory.get_record("rec-8812-441a", t_a)
+    if inspect.isawaitable(existing_target):
+        pass  # will be handled if needed
+    elif existing_target is None:
+        from backend.app.memory.repository import seed_enterprise_demo_memories
+        seed_enterprise_demo_memories(memory)
+    v1_content = "Standard invoice for ACME supplies: $450 due in net 30 days."
+    item_poison = CheckpointItemView(
+        record_id="rec-8812-441a",
+        version=1,
+        checksum=sha256_hex(v1_content),
+        content=v1_content,
+    )
+    items_poison = (item_poison,)
+    checkpoints.add(
+        CheckpointView(
+            id="cp-baseline-alpha-001",
+            tenant_id=t_a,
+            integrity_hash=checkpoint_integrity_hash(items_poison),
+            created_at=datetime.now(timezone.utc),
+            items=items_poison,
+            name="CHK-2026-T15M (v2 Verified Baseline)",
+        )
+    )
+
+    crm_content = "Tier-1 Support can issue service credit vouchers up to $150."
+    item_crm = CheckpointItemView(
+        record_id="rec-crm-2041",
+        version=1,
+        checksum=sha256_hex(crm_content),
+        content=crm_content,
+    )
+    items_crm = (item_crm,)
+    checkpoints.add(
+        CheckpointView(
+            id="cp-crm-v1",
+            tenant_id=t_a,
+            integrity_hash=checkpoint_integrity_hash(items_crm),
+            created_at=datetime.now(timezone.utc),
+            items=items_crm,
+            name="CHK-2026-CRM-V1 (Baseline)",
+        )
+    )
+
+    async def persist_audit(audit_dict: Dict[str, Any]) -> None:
+        pass
 
     return RecoveryService(
         trust=trust,

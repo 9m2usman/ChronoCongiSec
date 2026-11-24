@@ -29,6 +29,14 @@ import {
   RecoveryPlanPreviewResponse,
   RecoveryExecuteResponse,
   AuditEvent,
+  AgentSecurityProfile,
+  AgentToolPermissionGrantRequest,
+  BaselineRecord,
+  ObservationEvent,
+  DetectionResult,
+  EvaluateDetectionRequest,
+  EvaluateDetectionResponse,
+  DetectionReviewRequest,
 } from '@/types';
 
 const API_BASE_URL = '/api/v1';
@@ -873,6 +881,202 @@ class ApiClient {
       const fixtures = getTenantFixtures(effectiveTenant);
       return fixtures.auditLogs;
     }
+  }
+
+  // --- 13. Agent Profile & Permission Governance (Phase 1 §2) ---
+  async getAgentProfile(agentId: string, tenantId?: string): Promise<AgentSecurityProfile | null> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/agents/${agentId}/profile`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        return await res.json();
+      }
+      return null;
+    } catch {
+      this.setApiStatus(false);
+      return null;
+    }
+  }
+
+  async updateAgentProfile(agentId: string, data: Partial<AgentSecurityProfile>, tenantId?: string): Promise<AgentSecurityProfile> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/agents/${agentId}/profile`, {
+      method: 'PUT',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(data),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`PUT /agents/${agentId}/profile failed (HTTP ${res.status})`, res.status);
+  }
+
+  async grantAgentPermission(agentId: string, perm: AgentToolPermissionGrantRequest, tenantId?: string): Promise<any> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/agents/${agentId}/permissions`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(perm),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /agents/${agentId}/permissions failed (HTTP ${res.status})`, res.status);
+  }
+
+  async revokeAgentPermission(agentId: string, toolId: string, tenantId?: string): Promise<any> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/agents/${agentId}/permissions/${toolId}`, {
+      method: 'DELETE',
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`DELETE /agents/${agentId}/permissions/${toolId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  // --- 14. Enterprise Security Baseline (Phase 1 §2) ---
+  async listBaselineRecords(category?: string, lifecycleStatus?: string, branchId?: string, tenantId?: string): Promise<BaselineRecord[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const params = new URLSearchParams();
+    if (category) params.set('category', category);
+    if (lifecycleStatus) params.set('lifecycle_status', lifecycleStatus);
+    if (branchId) params.set('branch_id', branchId);
+
+    const query = params.toString() ? `?${params.toString()}` : '';
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/baseline${query}`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        const data = await res.json();
+        return data.items || [];
+      }
+      return [];
+    } catch {
+      this.setApiStatus(false);
+      return [];
+    }
+  }
+
+  async getBaselineRecord(recordId: string, tenantId?: string): Promise<BaselineRecord | null> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/baseline/${recordId}`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        return await res.json();
+      }
+      return null;
+    } catch {
+      this.setApiStatus(false);
+      return null;
+    }
+  }
+
+  // --- 15. Observation & Telemetry Foundation (Phase 1 §3) ---
+  async listObservationEvents(agentId?: string, eventCategory?: string, traceId?: string, tenantId?: string): Promise<ObservationEvent[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const params = new URLSearchParams();
+    if (agentId) params.set('agent_id', agentId);
+    if (eventCategory) params.set('event_category', eventCategory);
+    if (traceId) params.set('trace_id', traceId);
+
+    const query = params.toString() ? `?${params.toString()}` : '';
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/observation/events${query}`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        const data = await res.json();
+        return data.items || [];
+      }
+      return [];
+    } catch {
+      this.setApiStatus(false);
+      return [];
+    }
+  }
+
+  // --- 16. Security Detection & Threat Enforcement (Phase 2) ---
+  async listDetections(category?: string, severity?: string, status?: string, branchId?: string, tenantId?: string): Promise<DetectionResult[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const params = new URLSearchParams();
+    if (category) params.set('category', category);
+    if (severity) params.set('severity', severity);
+    if (status) params.set('status', status);
+    if (branchId) params.set('branch_id', branchId);
+
+    const query = params.toString() ? `?${params.toString()}` : '';
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/detection/results${query}`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        return await res.json();
+      }
+      return [];
+    } catch {
+      this.setApiStatus(false);
+      return [];
+    }
+  }
+
+  async getDetection(detectionId: string, tenantId?: string): Promise<DetectionResult | null> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    try {
+      const res = await this.fetchWithTimeout(`${API_BASE_URL}/detection/results/${detectionId}`, {
+        headers: this.getHeaders(effectiveTenant),
+      });
+      if (res.ok) {
+        this.setApiStatus(true);
+        return await res.json();
+      }
+      return null;
+    } catch {
+      this.setApiStatus(false);
+      return null;
+    }
+  }
+
+  async evaluateDetection(payload: EvaluateDetectionRequest, tenantId?: string): Promise<EvaluateDetectionResponse> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/detection/evaluate`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /detection/evaluate failed (HTTP ${res.status})`, res.status);
+  }
+
+  async reviewDetection(detectionId: string, payload: DetectionReviewRequest, tenantId?: string): Promise<DetectionResult> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/detection/results/${detectionId}/review`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /detection/results/${detectionId}/review failed (HTTP ${res.status})`, res.status);
   }
 }
 

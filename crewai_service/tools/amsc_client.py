@@ -470,3 +470,122 @@ class ChronoCogniSecClient:
         if res is not None:
             logger.warning(f"Incident reporting failed ({res.status_code}): {res.text}")
         return None
+
+    # --- Enterprise Security Baseline ---
+
+    def query_enterprise_baseline(
+        self,
+        category: Optional[str] = None,
+        lifecycle_status: str = "ACTIVE",
+        branch_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Query independently governed enterprise baseline policies and authoritative knowledge.
+
+        Unlike mutable agent memory (/memory), baseline records represent authoritative,
+        cryptographically signed enterprise policies governed through formal review and activation.
+        """
+        if self._is_test_double_mode() and self._app is None:
+            return [
+                {
+                    "id": "base-fin-gov-001",
+                    "title": "Enterprise Financial Governance Baseline",
+                    "category": "POLICY",
+                    "source_type": "INTERNAL_POLICY",
+                    "lifecycle_status": "ACTIVE",
+                    "current_version": "v1.0.0",
+                    "content": (
+                        "ChronoCogniSec Enterprise Financial Policy v1.0:\n"
+                        "All disbursements over $300.00 require dual-custody authorization. "
+                        "Agents are strictly forbidden from self-approving financial expenditures."
+                    ),
+                    "branch_id": None,
+                },
+                {
+                    "id": "base-hr-handbook-001",
+                    "title": "Authoritative HR Standard Operational Procedures",
+                    "category": "PROCEDURE",
+                    "source_type": "REGULATORY_STANDARD",
+                    "lifecycle_status": "ACTIVE",
+                    "current_version": "v1.0.0",
+                    "content": "Standard operational procedures for all enterprise personnel across branches.",
+                    "branch_id": None,
+                },
+            ]
+
+        params: Dict[str, Any] = {
+            "limit": limit,
+        }
+        if category:
+            params["category"] = category
+        if lifecycle_status:
+            params["lifecycle_status"] = lifecycle_status
+        if branch_id:
+            params["branch_id"] = branch_id
+
+        url = f"{self.base_url}/baseline" if self._app is None else "/api/v1/baseline"
+        res = self._send_request("GET", url, params=params)
+        if res is None or res.status_code != 200:
+            if res is not None:
+                logger.warning(f"Baseline query returned status {res.status_code}: {res.text}")
+            return []
+        data = res.json()
+        if isinstance(data, dict):
+            return data.get("items", [])
+        elif isinstance(data, list):
+            return data
+        return []
+
+    # --- Observation & Telemetry Foundation ---
+
+    def emit_observation_event(
+        self,
+        event_type: str,
+        event_category: str,
+        agent_id: Optional[str] = None,
+        agent_runtime: str = "CREWAI",
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        action_id: Optional[str] = None,
+        policy_decision_id: Optional[str] = None,
+        execution_receipt_id: Optional[str] = None,
+        outcome: str = "SUCCESS",
+        payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Emit a structured observation event to the AMSC observation pipeline."""
+        if self._is_test_double_mode() and self._app is None:
+            return {
+                "id": f"obs-{uuid.uuid4().hex[:12]}",
+                "event_type": event_type,
+                "event_category": event_category,
+                "outcome": outcome,
+                "status": "RECORDED",
+            }
+
+        url = f"{self.base_url}/observation/events" if self._app is None else "/api/v1/observation/events"
+        body: Dict[str, Any] = {
+            "event_type": event_type,
+            "event_category": event_category,
+            "agent_id": agent_id,
+            "agent_runtime": agent_runtime,
+            "execution_id": execution_id,
+            "trace_id": trace_id,
+            "source_component": "amsc.crewai.client",
+            "tool_name": tool_name,
+            "action_id": action_id,
+            "policy_decision_id": policy_decision_id,
+            "execution_receipt_id": execution_receipt_id,
+            "outcome": outcome,
+            "payload": payload or {},
+        }
+        if idempotency_key:
+            body["idempotency_key"] = idempotency_key
+
+        res = self._send_request("POST", url, json=body)
+        if res is not None and res.status_code in (200, 201):
+            return res.json()
+        if res is not None:
+            logger.warning(f"Failed to emit observation event ({res.status_code}): {res.text}")
+        return None
