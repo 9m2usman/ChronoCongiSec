@@ -24,7 +24,7 @@ from backend.tests.database import helpers
 from backend.tests.database.schema_fingerprint import describe_difference, schema_fingerprint
 from backend.tests.database.seed_fixture import SeedResult, seed_dataset
 
-EXPECTED_TABLES = 44
+EXPECTED_TABLES = 50
 
 
 def _revisions() -> list[str]:
@@ -142,7 +142,17 @@ def test_seeded_database_goes_down_to_0001_and_back_up_without_losing_data(empty
     # Down, one revision at a time, to 0001 (0001 -> base would drop every table by design).
     for index in range(len(revisions) - 1, 0, -1):
         helpers.downgrade(empty_db, revisions[index - 1])
-        if revisions[index] == "0014":
+        if revisions[index] == "0015":
+            for t in (
+                "enterprise_connectors",
+                "discovered_resources",
+                "sync_jobs",
+                "knowledge_claims",
+                "enterprise_memory_links",
+                "connector_audit_logs",
+            ):
+                counts.pop(t, None)
+        elif revisions[index] == "0014":
             counts.pop("detection_results", None)
         elif revisions[index] == "0013":
             for t in (
@@ -177,6 +187,15 @@ def test_seeded_database_goes_down_to_0001_and_back_up_without_losing_data(empty
             })
         elif rev == "0014":
             counts["detection_results"] = 0
+        elif rev == "0015":
+            counts.update({
+                "enterprise_connectors": 0,
+                "discovered_resources": 0,
+                "sync_jobs": 0,
+                "knowledge_claims": 0,
+                "enterprise_memory_links": 0,
+                "connector_audit_logs": 0,
+            })
         assert _row_counts(empty_db) == counts, f"rows lost by upgrade to {rev}"
 
     _assert_intact(empty_db, seed)

@@ -33,13 +33,18 @@ from backend.app.database.models import (
     Branch,
     Checkpoint,
     CheckpointItem,
+    ConnectorAuditLog,
     DetectionResultModel,
+    DiscoveredResource,
     Document,
     DriftObservation,
     EnterpriseBaselineRecord,
     EnterpriseBaselineVersion,
+    EnterpriseConnector,
+    EnterpriseMemoryLink,
     Incident,
     IncidentEvidence,
+    KnowledgeClaim,
     KnowledgeEntity,
     KnowledgeRelation,
     Membership,
@@ -57,6 +62,7 @@ from backend.app.database.models import (
     Role,
     RolePermission,
     Source,
+    SyncJob,
     Tenant,
     ToolExecution,
     ToolProposal,
@@ -220,6 +226,67 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
             BaselineGovernanceLog(
                 id=_id(), tenant_id=a, baseline_id=base_id, version=1, operation="CREATE",
                 actor_id=ids["u_admin"], actor_role="ADMIN", reason=ILLUSTRATIVE,
+            ),
+        ])
+        connector_id = _id()
+        resource_id = _id()
+        session.add(
+            EnterpriseConnector(
+                id=connector_id,
+                tenant_id=a,
+                name="SharePoint Policy Store",
+                connector_type="SHAREPOINT",
+                created_by=ids["u_admin"],
+            )
+        )
+        await session.flush()
+        session.add_all([
+            DiscoveredResource(
+                id=resource_id,
+                tenant_id=a,
+                connector_id=connector_id,
+                source_id=ids["source"],
+                resource_type="DOCUMENT",
+                external_id="sp-doc-001",
+                name="Treasury Policy.pdf",
+            ),
+            SyncJob(
+                id=_id(),
+                tenant_id=a,
+                connector_id=connector_id,
+                strategy="FULL",
+                status="COMPLETED",
+                resources_discovered=1,
+                resources_synced=1,
+            ),
+            ConnectorAuditLog(
+                id=_id(),
+                tenant_id=a,
+                connector_id=connector_id,
+                actor_id=ids["u_admin"],
+                action="CONNECTOR_CREATED",
+                status="SUCCESS",
+            ),
+        ])
+        await session.flush()
+        session.add_all([
+            KnowledgeClaim(
+                id=_id(),
+                tenant_id=a,
+                resource_id=resource_id,
+                source_id=ids["source"],
+                claim_type="POLICY_RULE",
+                subject="Treasury",
+                predicate="MAX_TRANSFER",
+                object_value="1000",
+            ),
+            EnterpriseMemoryLink(
+                id=_id(),
+                tenant_id=a,
+                memory_record_id=ids["rec1"],
+                resource_id=resource_id,
+                extraction_purpose="POLICY_GROUNDING",
+                snapshot_checksum="c1",
             ),
         ])
 

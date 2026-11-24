@@ -21,6 +21,14 @@ from backend.app.database.models.baseline import (
 from backend.app.database.models.detection import (
     DetectionResultModel,
 )
+from backend.app.database.models.enterprise import (
+    ConnectorAuditLog,
+    DiscoveredResource,
+    EnterpriseConnector,
+    EnterpriseMemoryLink,
+    KnowledgeClaim,
+    SyncJob,
+)
 from backend.app.database.models.gateway import (
     Approval,
     PolicyDecision,
@@ -84,13 +92,18 @@ __all__ = [
     "Branch",
     "Checkpoint",
     "CheckpointItem",
+    "ConnectorAuditLog",
     "DetectionResultModel",
+    "DiscoveredResource",
     "Document",
     "DriftObservation",
     "EnterpriseBaselineRecord",
     "EnterpriseBaselineVersion",
+    "EnterpriseConnector",
+    "EnterpriseMemoryLink",
     "Incident",
     "IncidentEvidence",
+    "KnowledgeClaim",
     "KnowledgeEntity",
     "KnowledgeRelation",
     "Membership",
@@ -109,6 +122,7 @@ __all__ = [
     "Role",
     "RolePermission",
     "Source",
+    "SyncJob",
     "Tenant",
     "ToolExecution",
     "ToolProposal",

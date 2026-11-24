@@ -55,6 +55,7 @@ export const AppShell: React.FC = () => {
       heading: 'WORKSPACE',
       items: [
         { label: 'Overview', path: '/', icon: LayoutDashboard },
+        { label: 'Enterprise Connect', path: '/enterprise', icon: Database },
         { label: 'Agent Registry', path: '/agents', icon: Bot },
       ],
     },

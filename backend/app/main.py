@@ -30,6 +30,7 @@ from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
+from backend.app.api.enterprise import router as enterprise_router
 from backend.app.api.gateway import router as gateway_router
 from backend.app.api.incident_management import (
     memory_quarantine_router,
@@ -460,6 +461,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.baseline_repo = None
 
+    # Enterprise Connectivity repository initialization
+    if settings.APP_ENV != "production":
+        from backend.app.enterprise.repository import get_default_enterprise_repository
+        app.state.enterprise_repo = get_default_enterprise_repository()
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.enterprise.repository import SqlAlchemyEnterpriseRepository
+            app.state.enterprise_repo = SqlAlchemyEnterpriseRepository(session_factory)
+        else:
+            app.state.enterprise_repo = None
+
     # Observation repository initialization (Phase 1 §3 & §4)
     if settings.APP_ENV != "production":
         from backend.app.api.observation import get_default_observation_repository
@@ -766,6 +779,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(branches_router)
     api_router.include_router(admin_router)
     api_router.include_router(tenants_router)
+    api_router.include_router(enterprise_router)
     api_router.include_router(agents_router)
     api_router.include_router(baseline_router)
     api_router.include_router(observation_router)

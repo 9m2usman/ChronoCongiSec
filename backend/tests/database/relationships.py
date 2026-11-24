@@ -73,6 +73,15 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("agent_security_profiles", "agent_id", "agents", "CASCADE"),
     Rel("agent_security_profiles", "branch_id", "branches", "RESTRICT"),
     Rel("detection_results", "branch_id", "branches", "RESTRICT"),
+    # Enterprise connectivity (0015):
+    Rel("discovered_resources", "connector_id", "enterprise_connectors", "CASCADE"),
+    Rel("discovered_resources", "source_id", "sources", "SET NULL"),
+    Rel("sync_jobs", "connector_id", "enterprise_connectors", "CASCADE"),
+    Rel("knowledge_claims", "resource_id", "discovered_resources", "CASCADE"),
+    Rel("knowledge_claims", "source_id", "sources", "SET NULL"),
+    Rel("enterprise_memory_links", "memory_record_id", "memory_records", "CASCADE"),
+    Rel("enterprise_memory_links", "resource_id", "discovered_resources", "CASCADE"),
+    Rel("connector_audit_logs", "connector_id", "enterprise_connectors", "SET NULL"),
 )
 
 class LinkedRel(NamedTuple):
@@ -120,6 +129,8 @@ FORENSIC_TENANT_TABLES = frozenset({
     "approvals",
     "tool_executions",
     "registration_requests",
+    "enterprise_connectors",
+    "connector_audit_logs",
 })
 
 # Columns that look like references but intentionally have no FK.
