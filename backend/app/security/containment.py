@@ -18,18 +18,22 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError as PydanticValidationError,
+)
 
 from backend.app.core.exceptions import (
     AMSCException,
     ForbiddenError,
-    NotFoundError,
     SecurityDependencyError,
     ValidationError,
 )
-from backend.app.memory import MemoryRepository, TrustState
+from backend.app.memory import MemoryRepository
 from backend.app.security.audit_identity import user_actor
 from backend.app.security.authorization import Role, evaluate_role_access
 from backend.app.security.quarantine import (
@@ -38,7 +42,6 @@ from backend.app.security.quarantine import (
     QuarantineRequest,
     QuarantineStatus,
     QuarantineWorkflow,
-    raise_for_outcome,
 )
 from backend.app.tenancy.context import TenantContext
 
@@ -52,8 +55,10 @@ CONTAINMENT_ROLES: Tuple[Role, ...] = (Role.SECURITY_ANALYST, Role.TENANT_ADMIN)
 # 1. Vocabulary
 # =============================================================================
 
+
 class ContainmentType(str, Enum):
     """Types of containment operations."""
+
     AGENT_SUSPENSION = "AGENT_SUSPENSION"
     MEMORY_QUARANTINE = "MEMORY_QUARANTINE"
     ACTION_BLOCKING = "ACTION_BLOCKING"
@@ -62,6 +67,7 @@ class ContainmentType(str, Enum):
 
 class ContainmentStatus(str, Enum):
     """Status of containment operations."""
+
     APPLIED = "APPLIED"
     ALREADY_APPLIED = "ALREADY_APPLIED"
     DENIED = "DENIED"
@@ -72,6 +78,7 @@ class ContainmentStatus(str, Enum):
 
 class ContainmentReasonCode(str, Enum):
     """Containment trigger classifications."""
+
     INCIDENT_RESPONSE = "INCIDENT_RESPONSE"
     SECURITY_POLICY_VIOLATION = "SECURITY_POLICY_VIOLATION"
     MALICIOUS_ACTIVITY_DETECTED = "MALICIOUS_ACTIVITY_DETECTED"
@@ -84,9 +91,11 @@ class ContainmentReasonCode(str, Enum):
 # 2. Models
 # =============================================================================
 
+
 @dataclass(frozen=True)
 class ContainmentAction:
     """A containment action to be applied."""
+
     containment_type: ContainmentType
     target_id: str
     details: Dict[str, Any] = field(default_factory=dict)
@@ -95,6 +104,7 @@ class ContainmentAction:
 @dataclass(frozen=True)
 class ContainmentOutcome:
     """Explainable, attributable result of a containment operation."""
+
     outcome_id: str
     success: bool
     status: ContainmentStatus
@@ -123,7 +133,9 @@ class ContainmentOutcome:
             "status": self.status.value,
             "reason_codes": list(self.reason_codes),
             "incident_id": self.incident_id,
-            "containment_type": self.containment_type.value if self.containment_type else None,
+            "containment_type": self.containment_type.value
+            if self.containment_type
+            else None,
             "target_id": self.target_id,
             "previous_state": self.previous_state,
             "new_state": self.resulting_state,
@@ -146,7 +158,9 @@ class ContainmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     incident_id: str = Field(min_length=1, max_length=128)
-    containment_actions: Tuple[ContainmentAction, ...] = Field(min_items=1, max_items=10)
+    containment_actions: Tuple[ContainmentAction, ...] = Field(
+        min_items=1, max_items=10
+    )
     reason: str = Field(min_length=1, max_length=1000)
     reason_code: ContainmentReasonCode = ContainmentReasonCode.INCIDENT_RESPONSE
     analyst_notes: Optional[str] = Field(default=None, max_length=2000)
@@ -157,6 +171,7 @@ class ContainmentRequest(BaseModel):
 # =============================================================================
 # 3. Service
 # =============================================================================
+
 
 class ContainmentService:
     """Authorized containment operations for incidents."""
@@ -181,15 +196,23 @@ class ContainmentService:
     @staticmethod
     def _authorize(context: Any) -> Tuple[str, str]:
         """Authorize containment operations."""
-        if not isinstance(context, TenantContext) or context.is_active is not True \
-                or type(context.tenant_id) is not str or not context.tenant_id.strip():
+        if (
+            not isinstance(context, TenantContext)
+            or context.is_active is not True
+            or type(context.tenant_id) is not str
+            or not context.tenant_id.strip()
+        ):
             raise ForbiddenError("Containment requires a verified tenant context.")
         if not evaluate_role_access(context, CONTAINMENT_ROLES).allowed:
-            raise ForbiddenError("Containment requires SECURITY_ANALYST or TENANT_ADMIN.")
+            raise ForbiddenError(
+                "Containment requires SECURITY_ANALYST or TENANT_ADMIN."
+            )
         try:
             actor = user_actor(context.user_id)
         except ValueError as exc:
-            raise ForbiddenError("Containment requires a verified tenant context.") from exc
+            raise ForbiddenError(
+                "Containment requires a verified tenant context."
+            ) from exc
         return context.tenant_id, actor
 
     async def apply_containment(
@@ -213,25 +236,45 @@ class ContainmentService:
             facts["actor_role"] = evaluate_role_access(context, CONTAINMENT_ROLES).role
 
             # Validate incident exists and is open
-            investigation = await self._investigation_service.get_investigation(context, req.incident_id)
-            if investigation.status not in (IncidentStatus.OPEN, IncidentStatus.IN_PROGRESS):
-                raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.INCIDENT_NOT_OPEN)
+            investigation = await self._investigation_service.get_investigation(
+                context, req.incident_id
+            )
+            if investigation.status not in (
+                IncidentStatus.OPEN,
+                IncidentStatus.IN_PROGRESS,
+            ):
+                raise _Stop(
+                    ContainmentStatus.DENIED, ContainmentReasonCode.INCIDENT_NOT_OPEN
+                )
 
             # Process each containment action
             outcomes = []
             for action in req.containment_actions:
-                outcome = await self._apply_containment_action(context, req, action, facts, persist_evidence)
+                outcome = await self._apply_containment_action(
+                    context, req, action, facts, persist_evidence
+                )
                 outcomes.append(outcome)
 
             # Return the first outcome as the overall result
-            return outcomes[0] if outcomes else self._outcome(req, facts, ContainmentStatus.FAILED, (), context)
+            return (
+                outcomes[0]
+                if outcomes
+                else self._outcome(req, facts, ContainmentStatus.FAILED, (), context)
+            )
         except _Stop as stop:
             facts.update(stop.facts)
-            outcome = self._outcome(req or _safe_req(request), facts, stop.status, stop.codes, context)
+            outcome = self._outcome(
+                req or _safe_req(request), facts, stop.status, stop.codes, context
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Containment workflow error (fail closed).")
-            outcome = self._outcome(req or _safe_req(request), facts, ContainmentStatus.FAILED,
-                                    (ContainmentReasonCode.EVALUATION_ERROR,), context)
+            outcome = self._outcome(
+                req or _safe_req(request),
+                facts,
+                ContainmentStatus.FAILED,
+                (ContainmentReasonCode.EVALUATION_ERROR,),
+                context,
+            )
         self._log(outcome)
         return outcome
 
@@ -246,15 +289,26 @@ class ContainmentService:
         """Apply a single containment action."""
         try:
             if action.containment_type == ContainmentType.MEMORY_QUARANTINE:
-                return await self._quarantine_memory(context, request, action, facts, persist_evidence)
+                return await self._quarantine_memory(
+                    context, request, action, facts, persist_evidence
+                )
             elif action.containment_type == ContainmentType.AGENT_SUSPENSION:
-                return await self._suspend_agent(context, request, action, facts, persist_evidence)
+                return await self._suspend_agent(
+                    context, request, action, facts, persist_evidence
+                )
             elif action.containment_type == ContainmentType.ACTION_BLOCKING:
-                return await self._block_actions(context, request, action, facts, persist_evidence)
+                return await self._block_actions(
+                    context, request, action, facts, persist_evidence
+                )
             elif action.containment_type == ContainmentType.RESOURCE_ISOLATION:
-                return await self._isolate_resource(context, request, action, facts, persist_evidence)
+                return await self._isolate_resource(
+                    context, request, action, facts, persist_evidence
+                )
             else:
-                raise _Stop(ContainmentStatus.FAILED, ContainmentReasonCode.UNSUPPORTED_CONTAINMENT_TYPE)
+                raise _Stop(
+                    ContainmentStatus.FAILED,
+                    ContainmentReasonCode.UNSUPPORTED_CONTAINMENT_TYPE,
+                )
         except _Stop as stop:
             facts.update(stop.facts)
             return self._outcome(request, facts, stop.status, stop.codes, context)
@@ -281,7 +335,9 @@ class ContainmentService:
         outcome = await self._quarantine_workflow.quarantine(
             context,
             quarantine_req,
-            persist_evidence=lambda o: persist_evidence(self._to_containment_outcome(o, request)),
+            persist_evidence=lambda o: persist_evidence(
+                self._to_containment_outcome(o, request)
+            ),
         )
 
         return self._to_containment_outcome(outcome, request)
@@ -326,19 +382,32 @@ class ContainmentService:
         try:
             await persist_evidence(outcome)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Agent suspension evidence persistence failed (%s); containment remains applied.", type(exc).__name__)
-            return self._outcome(request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context)
+            logger.error(
+                "Agent suspension evidence persistence failed (%s); containment remains applied.",
+                type(exc).__name__,
+            )
+            return self._outcome(
+                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
+            )
         if self._audit_sink is not None:
             try:
-                await self._audit_sink({
-                    "id": outcome.outcome_id, "tenant_id": outcome.tenant_id,
-                    "actor_id": outcome.actor_id or "system", "event_type": "CONTAINMENT_APPLIED",
-                    "resource_id": outcome.target_id or "", "action": "AGENT_SUSPENSION",
-                    "outcome": "SUCCESS", "trace_id": outcome.trace_id,
-                    "details_json": outcome.to_audit_details(),
-                })
+                await self._audit_sink(
+                    {
+                        "id": outcome.outcome_id,
+                        "tenant_id": outcome.tenant_id,
+                        "actor_id": outcome.actor_id or "system",
+                        "event_type": "CONTAINMENT_APPLIED",
+                        "resource_id": outcome.target_id or "",
+                        "action": "AGENT_SUSPENSION",
+                        "outcome": "SUCCESS",
+                        "trace_id": outcome.trace_id,
+                        "details_json": outcome.to_audit_details(),
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.error("Agent suspension audit emission failed (%s).", type(exc).__name__)
+                logger.error(
+                    "Agent suspension audit emission failed (%s).", type(exc).__name__
+                )
         return outcome
 
     async def _block_actions(
@@ -381,19 +450,32 @@ class ContainmentService:
         try:
             await persist_evidence(outcome)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Action blocking evidence persistence failed (%s); containment remains applied.", type(exc).__name__)
-            return self._outcome(request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context)
+            logger.error(
+                "Action blocking evidence persistence failed (%s); containment remains applied.",
+                type(exc).__name__,
+            )
+            return self._outcome(
+                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
+            )
         if self._audit_sink is not None:
             try:
-                await self._audit_sink({
-                    "id": outcome.outcome_id, "tenant_id": outcome.tenant_id,
-                    "actor_id": outcome.actor_id or "system", "event_type": "CONTAINMENT_APPLIED",
-                    "resource_id": outcome.target_id or "", "action": "ACTION_BLOCKING",
-                    "outcome": "SUCCESS", "trace_id": outcome.trace_id,
-                    "details_json": outcome.to_audit_details(),
-                })
+                await self._audit_sink(
+                    {
+                        "id": outcome.outcome_id,
+                        "tenant_id": outcome.tenant_id,
+                        "actor_id": outcome.actor_id or "system",
+                        "event_type": "CONTAINMENT_APPLIED",
+                        "resource_id": outcome.target_id or "",
+                        "action": "ACTION_BLOCKING",
+                        "outcome": "SUCCESS",
+                        "trace_id": outcome.trace_id,
+                        "details_json": outcome.to_audit_details(),
+                    }
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.error("Action blocking audit emission failed (%s).", type(exc).__name__)
+                logger.error(
+                    "Action blocking audit emission failed (%s).", type(exc).__name__
+                )
         return outcome
 
     async def _isolate_resource(
@@ -436,8 +518,13 @@ class ContainmentService:
         try:
             await persist_evidence(outcome)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Resource isolation evidence persistence failed (%s); containment remains applied.", type(exc).__name__)
-            return self._outcome(request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context)
+            logger.error(
+                "Resource isolation evidence persistence failed (%s); containment remains applied.",
+                type(exc).__name__,
+            )
+            return self._outcome(
+                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
+            )
 
         return outcome
 
@@ -449,16 +536,23 @@ class ContainmentService:
             try:
                 return ContainmentRequest.model_validate(dict(request))
             except PydanticValidationError:
-                raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
+                raise _Stop(
+                    ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID
+                )
         raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
 
-    def _to_containment_outcome(self, quarantine_outcome: QuarantineOutcome, request: ContainmentRequest) -> ContainmentOutcome:
+    def _to_containment_outcome(
+        self, quarantine_outcome: QuarantineOutcome, request: ContainmentRequest
+    ) -> ContainmentOutcome:
         """Convert a quarantine outcome to a containment outcome."""
         return ContainmentOutcome(
             outcome_id=quarantine_outcome.outcome_id,
             success=quarantine_outcome.success,
             status=self._map_quarantine_status(quarantine_outcome.status),
-            reason_codes=tuple(ContainmentReasonCode(code).value for code in quarantine_outcome.reason_codes),
+            reason_codes=tuple(
+                ContainmentReasonCode(code).value
+                for code in quarantine_outcome.reason_codes
+            ),
             tenant_id=quarantine_outcome.tenant_id,
             incident_id=request.incident_id,
             containment_type=ContainmentType.MEMORY_QUARANTINE,
@@ -494,10 +588,18 @@ class ContainmentService:
         else:
             return ContainmentStatus.FAILED
 
-    def _outcome(self, req, facts, status, codes, context, *, success: Optional[bool] = None) -> ContainmentOutcome:
+    def _outcome(
+        self, req, facts, status, codes, context, *, success: Optional[bool] = None
+    ) -> ContainmentOutcome:
         """Create a containment outcome."""
-        ok = status in {ContainmentStatus.APPLIED, ContainmentStatus.ALREADY_APPLIED} if success is None else success
-        tenant_ok = isinstance(context, TenantContext) and _nonblank(getattr(context, "tenant_id", None))
+        ok = (
+            status in {ContainmentStatus.APPLIED, ContainmentStatus.ALREADY_APPLIED}
+            if success is None
+            else success
+        )
+        tenant_ok = isinstance(context, TenantContext) and _nonblank(
+            getattr(context, "tenant_id", None)
+        )
 
         return ContainmentOutcome(
             outcome_id=f"cont-{facts.get('outcome_id', '').split('-')[-1]}-{status.value.lower()}",
@@ -510,11 +612,17 @@ class ContainmentService:
             target_id=facts.get("target_id"),
             previous_state=facts.get("previous_state"),
             resulting_state=facts.get("resulting_state"),
-            actor_id=context.user_id if tenant_ok and _nonblank(getattr(context, "user_id", None)) else None,
+            actor_id=context.user_id
+            if tenant_ok and _nonblank(getattr(context, "user_id", None))
+            else None,
             actor_role=facts.get("actor_role"),
-            reason_code=req.reason_code.value if isinstance(req, ContainmentRequest) else None,
+            reason_code=req.reason_code.value
+            if isinstance(req, ContainmentRequest)
+            else None,
             reason=req.reason.strip() if isinstance(req, ContainmentRequest) else None,
-            analyst_notes=req.analyst_notes if isinstance(req, ContainmentRequest) else None,
+            analyst_notes=req.analyst_notes
+            if isinstance(req, ContainmentRequest)
+            else None,
             evidence_refs=tuple(facts.get("evidence_refs", ())),
             policy_version=CONTAINMENT_POLICY_VERSION,
             timestamp=self._clock(),
@@ -526,14 +634,21 @@ class ContainmentService:
         """Log a containment outcome."""
         logger.info(
             "Containment outcome %s: status=%s tenant=%s incident=%s %s->%s codes=%s actor=%s",
-            outcome.outcome_id, outcome.status.value, outcome.tenant_id, outcome.incident_id,
-            outcome.previous_state, outcome.resulting_state, ",".join(outcome.reason_codes),
+            outcome.outcome_id,
+            outcome.status.value,
+            outcome.tenant_id,
+            outcome.incident_id,
+            outcome.previous_state,
+            outcome.resulting_state,
+            ",".join(outcome.reason_codes),
             outcome.actor_id,
         )
 
 
 class _Stop(Exception):
-    def __init__(self, status: ContainmentStatus, *codes: ContainmentReasonCode, **facts: Any):
+    def __init__(
+        self, status: ContainmentStatus, *codes: ContainmentReasonCode, **facts: Any
+    ):
         super().__init__(",".join(c.value for c in codes))
         self.status = status
         self.codes = codes
@@ -545,15 +660,31 @@ def raise_for_containment_outcome(outcome: ContainmentOutcome) -> ContainmentOut
     if outcome.success:
         return outcome
     codes = set(outcome.reason_codes)
-    if outcome.status in (ContainmentStatus.RECONCILIATION_REQUIRED, ContainmentStatus.FAILED):
-        raise SecurityDependencyError("Containment could not be completed and recorded.")
-    if codes & {ContainmentReasonCode.ACTOR_NOT_AUTHORIZED.value, ContainmentReasonCode.CONTEXT_INVALID.value}:
+    if outcome.status in (
+        ContainmentStatus.RECONCILIATION_REQUIRED,
+        ContainmentStatus.FAILED,
+    ):
+        raise SecurityDependencyError(
+            "Containment could not be completed and recorded."
+        )
+    if codes & {
+        ContainmentReasonCode.ACTOR_NOT_AUTHORIZED.value,
+        ContainmentReasonCode.CONTEXT_INVALID.value,
+    }:
         raise ForbiddenError("Containment not authorized.")
     if ContainmentReasonCode.REQUEST_INVALID.value in codes:
         raise ValidationError("Invalid containment request.")
     if ContainmentReasonCode.INCIDENT_NOT_OPEN.value in codes:
-        raise AMSCException(message="Containment cannot be applied to a closed incident.", code="CONFLICT", status_code=409)
-    raise AMSCException(message="Containment transition not permitted.", code="CONFLICT", status_code=409)
+        raise AMSCException(
+            message="Containment cannot be applied to a closed incident.",
+            code="CONFLICT",
+            status_code=409,
+        )
+    raise AMSCException(
+        message="Containment transition not permitted.",
+        code="CONFLICT",
+        status_code=409,
+    )
 
 
 def _nonblank(value: Any) -> bool:
@@ -567,8 +698,14 @@ def _safe_req(request: Any) -> Optional[ContainmentRequest]:
 
 
 __all__ = [
-    "ContainmentAction", "ContainmentOutcome", "ContainmentReasonCode", "ContainmentRequest",
-    "ContainmentService", "ContainmentStatus", "ContainmentType", "raise_for_containment_outcome",
+    "ContainmentAction",
+    "ContainmentOutcome",
+    "ContainmentReasonCode",
+    "ContainmentRequest",
+    "ContainmentService",
+    "ContainmentStatus",
+    "ContainmentType",
+    "raise_for_containment_outcome",
 ]
 
 
