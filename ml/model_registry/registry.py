@@ -9,6 +9,7 @@ before parsing or returning the payload.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -164,7 +165,7 @@ class ModelRegistry:
         except OSError as exc:
             raise ModelIntegrityError(f"Model artifact '{model_id}' is missing or unreadable") from exc
         actual_digest = hashlib.sha256(artifact_bytes).hexdigest()
-        if not hashlib.compare_digest(actual_digest, metadata.sha256):
+        if not hmac.compare_digest(actual_digest, metadata.sha256):
             raise ModelIntegrityError(f"Model artifact '{model_id}' failed SHA-256 integrity verification")
         try:
             payload = json.loads(artifact_bytes.decode("utf-8"))
