@@ -7,10 +7,9 @@ This module tests the performance of containment-related operations.
 import asyncio
 import time
 import pytest
-from backend.app.memory import retrieve_memory, update_memory
+from backend.app.memory import retrieve_memory
 from backend.app.security.quarantine import QuarantineWorkflow
-from backend.app.security.trust import TrustOperation
-from backend.tests.security.conftest import AGENT, DEV, T_A, World, make_ctx
+from backend.tests.security.conftest import AGENT, T_A, World, make_ctx
 
 # Contexts
 ANALYST = make_ctx(role="SECURITY_ANALYST", user="analyst-1")
@@ -21,18 +20,41 @@ class BenchmarkEnv:
         self.w = World()
         self.wf = QuarantineWorkflow(self.w.trust, self.w.repo)
         self.benchmark_results = {}
+        self.persisted_evidence = []
 
     def create_memory_record(self, content="Test memo content"):
         return self.w.memory(content=content, agent_id=AGENT)
 
     async def quarantine_benchmark(self, num_records=100):
-        records = [self.w.memory(content=f"Record {i}", agent_id=AGENT) for i in range(num_records)]
+        records = [
+            self.w.memory(content=f"Record {i}", agent_id=AGENT)
+            for i in range(num_records)
+        ]
+
+        self.persisted_evidence = []
+
+        async def persist_evidence(outcome):
+            self.persisted_evidence.append(outcome)
+
+        outcomes = []
 
         start_time = time.time()
         for record in records:
-            await self.wf.quarantine(ANALYST, {"record_id": record, "reason": "Benchmark quarantine"})
-
+            outcome = await self.wf.quarantine(
+                ANALYST,
+                {"record_id": record, "reason": "Benchmark quarantine"},
+                persist_evidence=persist_evidence,
+            )
+            outcomes.append(outcome)
         end_time = time.time()
+
+        # Verify each operation succeeded
+        for outcome in outcomes:
+            assert outcome.success
+
+        # Verify the expected number of evidence records were persisted
+        assert len(self.persisted_evidence) == num_records
+
         return end_time - start_time
 
     def get_benchmark_results(self):
@@ -54,5 +76,7 @@ def test_quarantine_benchmark(env):
     assert quarantine_time > 0
 
     # Verify no records are retrievable after quarantine
-    records = [r.id for r in retrieve_memory(T_A, limit=num_records, repository=env.w.repo)]
+    records = [
+        r.id for r in retrieve_memory(T_A, limit=num_records, repository=env.w.repo)
+    ]
     assert len(records) == 0
