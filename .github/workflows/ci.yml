@@ -60,6 +60,9 @@ jobs:
       - name: Run Ruff on Backend
         run: ruff check backend/
 
+      - name: Train and Register ML Advisory Baselines
+        run: python -m ml.training.train_models
+
       - name: Run Backend Security Tests
         env:
           APP_ENV: test

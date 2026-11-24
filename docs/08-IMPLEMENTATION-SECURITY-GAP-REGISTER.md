@@ -278,3 +278,19 @@ Branch `feat/integration-verification` (from `main` @ `30fe3eb`). Findings were 
 - **Security Test Suite (`backend/tests/security/`)**: 1,252 passed, 5 skipped (100%).
 - **Frontend Test Suite (`npm test`)**: 54/54 tests passed across 7 test suites (100%).
 - **Frontend Production Build (`npm run build`)**: Vite production build succeeded with 0 errors.
+
+---
+
+## 13. Phase 4 Update — ML Security Intelligence Advisory Layer & Remaining Gaps (2026-11-24)
+
+### 13.1 Implemented Phase 4 Controls
+- **Advisory-Only ML Intelligence (`ml/`, `backend/app/security/ml_intelligence.py`, `backend/app/security/detection.py`)**:
+  - `TfidfLinearInjectionClassifier`, `SemanticDriftAndClaimAnalyzer`, and `BehavioralSequenceAnomalyDetector` run as advisory signals only (`SUSPICIOUS_INDICATOR`, `REQUIRE_HUMAN_APPROVAL`, `advisory_only=True`). `PolicyEngine` remains the sole authorization authority.
+  - SHA-256 integrity verification (`ml/model_registry/registry.py`), input sanitization/size capping (`ml/preprocessing/text_sanitizer.py`), secret/PII redaction in evidence, probability/threshold consistency validation, bounded per-`(tenant_id, branch_id, agent_id)` sequence tracking, and fail-closed `INDETERMINATE` fallback on missing/tampered/timed-out/invalid model outputs.
+
+### 13.2 Phase 4 Open Gaps & Limitations
+| ID | Severity | Owner | Finding | Required correction / status |
+|---|---|---|---|---|
+| GAP-ML-001 | P2 Medium | M4 + M6 | `BehavioralSequenceAnomalyDetector._agent_history` is process-local in-memory (`max_tracked_agents=10,000`), so multi-worker deployments do not share behavioral windows across workers. | Back behavioral sequence windows with Redis or PostgreSQL in multi-worker production deployments. |
+| GAP-ML-002 | P2 Medium | M4 + M7 | `ml/model_registry/*` is `.gitignore`-excluded; fresh clones must run `python -m ml.training.train_models` or `DetectionEngine` falls back to `INDETERMINATE` advisory findings. | Track signed JSON artifacts or execute `python -m ml.training.train_models` during container/CI build. |
+| GAP-ML-003 | P2 Medium | M4 | Calibration ECE (`0.21–0.24`) and generalization are measured only on controlled synthetic datasets (`n=20`, `n=8`, `n=12`). | Re-calibrate and validate on larger labeled enterprise corpora before tightening thresholds. |
