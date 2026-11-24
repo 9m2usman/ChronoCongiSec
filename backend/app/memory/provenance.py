@@ -85,7 +85,9 @@ class TraversalBudget:
 
     def check_deadline(self) -> None:
         if self.deadline_seconds is not None:
-            if (time.monotonic() - self.start_time) > self.deadline_seconds:
+            # >= (not >) so a zero-second deadline expires immediately on the
+            # first check instead of racing past the deadline on the same tick.
+            if (time.monotonic() - self.start_time) >= self.deadline_seconds:
                 raise TraversalBudgetExceededError("deadline")
 
     def record_visit(self, node_id: str) -> None:
