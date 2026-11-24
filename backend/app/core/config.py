@@ -201,7 +201,7 @@ class Settings(BaseSettings):
 
     # --- 6. Persistence & Cache Connection Placeholders (M6/M7 Alignment) ---
     DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://amsc:amsc_dev_password@localhost:5432/amsc",
+        default="postgresql+asyncpg://amsc:amsc_dev_password@localhost:5433/amsc",
         description="Asynchronous SQLAlchemy connection string for PostgreSQL",
     )
     REDIS_URL: str = Field(
