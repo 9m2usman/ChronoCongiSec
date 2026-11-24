@@ -180,3 +180,31 @@ export function useAuditEvents() {
     queryFn: () => apiClient.listAuditEvents(active.id),
   });
 }
+
+// 12. Enterprise Baseline (Phase 1 §2)
+export function useBaselineRecords(category?: string, lifecycleStatus?: string, branchId?: string) {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['baseline-records', active.id, category, lifecycleStatus, branchId],
+    queryFn: () => apiClient.listBaselineRecords(category, lifecycleStatus, branchId, active.id),
+  });
+}
+
+// 13. Observation & Telemetry Foundation (Phase 1 §3)
+export function useObservationEvents(agentId?: string, eventCategory?: string, traceId?: string) {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['observation-events', active.id, agentId, eventCategory, traceId],
+    queryFn: () => apiClient.listObservationEvents(agentId, eventCategory, traceId, active.id),
+  });
+}
+
+// 14. Agent Security Profile (Phase 1 §2)
+export function useAgentProfile(agentId: string) {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['agent-profile', active.id, agentId],
+    queryFn: () => apiClient.getAgentProfile(agentId, active.id),
+    enabled: Boolean(agentId),
+  });
+}

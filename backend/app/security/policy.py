@@ -704,6 +704,18 @@ class PolicyEngine:
         else:  # DEPRECATED, unknown, missing, malformed
             ev.set(PolicyCheck.AGENT_STATUS, CheckOutcome.BLOCK, ReasonCode.AGENT_NOT_ACTIVE)
 
+        if hasattr(self._agents, "get_profile"):
+            try:
+                prof = await _maybe_await(self._agents.get_profile(facts.agent_id, tenant_id))
+                if prof is not None:
+                    p_stat = prof.get("status")
+                    if p_stat in ("ISOLATED", "SUSPENDED", "REVOKED"):
+                        ev.set(PolicyCheck.AGENT_STATUS, CheckOutcome.BLOCK, ReasonCode.AGENT_ISOLATED)
+                    elif p_stat != "ACTIVE":
+                        ev.set(PolicyCheck.AGENT_STATUS, CheckOutcome.BLOCK, ReasonCode.AGENT_NOT_ACTIVE)
+            except Exception:
+                ev.set(PolicyCheck.AGENT_STATUS, CheckOutcome.INDETERMINATE, ReasonCode.AGENT_DIRECTORY_UNAVAILABLE)
+
     async def _check_tool_and_operation(self, ev: _Eval, facts: ProposalFacts, tenant_id: str) -> Optional[ToolGrant]:
         try:
             grant = await _maybe_await(self._grants.get_tool_grant(tenant_id, facts.agent_id, facts.tool_name))
@@ -777,33 +789,48 @@ class PolicyEngine:
             if value > parsed.threshold[name]:
                 needs_review = True
         if not needs_review:
+            if approval is not None:
+                problem = self._approval_problem(approval, fingerprint, context, facts.agent_id)
+                if problem is not None:
+                    ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.BLOCK, problem)
+                    return
             ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.PASS)
             return
         if approval is None:
             ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.REVIEW, ReasonCode.APPROVAL_THRESHOLD_EXCEEDED)
             return
-        problem = self._approval_problem(approval, fingerprint, context)
+        problem = self._approval_problem(approval, fingerprint, context, facts.agent_id)
         if problem is None:
             ev.approval_id = approval.approval_id
             ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.PASS)
         else:
             ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.BLOCK, problem)
 
-    def _approval_problem(self, approval: Any, fingerprint: str, context: TenantContext) -> Optional[ReasonCode]:
+    def _approval_problem(
+        self,
+        approval: Any,
+        fingerprint: str,
+        context: TenantContext,
+        agent_id: Optional[str] = None,
+    ) -> Optional[ReasonCode]:
         if not isinstance(approval, ApprovalEvidence):
             return ReasonCode.APPROVAL_INVALID
         if approval.tenant_id != context.tenant_id or approval.status != "APPROVED":
             return ReasonCode.APPROVAL_INVALID
+        if not approval.approver_user_id:
+            return ReasonCode.APPROVAL_INVALID
         if approval.consumed or (context.tenant_id, approval.approval_id) in self._consumed_approvals:
             return ReasonCode.APPROVAL_ALREADY_CONSUMED
-        if approval.proposal_fingerprint != fingerprint:
-            return ReasonCode.APPROVAL_SCOPE_MISMATCH
+        if approval.approver_user_id == context.user_id:
+            return ReasonCode.APPROVAL_SELF_APPROVAL
+        if agent_id is not None and approval.approver_user_id == agent_id:
+            return ReasonCode.APPROVAL_SELF_APPROVAL
         if not isinstance(approval.expires_at, datetime) or approval.expires_at.tzinfo is None:
             return ReasonCode.APPROVAL_INVALID
         if self._clock() >= approval.expires_at:
             return ReasonCode.APPROVAL_EXPIRED
-        if approval.approver_user_id == context.user_id:
-            return ReasonCode.APPROVAL_SELF_APPROVAL
+        if approval.proposal_fingerprint != fingerprint:
+            return ReasonCode.APPROVAL_SCOPE_MISMATCH
         if approval.approver_role not in (Role.SECURITY_ANALYST.value, Role.TENANT_ADMIN.value):
             return ReasonCode.APPROVAL_INVALID
         return None

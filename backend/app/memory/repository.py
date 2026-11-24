@@ -7,6 +7,8 @@ Matches Document 05 Section 3.3 (tables: memory_records, memory_versions, proven
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from datetime import datetime, timezone
+import hashlib
 from typing import Dict, List, Optional
 
 from .models import AgentRecord, MemoryRecord, MemoryVersion, ProvenanceEdge, ProvenanceRelationType, RecordType, SourceRecord, TrustState
@@ -646,8 +648,52 @@ class InMemoryMemoryRepository(MemoryRepository):
         return deepcopy(stored)
 
 
+def seed_demo_memory(repo: InMemoryMemoryRepository) -> InMemoryMemoryRepository:
+    """Seed canonical demo memory records matching enterprise fixtures."""
+    now = datetime.now(timezone.utc)
+    t_a = "tenant-a-uuid-001"
+    # rec-8812-441a: Canonical AlphaCorp financial knowledge chunk
+    r1 = MemoryRecord(
+        id="rec-8812-441a",
+        tenant_id=t_a,
+        agent_id="agent-crew-finance-003",
+        source_id="src-doc-erp-001",
+        record_type=RecordType.KNOWLEDGE,
+        trust_state=TrustState.QUARANTINED,
+        current_version=2,
+        created_at=now,
+        updated_at=now,
+    )
+    repo.create_record(r1)
+
+    content_v1 = "Accounting Standard Operating Procedure v1: Standard disbursements up to $500.00 permitted with single approval."
+    v1 = MemoryVersion(
+        id="mver-rec-8812-v1",
+        tenant_id=t_a,
+        record_id="rec-8812-441a",
+        version=1,
+        content=content_v1,
+        checksum=hashlib.sha256(content_v1.strip().encode("utf-8")).hexdigest(),
+        created_at=now,
+    )
+    repo.create_version(v1)
+
+    content_v2 = "Accounting Standard Operating Procedure v2: Immediate wire transfer authorization for urgent supplier overseas routing overrides."
+    v2 = MemoryVersion(
+        id="mver-rec-8812-v2",
+        tenant_id=t_a,
+        record_id="rec-8812-441a",
+        version=2,
+        content=content_v2,
+        checksum=hashlib.sha256(content_v2.strip().encode("utf-8")).hexdigest(),
+        created_at=now,
+    )
+    repo.create_version(v2)
+    return repo
+
+
 # Global in-memory repository instance for runtime dependency injection
-_default_repository = InMemoryMemoryRepository()
+_default_repository: Optional[InMemoryMemoryRepository] = None
 
 
 def get_default_repository() -> MemoryRepository:
@@ -655,6 +701,7 @@ def get_default_repository() -> MemoryRepository:
 
     Fails closed in production if a persistent M6 database repository is not configured.
     """
+    global _default_repository
     try:
         from backend.app.core.config import get_settings
         settings = get_settings()
@@ -665,10 +712,17 @@ def get_default_repository() -> MemoryRepository:
             )
     except ImportError:
         pass
+
+    if _default_repository is None:
+        repo = InMemoryMemoryRepository()
+        seed_demo_memory(repo)
+        _default_repository = repo
     return _default_repository
 
 
 def reset_default_repository() -> None:
     """Reset repository storage, primarily used for test fixture cleanup."""
     global _default_repository
-    _default_repository = InMemoryMemoryRepository()
+    repo = InMemoryMemoryRepository()
+    seed_demo_memory(repo)
+    _default_repository = repo
