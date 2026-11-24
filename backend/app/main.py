@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+import backend.app.core.windows_compat  # noqa: F401 - Windows compatibility
+
 from backend.app.api.admin import router as admin_router
 from backend.app.api.agents import router as agents_router
 from backend.app.api.audit import router as audit_router

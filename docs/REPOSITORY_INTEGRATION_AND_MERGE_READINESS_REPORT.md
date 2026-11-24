@@ -66,14 +66,14 @@ The primary developer had a fully functional login page locally, but a second te
    - The login page implementation resides in `frontend/src/pages/LoginPage.tsx` and was committed in `0b6ee05` (Nov 23).
    - If the teammate cloned an earlier tag or checked out an unmerged feature branch (such as `feat/m5-amsc-frontend-workstation` prior to PR #35), `LoginPage.tsx` and the corresponding auth routes were not present on that branch.
 2. **Session Storage Bypass in `AuthGuard`:**
-   - In `frontend/src/components/auth/AuthGuard.tsx`, the route guard evaluates:
+   - In `frontend/src/stores/useWorkstationStore.ts` and `frontend/src/components/auth/AuthGuard.tsx`, session tokens are stored under the key `amsc_auth_token`:
      ```typescript
-     const token = sessionStorage.getItem('amsc_token');
+     const token = sessionStorage.getItem('amsc_auth_token');
      if (!token) {
        return <Navigate to="/login" state={{ from: location }} replace />;
      }
      ```
-   - If a developer’s browser retained a stale `amsc_token` in `sessionStorage` (e.g., from prior mock testing or a previous session), the browser immediately admitted the user to the protected workstation (`/`, `/memory-explorer`, etc.), bypassing the login view completely.
+   - If a developer’s browser retained a stale `amsc_auth_token` in `sessionStorage` (e.g., from prior mock testing or a previous session), the browser immediately admitted the user to the protected workstation (`/`, `/memory-explorer`, etc.), bypassing the login view completely. In the hardened `AuthGuard`, stale tokens trigger a session revalidation against `GET /api/v1/auth/me` which automatically clears invalid credentials and falls back to `/login`.
 3. **Seeded Backend Credentials vs. Ad-hoc Inputs:**
    - Authentication against `POST /api/v1/auth/login` requires matching active database users. The system seeds canonical accounts:
      - Username: `analyst@company-a.com` or `alex.analyst@alphacorp.com`
@@ -179,17 +179,38 @@ All tests were executed on the consolidated `integration/pre-phase-4` branch.
 - **Duration:** 11.45s
 - **Result:** **56 passed, 0 failed** (All 12 enterprise security scenarios, tool authorization, dual-custody approval, prompt injection detection)
 
-### 6.5 Memory API & Provenance Lineage
-- **Command:** `python -m pytest backend/app/memory/tests/test_api.py backend/app/memory/tests/test_lineage.py -v`
-- **Duration:** 30.57s
-- **Result:** **19 passed, 0 failed** (Strict tenant isolation, lineage ancestors/descendants traversal, tampering detection)
+### 6.5 Comprehensive Backend Unit, Knowledge & Memory Subsystem Tests
+- **Command:** `python -m pytest backend/tests/unit backend/app/memory/tests backend/app/knowledge -q`
+- **Duration:** 253.54s
+- **Result:** **574 passed, 12 skipped, 0 failed**
+  - All 20 test suites in `backend/tests/unit/` (including IAM, agent registry, gateway, incident management, tenancy, traces, and drift)
+  - All 13 test suites in `backend/app/memory/tests/` (including atomic writes, lineage traversal, cryptographic hashing, and repository contracts)
+  - Knowledge graph projection and traversal tests in `backend/app/knowledge/tests/`
 
 ### 6.6 Phase 1 & Phase 2 Functional Unit Tests
 - **Command:** `python -m pytest backend/tests/unit/test_phase1_baseline_and_observation.py backend/tests/unit/test_phase2_detection_and_action_security.py -q`
 - **Duration:** 67.12s
 - **Result:** **65 passed, 0 failed**
 
-**Total Automated Tests Passing on Integration Branch: 1,446 tests.**
+### 6.7 Database Schema & Migration Lineage Tests
+- **Command:** `python -m pytest backend/tests/database/test_migrations.py -k "test_migration_chain_has_single_head" -v`
+- **Result:** **Passed (single head 0014_detection_results verified)**
+- **Database Safety Architecture:**
+  - Alembic chain: `0001` -> ... -> `0012` -> `0013` -> `0014`.
+  - M6 database tests strictly require `TEST_DATABASE_URL` (pointing to a maintenance database like `postgres`) to create throwaway `amsc_test_*` instances. They fail fast rather than silently skipping when `TEST_DATABASE_URL` is omitted, safeguarding production schemas from accidental migration pollution.
+
+### 6.8 Fresh-Clone & Application Lifecycle Smoke Verification
+- **Methodology:** In-process ASGI `TestClient` and startup lifecycle verification following `RUN.md` instructions.
+- **Results:**
+  - `GET /health` -> HTTP 200 `{"status": "healthy", "service": "amsc-api"}`
+  - `GET /ready` -> HTTP 200 (all 10 subsystem dependencies report ready)
+  - `POST /api/v1/auth/login` -> HTTP 200 (JWT issued with role `SECURITY_ANALYST`)
+  - `GET /api/v1/auth/me` -> HTTP 200 (Profile resolved for `Alice Analyst`)
+  - `GET /api/v1/baseline` -> HTTP 200
+  - `GET /api/v1/observation/events` -> HTTP 200
+  - `GET /api/v1/detection/results` -> HTTP 200
+
+**Total Automated Tests Passing on Integration Branch: 1,936 tests** (1,882 backend/agent tests + 54 frontend tests).
 
 ---
 

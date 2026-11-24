@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import sys
 
+import backend.app.core.windows_compat  # noqa: F401
 from backend.app.memory.integrity import audit_memory_integrity
 from backend.app.memory.repository import get_default_repository
 
