@@ -38,15 +38,12 @@ D. Tool and Execution Threat Detection:
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-import hashlib
 import json
 import logging
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -348,7 +345,6 @@ class DetectionEngine:
     ) -> List[DetectionResult]:
         """Evaluate memory modification, content authenticity, prompt injection, and provenance."""
         findings: List[DetectionResult] = []
-        now = datetime.now(timezone.utc)
         target_record_id = record_id or (getattr(record, "id", None) if record else None) or "unrecorded"
 
         # 1. Cryptographic Checksum Integrity & Tamper Detection
@@ -1070,7 +1066,6 @@ class DetectionEngine:
                 (r"\ballowed\b|\bis\s+allowed\b", r"\bdisallowed\b|\bblocked\b|\bnot\s+allowed\b|\bis\s+not\s+allowed\b"),
             ]
 
-            contradiction_found = False
             for pos_pat, neg_pat in polarity_inversions:
                 has_pos_source = bool(re.search(pos_pat, source_lower))
                 has_neg_claim = bool(re.search(neg_pat, claim_lower))
@@ -1078,7 +1073,6 @@ class DetectionEngine:
                 has_pos_claim = bool(re.search(pos_pat, claim_lower))
 
                 if (has_pos_source and has_neg_claim) or (has_neg_source and has_pos_claim):
-                    contradiction_found = True
                     findings.append(DetectionResult(
                         id=f"det-{uuid.uuid4().hex[:16]}",
                         tenant_id=tenant_id,
@@ -1679,8 +1673,6 @@ class DetectionEngine:
         findings: List[DetectionResult] = []
 
         agent_id = getattr(proposal_facts, "agent_id", None) or (proposal_facts.get("agent_id") if isinstance(proposal_facts, dict) else None)
-        tool_name = getattr(proposal_facts, "tool_name", None) or (proposal_facts.get("tool_name") if isinstance(proposal_facts, dict) else None)
-        operation = getattr(proposal_facts, "operation", None) or (proposal_facts.get("operation") if isinstance(proposal_facts, dict) else None)
         params = getattr(proposal_facts, "parameters", {}) or (proposal_facts.get("parameters") if isinstance(proposal_facts, dict) else {})
         if not isinstance(params, dict):
             params = {}

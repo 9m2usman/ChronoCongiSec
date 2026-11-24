@@ -13,6 +13,8 @@ Canonical References:
 - AMSC-DOC-008: GAPs 001-004, 006, 010, 015, 018-028 (Security Gap Register)
 """
 
+from __future__ import annotations
+
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -52,7 +54,6 @@ from backend.app.security.authorization import Role
 from backend.app.security.detection import (
     DetectionCategory,
     DetectionClassificationType,
-    DetectionEngine,
     DetectionMethod,
     DetectionResult,
     DetectionSeverity,
@@ -1362,12 +1363,6 @@ async def propose_tool_action(
     # Resolve approval evidence if approval_id is supplied (Phase 2 Action Enforcement)
     approval_evidence: Optional[ApprovalEvidence] = None
     if getattr(body, "approval_id", None):
-        from backend.app.security.policy import normalize_proposal, proposal_fingerprint
-        try:
-            policy_fp = proposal_fingerprint(normalize_proposal(proposal), tenant_id, context.user_id)
-        except Exception:
-            policy_fp = payload_fingerprint
-
         approvals_store = getattr(request.app.state, "approvals_store", None)
         appr_obj = None
         if isinstance(approvals_store, dict):

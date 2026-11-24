@@ -7,7 +7,6 @@ Module: backend.tests.conftest
 Owner: M1 / M7
 """
 
-import sys
 
 # Windows Sandbox loopback socket fallback for ProactorEventLoop inter-thread signaling
 import backend.app.core.windows_compat  # noqa: F401

@@ -10,30 +10,24 @@ Routes:
 - POST /api/v1/detection/results/{id}/review    (Security analyst review and triage lifecycle transition)
 """
 
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
-from backend.app.core.dependencies import get_tenant_context, require_roles
+from backend.app.core.dependencies import get_tenant_context
 from backend.app.core.exceptions import ForbiddenError, NotFoundError, SecurityDependencyError, ValidationError
 from backend.app.database.repositories.detection import (
     DetectionRepositoryProtocol,
-    InMemoryDetectionRepository,
     SqlAlchemyDetectionRepository,
     get_default_detection_repository,
 )
 from backend.app.security.authorization import Role
 from backend.app.security.detection import (
-    DetectionCategory,
-    DetectionClassificationType,
     DetectionEngine,
     DetectionResult,
-    DetectionSeverity,
-    DetectionStatus,
     EvaluateDetectionRequest,
     EvaluateDetectionResponse,
-    get_default_detection_engine,
 )
 from backend.app.tenancy.context import TenantContext
 

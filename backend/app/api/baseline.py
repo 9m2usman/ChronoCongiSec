@@ -9,15 +9,13 @@ enterprise knowledge, security policies, and organizational baselines:
 - Strict role-based access: agents cannot approve or elevate their own baselines
 """
 
-from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime
 import logging
 import re
-from typing import Any, Dict, List, Optional
-import uuid
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, status
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from backend.app.api.audit import record_audit_event
 from backend.app.core.dependencies import (
@@ -647,4 +645,4 @@ async def get_baseline_governance_logs(
         raise NotFoundError("Baseline record not found.")
 
     logs = await repo.list_governance_logs(tenant_context.tenant_id, clean_id)
-    return [BaselineGovernanceLogResponse(**l) for l in logs]
+    return [BaselineGovernanceLogResponse(**log_entry) for log_entry in logs]

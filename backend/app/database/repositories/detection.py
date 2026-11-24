@@ -9,12 +9,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 import uuid
 
-from sqlalchemy import desc, select, update
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.core.exceptions import NotFoundError, ValidationError
 from backend.app.database.models.detection import (
-    DETECTION_CATEGORIES,
     DETECTION_STATUSES,
     DetectionResultModel as OrmDetectionResult,
 )

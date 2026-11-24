@@ -10,14 +10,12 @@ import hashlib
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 import uuid
 
-from sqlalchemy import delete, desc, select, update
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from backend.app.database.models.baseline import (
-    BASELINE_LIFECYCLE_STATUSES,
-    BASELINE_OPERATIONS,
     BaselineGovernanceLog as OrmBaselineGovernanceLog,
     EnterpriseBaselineRecord as OrmBaselineRecord,
     EnterpriseBaselineVersion as OrmBaselineVersion,
@@ -367,7 +365,7 @@ class InMemoryBaselineRepository(BaselineRepositoryProtocol):
         if not rec:
             return []
         logs = self._governance_logs.get(baseline_id, [])
-        return [deepcopy(l) for l in logs]
+        return [deepcopy(log_entry) for log_entry in logs]
 
 
 def seed_demo_baselines(repo: InMemoryBaselineRepository) -> None:
@@ -874,15 +872,15 @@ class SqlAlchemyBaselineRepository(BaselineRepositoryProtocol):
             rows = list((await session.execute(stmt)).scalars().all())
             return [
                 {
-                    "id": l.id,
-                    "tenant_id": l.tenant_id,
-                    "baseline_id": l.baseline_id,
-                    "version": l.version,
-                    "operation": l.operation,
-                    "actor_id": l.actor_id,
-                    "actor_role": l.actor_role,
-                    "reason": l.reason,
-                    "occurred_at": l.occurred_at.isoformat() if l.occurred_at else None,
+                    "id": row.id,
+                    "tenant_id": row.tenant_id,
+                    "baseline_id": row.baseline_id,
+                    "version": row.version,
+                    "operation": row.operation,
+                    "actor_id": row.actor_id,
+                    "actor_role": row.actor_role,
+                    "reason": row.reason,
+                    "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
                 }
-                for l in rows
+                for row in rows
             ]

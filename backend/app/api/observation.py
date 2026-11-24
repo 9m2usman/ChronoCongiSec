@@ -7,26 +7,22 @@ Provides a consistent, tenant-isolated observation foundation for AI agent activ
 - Correlates with W3C traceparent headers across Gateway and agent adapters
 """
 
-from copy import deepcopy
-from datetime import datetime, timezone
 import logging
 import re
 from typing import Any, Dict, List, Optional
-import uuid
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.api.traces import redact_sensitive_dict
 from backend.app.core.dependencies import SettingsDep, TenantContextDep
-from backend.app.core.exceptions import NotFoundError, SecurityDependencyError, ValidationError
+from backend.app.core.exceptions import NotFoundError, SecurityDependencyError
 from backend.app.database.models.baseline import OBSERVATION_CATEGORIES
 from backend.app.database.repositories.observation import (
     InMemoryObservationRepository,
     ObservationRepositoryProtocol,
     SqlAlchemyObservationRepository,
 )
-from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.api.observation")
 router = APIRouter(prefix="/observation", tags=["Observation & Telemetry"])

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, List, Optional, Union
 from fastapi import APIRouter, Depends, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.app.api.memory import get_memory_tenant_id, get_repository
 from backend.app.core.exceptions import NotFoundError

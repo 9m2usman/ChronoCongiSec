@@ -40,21 +40,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from backend.app.api.agents import InMemoryAgentRepository, seed_demo_agents
 from backend.app.core.config import Settings
-from backend.app.core.exceptions import ConflictError, NotFoundError
+from backend.app.core.exceptions import ConflictError
 from backend.app.core.security import create_access_token
-from backend.app.database.base import Base
-import backend.app.database.models  # ensure models registered on Base.metadata
 from backend.app.database.models.agents import (
     Agent as OrmAgent,
     ToolRegistration as OrmToolRegistration,
 )
 from backend.app.database.models.baseline import (
-    AgentSecurityProfile as OrmAgentSecurityProfile,
-    BaselineGovernanceLog as OrmBaselineGovernanceLog,
-    EnterpriseBaselineRecord as OrmBaselineRecord,
     EnterpriseBaselineVersion as OrmBaselineVersion,
-    ObservationEvent as OrmObservationEvent,
-    TrustDecisionModel,
 )
 from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
 from backend.app.database.repositories.baseline import (
@@ -70,10 +63,8 @@ from backend.app.main import create_app
 from backend.app.recovery.store import SqlTrustDecisionStore
 from backend.app.security.trust import TrustDecision
 from backend.app.tenancy.context import (
-    BranchRecord,
     InMemoryAuthRepository,
     MembershipRecord,
-    TenantRecord,
     UserRecord,
     seed_demo_accounts,
 )
@@ -1099,7 +1090,7 @@ class TestSqlAlchemyRepositoriesParity:
             # Governance logs
             logs = await repo.list_governance_logs(tenant_id, rec["id"])
             assert len(logs) >= 2
-            operations = [l["operation"] for l in logs]
+            operations = [entry["operation"] for entry in logs]
             assert "CREATE" in operations
             assert "IN_REVIEW" in operations
         finally:
@@ -1396,7 +1387,7 @@ class TestSqlAlchemyRepositoriesParity:
 
             # Ingest two events with same timestamp to test deterministic tie-breaking on id
             shared_time = "2026-06-01T12:00:00+00:00"
-            e_a = await repo.record_event({
+            await repo.record_event({
                 "id": "obs-event-aaa",
                 "tenant_id": tenant_id,
                 "event_type": "POLICY_DECISION",
@@ -1405,7 +1396,7 @@ class TestSqlAlchemyRepositoriesParity:
                 "trace_id": "tr-order-001",
                 "outcome": "ALLOW",
             })
-            e_b = await repo.record_event({
+            await repo.record_event({
                 "id": "obs-event-bbb",
                 "tenant_id": tenant_id,
                 "event_type": "POLICY_DECISION",

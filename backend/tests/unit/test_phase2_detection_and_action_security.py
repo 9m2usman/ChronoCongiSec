@@ -42,12 +42,11 @@ Covers:
 """
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 import uuid
 import pytest
 import httpx
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.app.api.agents import (
     AgentEntity,
@@ -56,15 +55,9 @@ from backend.app.api.agents import (
     seed_demo_agents,
 )
 from backend.app.core.config import Settings
-from backend.app.core.exceptions import ConflictError, NotFoundError
 from backend.app.core.security import create_access_token
-from backend.app.database.base import Base
-import backend.app.database.models  # Register all models on Base.metadata
-from backend.app.database.models.detection import DetectionResultModel as OrmDetectionResult
-from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
 from backend.app.database.repositories.baseline import (
     InMemoryBaselineRepository,
-    SqlAlchemyBaselineRepository,
     seed_demo_baselines,
 )
 from backend.app.database.repositories.detection import (
@@ -73,35 +66,22 @@ from backend.app.database.repositories.detection import (
 )
 from backend.app.database.repositories.observation import (
     InMemoryObservationRepository,
-    SqlAlchemyObservationRepository,
 )
 from backend.app.main import create_app
 from backend.app.memory.integrity import sha256_hex
 from backend.app.memory.models import MemoryRecord, TrustState
-from backend.app.security.authorization import Role
 from backend.app.security.detection import (
     DetectionCategory,
     DetectionClassificationType,
     DetectionEngine,
     DetectionMethod,
-    DetectionResult,
     DetectionSeverity,
-    DetectionStatus,
-    EvaluateDetectionRequest,
     RecommendedOutcome,
     UncertaintyState,
 )
-from backend.app.security.policy import (
-    ApprovalEvidence,
-    PolicyOutcome,
-    ReasonCode,
-    ToolGrant,
-)
 from backend.app.tenancy.context import (
-    BranchRecord,
     InMemoryAuthRepository,
     MembershipRecord,
-    TenantRecord,
     UserRecord,
     seed_demo_accounts,
 )
