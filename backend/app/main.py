@@ -28,6 +28,7 @@ from backend.app.api.auth import router as auth_router
 from backend.app.api.baseline import router as baseline_router
 from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
+from backend.app.api.containment import router as containment_router
 from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
 from backend.app.api.gateway import router as gateway_router
@@ -722,7 +723,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context: TenantContext = Depends(get_tenant_context),
         ):
             return get_swagger_ui_html(
-                openapi_url=settings.OPENAPI_URL,
+                openapi_url=settings.OPENAPI_URL or "/openapi.json",
                 title=f"{settings.APP_NAME} - Swagger UI (Protected)",
             )
 
@@ -731,7 +732,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context: TenantContext = Depends(get_tenant_context),
         ):
             return get_redoc_html(
-                openapi_url=settings.OPENAPI_URL,
+                openapi_url=settings.OPENAPI_URL or "/openapi.json",
                 title=f"{settings.APP_NAME} - ReDoc (Protected)",
             )
 
@@ -779,6 +780,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(recovery_router)
     api_router.include_router(audit_router)
     api_router.include_router(chronimem_router)
+    api_router.include_router(containment_router)
     api_router.include_router(knowledge_router)
 
     app.include_router(api_router)
