@@ -5,7 +5,6 @@ This module tests the integration between the frontend and backend systems.
 """
 
 import pytest
-import httpx
 from fastapi.testclient import TestClient
 from backend.app.main import create_app
 
@@ -31,7 +30,7 @@ def test_containment_apply(client):
         "record_id": "test-record-123",
         "reason": "Test containment reason",
         "reason_code": "TEST_REASON",
-        "incident_id": "inc-001"
+        "incident_id": "inc-001",
     }
 
     # This test assumes a valid JWT token is required for authenticated requests
