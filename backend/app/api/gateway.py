@@ -13,6 +13,8 @@ Canonical References:
 - AMSC-DOC-008: GAPs 001-004, 006, 010, 015, 018-028 (Security Gap Register)
 """
 
+from __future__ import annotations
+
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -20,6 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -46,7 +49,19 @@ from backend.app.core.exceptions import (
     SecurityDependencyError,
     ValidationError,
 )
-from backend.app.security.policy import decision_is_executable
+from backend.app.api.traces import redact_sensitive_dict
+from backend.app.security.authorization import Role
+from backend.app.security.detection import (
+    DetectionCategory,
+    DetectionClassificationType,
+    DetectionMethod,
+    DetectionResult,
+    DetectionSeverity,
+    RecommendedOutcome,
+    UncertaintyState,
+    get_default_detection_engine,
+)
+from backend.app.security.policy import ApprovalEvidence, PolicyOutcome, decision_is_executable
 from backend.app.security.runtime import get_gateway_enforcement
 
 logger = logging.getLogger("amsc.api.gateway")
@@ -94,6 +109,92 @@ class ExecutionStatus(str, Enum):
 # 2. DTOs and Validation Models (Pydantic v2)
 # ============================================================================
 
+async def _emit_gateway_observations(
+    request: Request,
+    tenant_id: str,
+    body: ActionProposalRequest,
+    proposal_id: str,
+    decision: Any,
+    execution_status: str,
+    result_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Emit correlated Phase 1 observation events without breaking gateway response contracts.
+    
+    Enforces strict secret and credential scrubbing and avoids idempotency key collisions
+    when callers submit proposals without an explicit idempotency key.
+    """
+    try:
+        obs_repo = getattr(request.app.state, "observation_repo", None)
+        if obs_repo is not None:
+            clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
+            prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
+            dec_idemp = f"obs-dec-{body.idempotency_key}" if body.idempotency_key else None
+            exec_idemp = f"obs-exec-{body.idempotency_key}" if body.idempotency_key else None
+
+            # 1. Tool Action Proposal (Category 6)
+            await obs_repo.record_event({
+                "tenant_id": tenant_id,
+                "event_type": "TOOL_PROPOSAL_SUBMITTED",
+                "event_category": "TOOL_ACTION_PROPOSAL",
+                "agent_id": body.agent_id,
+                "action_id": body.action_id,
+                "trace_id": body.trace_id,
+                "source_component": "GATEWAY",
+                "tool_name": body.tool_name,
+                "outcome": "SUBMITTED",
+                "idempotency_key": prop_idemp,
+                "payload_json": {
+                    "operation": body.operation,
+                    "parameters": clean_params,
+                    "memory_refs": body.memory_refs,
+                },
+            })
+
+            # 2. Policy Decision (Category 7)
+            decision_val = getattr(decision, "decision", None) or getattr(decision, "decision_value", "UNKNOWN")
+            reason_codes = list(getattr(decision, "reason_codes", []))
+            await obs_repo.record_event({
+                "tenant_id": tenant_id,
+                "event_type": "POLICY_DECISION_EVALUATED",
+                "event_category": "POLICY_DECISION",
+                "agent_id": body.agent_id,
+                "action_id": body.action_id,
+                "trace_id": body.trace_id,
+                "source_component": "POLICY_ENGINE",
+                "policy_decision_id": getattr(decision, "decision_id", proposal_id),
+                "tool_name": body.tool_name,
+                "outcome": str(decision_val),
+                "idempotency_key": dec_idemp,
+                "payload_json": {
+                    "decision": str(decision_val),
+                    "reason_codes": reason_codes,
+                    "execution_status": execution_status,
+                },
+            })
+
+            # 3. Tool Execution Receipt (Category 8)
+            if execution_status in ("EXECUTED", "FAILED", "UNKNOWN"):
+                clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
+                await obs_repo.record_event({
+                    "tenant_id": tenant_id,
+                    "event_type": "TOOL_EXECUTION_RECEIPT",
+                    "event_category": "TOOL_EXECUTION_RECEIPT",
+                    "agent_id": body.agent_id,
+                    "action_id": body.action_id,
+                    "trace_id": body.trace_id,
+                    "source_component": "GATEWAY_ADAPTER",
+                    "tool_name": body.tool_name,
+                    "outcome": execution_status,
+                    "idempotency_key": exec_idemp,
+                    "payload_json": {
+                        "execution_status": execution_status,
+                        "result": clean_result,
+                    },
+                })
+    except Exception as exc:
+        logger.warning("Observation telemetry emission non-fatally bypassed: %s", exc)
+
+
 def _validate_finite_and_depth(val: Any, current_depth: int = 1) -> None:
     """Recursively enforce parameter depth and numeric finiteness."""
     if current_depth > MAX_PARAMETERS_DEPTH:
@@ -135,12 +236,15 @@ class ActionProposalRequest(BaseModel):
     )
     idempotency_key: str = Field(..., min_length=1, max_length=255, description="Client idempotency key")
     trace_id: str = Field(..., min_length=1, max_length=128, description="W3C trace context identifier")
+    approval_id: Optional[str] = Field(None, min_length=1, max_length=128, description="Pre-approved human approval ID")
 
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("action_id", "agent_id", "tool_name", "operation", "idempotency_key", "trace_id")
+    @field_validator("action_id", "agent_id", "tool_name", "operation", "idempotency_key", "trace_id", "approval_id")
     @classmethod
-    def validate_identifier_format(cls, v: str) -> str:
+    def validate_identifier_format(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
         s = v.strip()
         if not s:
             raise ValueError("Identifiers cannot be empty or whitespace only.")
@@ -1255,8 +1359,170 @@ async def propose_tool_action(
         "idempotency_key": body.idempotency_key,
         "trace_id": body.trace_id,
     }
-    decision = await engine.evaluate(proposal, context)
+
+    # Resolve approval evidence if approval_id is supplied (Phase 2 Action Enforcement)
+    approval_evidence: Optional[ApprovalEvidence] = None
+    if getattr(body, "approval_id", None):
+        approvals_store = getattr(request.app.state, "approvals_store", None)
+        appr_obj = None
+        if isinstance(approvals_store, dict):
+            appr_obj = approvals_store.get((tenant_id, body.approval_id))
+        if appr_obj is None and hasattr(gateway_repo, "get_approval"):
+            try:
+                res_appr = gateway_repo.get_approval(tenant_id, body.approval_id)
+                if inspect.isawaitable(res_appr):
+                    appr_obj = await res_appr
+                else:
+                    appr_obj = res_appr
+            except Exception:
+                appr_obj = None
+
+        if appr_obj is not None:
+            if isinstance(appr_obj, dict):
+                approval_evidence = ApprovalEvidence(
+                    approval_id=body.approval_id,
+                    tenant_id=tenant_id,
+                    status=appr_obj.get("status", "APPROVED"),
+                    proposal_fingerprint=appr_obj.get("proposal_fingerprint") or "",
+                    approver_user_id=appr_obj.get("approver_user_id", ""),
+                    approver_role=appr_obj.get("approver_role", Role.TENANT_ADMIN.value),
+                    expires_at=appr_obj.get("expires_at", datetime.now(timezone.utc)),
+                    consumed=bool(appr_obj.get("consumed", False)),
+                )
+            else:
+                approval_evidence = ApprovalEvidence(
+                    approval_id=body.approval_id,
+                    tenant_id=tenant_id,
+                    status=getattr(appr_obj, "status", "APPROVED"),
+                    proposal_fingerprint=getattr(appr_obj, "proposal_fingerprint", None) or "",
+                    approver_user_id=getattr(appr_obj, "approver_user_id", ""),
+                    approver_role=getattr(appr_obj, "approver_role", Role.TENANT_ADMIN.value),
+                    expires_at=getattr(appr_obj, "expires_at", datetime.now(timezone.utc)),
+                    consumed=bool(getattr(appr_obj, "consumed", False)),
+                )
+        else:
+            approval_evidence = ApprovalEvidence(
+                approval_id=body.approval_id,
+                tenant_id=tenant_id,
+                status="NOT_FOUND",
+                proposal_fingerprint="",
+                approver_user_id="",
+                approver_role="",
+                expires_at=datetime.now(timezone.utc),
+                consumed=False,
+            )
+
+    # Phase 2: Run pre-execution Detection Engine threat analysis
+    detection_engine = getattr(request.app.state, "detection_engine", None)
+    if detection_engine is None:
+        detection_engine = get_default_detection_engine()
+
+    tool_threats: List[Any] = []
+    beh_threats: List[Any] = []
+    try:
+        tool_threats = await detection_engine.detect_tool_threat(
+            tenant_id=tenant_id,
+            proposal_facts=proposal,
+            trace_id=body.trace_id,
+            action_id=body.action_id,
+        )
+    except Exception as exc:
+        logger.error("Detection engine tool threat evaluation failed: %s", exc)
+        tool_threats = [
+            DetectionResult(
+                id=f"det-{uuid.uuid4().hex[:16]}",
+                tenant_id=tenant_id,
+                detection_category=DetectionCategory.TOOL_EXECUTION_THREAT,
+                classification_type=DetectionClassificationType.CONFIRMED_POLICY_VIOLATION,
+                agent_id=body.agent_id,
+                trace_id=body.trace_id,
+                action_id=body.action_id,
+                detection_method=DetectionMethod.POLICY_VERIFICATION,
+                confidence_score=1.0,
+                uncertainty_state=UncertaintyState.INDETERMINATE,
+                severity=DetectionSeverity.CRITICAL,
+                recommended_outcome=RecommendedOutcome.BLOCK,
+                title="Detection Engine Evaluation Failure (Fail Closed)",
+                description="Detection engine failed during tool threat evaluation. Security policy fails closed.",
+                details={"reason_code": "POLICY_DEPENDENCY_UNAVAILABLE"},
+            )
+        ]
+
+    try:
+        beh_threats = await detection_engine.detect_behavioral_deviation(
+            tenant_id=tenant_id,
+            agent_id=body.agent_id,
+            proposal_facts=proposal,
+            agent_repo=agent_repo,
+            trace_id=body.trace_id,
+            action_id=body.action_id,
+        )
+    except Exception as exc:
+        logger.error("Detection engine behavioral deviation evaluation failed: %s", exc)
+        beh_threats = [
+            DetectionResult(
+                id=f"det-{uuid.uuid4().hex[:16]}",
+                tenant_id=tenant_id,
+                detection_category=DetectionCategory.BEHAVIORAL_DEVIATION,
+                classification_type=DetectionClassificationType.CONFIRMED_POLICY_VIOLATION,
+                agent_id=body.agent_id,
+                trace_id=body.trace_id,
+                action_id=body.action_id,
+                detection_method=DetectionMethod.POLICY_VERIFICATION,
+                confidence_score=1.0,
+                uncertainty_state=UncertaintyState.INDETERMINATE,
+                severity=DetectionSeverity.CRITICAL,
+                recommended_outcome=RecommendedOutcome.BLOCK,
+                title="Behavioral Detection Evaluation Failure (Fail Closed)",
+                description="Detection engine failed during behavioral evaluation. Security policy fails closed.",
+                details={"reason_code": "POLICY_DEPENDENCY_UNAVAILABLE"},
+            )
+        ]
+
+    detected_findings = tool_threats + beh_threats
+
+    decision = await engine.evaluate(proposal, context, approval=approval_evidence)
     record = decision.to_persistence_record()
+
+    # Fail closed: If detection engine found confirmed security incident or policy violation recommending BLOCK
+    has_blocking_detection = any(
+        d.recommended_outcome == RecommendedOutcome.BLOCK
+        and d.classification_type in (
+            DetectionClassificationType.CONFIRMED_POLICY_VIOLATION,
+            DetectionClassificationType.CONFIRMED_SECURITY_INCIDENT,
+        )
+        for d in detected_findings
+    )
+    if has_blocking_detection:
+        from dataclasses import replace
+        record["decision"] = "BLOCK"
+        record["execution_status"] = "NOT_EXECUTED"
+        blocking_findings = [d for d in detected_findings if d.recommended_outcome == RecommendedOutcome.BLOCK]
+        extra_reasons = [d.description for d in blocking_findings]
+        detection_reason_codes = tuple(
+            d.details.get("reason_code", "TOOL_THREAT_DETECTED")
+            for d in blocking_findings
+        )
+        existing_reasons = list(record.get("reasons_json") or [])
+        combined_reasons = list(detection_reason_codes) + [r for r in existing_reasons if r not in detection_reason_codes] + extra_reasons
+        combined_reason_codes = tuple(list(detection_reason_codes) + [c for c in decision.reason_codes if c not in detection_reason_codes])
+        record["reasons_json"] = combined_reasons
+        decision = replace(decision, outcome=PolicyOutcome.BLOCK, execution_eligible=False, reason_codes=combined_reason_codes)
+
+    if record["decision"] == "BLOCK":
+        detection_engine.record_blocked_event(tenant_id, body.agent_id)
+
+    # Record detections if repository is present
+    det_repo = getattr(request.app.state, "detection_repo", None)
+    if det_repo is not None:
+        for finding in detected_findings:
+            finding.policy_decision_id = decision.decision_id
+            try:
+                res = det_repo.record_detection(finding.to_dict())
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as exc:
+                logger.warning("Failed to record detection in gateway: %s", exc)
 
     proposal_id = str(uuid.uuid4())
     proposal_entity = ToolProposalEntity(
@@ -1348,6 +1614,9 @@ async def propose_tool_action(
                 code="PERSISTENCE_FAILURE",
                 status_code=500,
             ) from exc
+        await _emit_gateway_observations(
+            request, tenant_id, body, proposal_id, decision, record["execution_status"], None
+        )
         return response(record["decision"], record["execution_status"], list(decision.reason_codes))
 
     # 7. ALLOW: only M4's guard may dispatch (persist -> revalidate -> single-use grant -> adapter).
@@ -1374,7 +1643,23 @@ async def propose_tool_action(
             timeout=timeout,
         )
 
-    outcome = await guard.execute(decision, proposal, context, persist_decision=persist_decision, executor=executor)
+    outcome = await guard.execute(
+        decision,
+        proposal,
+        context,
+        persist_decision=persist_decision,
+        executor=executor,
+        approval=approval_evidence,
+    )
+
+    if outcome.executed and approval_evidence is not None:
+        approvals_store = getattr(request.app.state, "approvals_store", None)
+        if isinstance(approvals_store, dict):
+            stored = approvals_store.get((tenant_id, approval_evidence.approval_id))
+            if isinstance(stored, dict):
+                stored["consumed"] = True
+            elif stored is not None:
+                setattr(stored, "consumed", True)
 
     if not outcome.executed:
         codes = list(outcome.reason_codes)
@@ -1438,6 +1723,9 @@ async def propose_tool_action(
     await gateway_repo.record_execution_outcome(
         tenant_id=tenant_id, proposal_id=proposal_id, decision_id=decision.decision_id,
         execution=execution_entity, execution_status=execution_status,
+    )
+    await _emit_gateway_observations(
+        request, tenant_id, body, proposal_id, decision, execution_status, result_payload
     )
     return response(record["decision"], execution_status, list(outcome.reason_codes), result_payload)
 

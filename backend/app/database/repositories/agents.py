@@ -6,19 +6,22 @@ Spec: AMSC-DOC-005 Section 3.2, PRD FR-004, FR-005
 """
 
 from copy import deepcopy
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.app.api.agents import AgentEntity, AgentRepositoryProtocol, AgentVersionEntity
-from backend.app.core.exceptions import ValidationError
+from backend.app.core.exceptions import NotFoundError, ValidationError
 from backend.app.database.models.agents import (
     Agent as OrmAgent,
     AgentToolPermission as OrmAgentToolPermission,
     AgentVersion as OrmAgentVersion,
     ToolRegistration as OrmToolRegistration,
 )
+from backend.app.database.models.baseline import AgentSecurityProfile as OrmAgentSecurityProfile
 
 
 class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
@@ -204,3 +207,220 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                     "is_protected": tool.is_protected,
                 })
             return permissions
+
+    async def grant_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+        allowed_operations: str = "*",
+        constraints: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Grant or update tool permission for an agent."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                # Verify agent exists
+                stmt_agent = select(OrmAgent).where(
+                    OrmAgent.id == agent_id,
+                    OrmAgent.tenant_id == tenant_id,
+                )
+                agent = (await session.execute(stmt_agent)).scalar_one_or_none()
+                if not agent:
+                    raise NotFoundError(f"Agent '{agent_id}' not found.")
+
+                # Verify tool exists
+                stmt_tool = select(OrmToolRegistration).where(
+                    OrmToolRegistration.id == tool_id,
+                    OrmToolRegistration.tenant_id == tenant_id,
+                )
+                tool = (await session.execute(stmt_tool)).scalar_one_or_none()
+                if not tool:
+                    # Also try looking up tool by name
+                    stmt_tool_name = select(OrmToolRegistration).where(
+                        OrmToolRegistration.name == tool_id,
+                        OrmToolRegistration.tenant_id == tenant_id,
+                    )
+                    tool = (await session.execute(stmt_tool_name)).scalar_one_or_none()
+                    if not tool:
+                        raise NotFoundError(f"Tool registration '{tool_id}' not found.")
+                    tool_id = tool.id
+
+                # Upsert permission
+                stmt_perm = select(OrmAgentToolPermission).where(
+                    OrmAgentToolPermission.agent_id == agent_id,
+                    OrmAgentToolPermission.tool_id == tool_id,
+                    OrmAgentToolPermission.tenant_id == tenant_id,
+                )
+                perm = (await session.execute(stmt_perm)).scalar_one_or_none()
+                if perm is None:
+                    perm = OrmAgentToolPermission(
+                        id=f"perm-{uuid.uuid4().hex[:12]}",
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        tool_id=tool_id,
+                        allowed_operations=allowed_operations,
+                        constraints_json=constraints or {},
+                    )
+                    session.add(perm)
+                else:
+                    perm.allowed_operations = allowed_operations
+                    perm.constraints_json = constraints or {}
+
+                return {
+                    "tool_id": tool.id,
+                    "tool_name": tool.name,
+                    "adapter_type": tool.adapter_type,
+                    "allowed_operations": allowed_operations.split(",") if isinstance(allowed_operations, str) else list(allowed_operations),
+                    "constraints": constraints or {},
+                    "is_protected": tool.is_protected,
+                }
+
+    async def revoke_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+    ) -> bool:
+        """Revoke tool permission from an agent by tool ID or tool name."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                target_tool_ids = [tool_id]
+                stmt_tool = select(OrmToolRegistration.id).where(
+                    OrmToolRegistration.name == tool_id,
+                    OrmToolRegistration.tenant_id == tenant_id,
+                )
+                resolved_id = (await session.execute(stmt_tool)).scalar_one_or_none()
+                if resolved_id:
+                    target_tool_ids.append(resolved_id)
+
+                stmt = delete(OrmAgentToolPermission).where(
+                    OrmAgentToolPermission.tenant_id == tenant_id,
+                    OrmAgentToolPermission.agent_id == agent_id,
+                    OrmAgentToolPermission.tool_id.in_(target_tool_ids),
+                )
+                result = await session.execute(stmt)
+                return result.rowcount > 0
+
+    async def get_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch authoritative agent security profile."""
+        async with self.session_factory() as session:
+            stmt = select(OrmAgentSecurityProfile).where(
+                OrmAgentSecurityProfile.tenant_id == tenant_id,
+                OrmAgentSecurityProfile.agent_id == agent_id,
+            )
+            profile = (await session.execute(stmt)).scalar_one_or_none()
+            if profile is not None:
+                return {
+                    "id": profile.id,
+                    "tenant_id": profile.tenant_id,
+                    "agent_id": profile.agent_id,
+                    "owner_department": profile.owner_department,
+                    "approved_purpose": profile.approved_purpose,
+                    "approved_goals": profile.approved_goals_json or [],
+                    "branch_id": profile.branch_id,
+                    "data_scope": profile.data_scope_json or [],
+                    "operational_restrictions": profile.operational_restrictions_json or {},
+                    "approval_requirements": profile.approval_requirements_json or {},
+                    "profile_version": profile.profile_version,
+                    "status": profile.status,
+                    "governed_by_user_id": profile.governed_by_user_id,
+                    "created_at": profile.created_at.isoformat() if profile.created_at else None,
+                    "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+                }
+
+            # If no explicit profile row exists yet, check if agent exists and synthesize default profile
+            agent = await self.get_agent_by_id(agent_id, tenant_id)
+            if agent is None:
+                return None
+            return {
+                "id": f"prof-{agent.id}",
+                "tenant_id": agent.tenant_id,
+                "agent_id": agent.id,
+                "owner_department": "Enterprise Operations",
+                "approved_purpose": f"Approved business task execution for {agent.name}",
+                "approved_goals": ["Execute approved business operations within tenant and branch scope"],
+                "branch_id": agent.branch_id,
+                "data_scope": ["general:*"],
+                "operational_restrictions": {"max_parameter_depth": 5, "require_complete_mediation": True},
+                "approval_requirements": {"threshold_exceeded": "REQUIRE_HUMAN_APPROVAL"},
+                "profile_version": agent.config_version,
+                "status": agent.status,
+                "governed_by_user_id": "system",
+                "created_at": agent.created_at.isoformat() if agent.created_at else None,
+                "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+            }
+
+    async def update_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        profile_data: Dict[str, Any],
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Update or create authoritative agent security profile under independent governance."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                agent = await self.get_agent_by_id(agent_id, tenant_id)
+                if agent is None:
+                    raise NotFoundError(f"Agent '{agent_id}' not found.")
+
+                stmt = select(OrmAgentSecurityProfile).where(
+                    OrmAgentSecurityProfile.tenant_id == tenant_id,
+                    OrmAgentSecurityProfile.agent_id == agent_id,
+                )
+                profile = (await session.execute(stmt)).scalar_one_or_none()
+                now = datetime.now(timezone.utc)
+                if profile is None:
+                    profile = OrmAgentSecurityProfile(
+                        id=f"prof-{uuid.uuid4().hex[:12]}",
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        owner_department=profile_data.get("owner_department", "Enterprise Operations"),
+                        approved_purpose=profile_data.get("approved_purpose", ""),
+                        approved_goals_json=profile_data.get("approved_goals", []),
+                        branch_id=profile_data.get("branch_id", agent.branch_id),
+                        data_scope_json=profile_data.get("data_scope", []),
+                        operational_restrictions_json=profile_data.get("operational_restrictions", {}),
+                        approval_requirements_json=profile_data.get("approval_requirements", {}),
+                        profile_version=profile_data.get("profile_version", "v1.0.0"),
+                        status=profile_data.get("status", "ACTIVE"),
+                        governed_by_user_id=user_id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    session.add(profile)
+                else:
+                    profile.owner_department = profile_data.get("owner_department", profile.owner_department)
+                    profile.approved_purpose = profile_data.get("approved_purpose", profile.approved_purpose)
+                    profile.approved_goals_json = profile_data.get("approved_goals", profile.approved_goals_json)
+                    profile.branch_id = profile_data.get("branch_id", profile.branch_id)
+                    profile.data_scope_json = profile_data.get("data_scope", profile.data_scope_json)
+                    profile.operational_restrictions_json = profile_data.get("operational_restrictions", profile.operational_restrictions_json)
+                    profile.approval_requirements_json = profile_data.get("approval_requirements", profile.approval_requirements_json)
+                    profile.profile_version = profile_data.get("profile_version", profile.profile_version)
+                    profile.status = profile_data.get("status", profile.status)
+                    profile.governed_by_user_id = user_id
+                    profile.updated_at = now
+
+                return {
+                    "id": profile.id,
+                    "tenant_id": profile.tenant_id,
+                    "agent_id": profile.agent_id,
+                    "owner_department": profile.owner_department,
+                    "approved_purpose": profile.approved_purpose,
+                    "approved_goals": profile.approved_goals_json,
+                    "branch_id": profile.branch_id,
+                    "data_scope": profile.data_scope_json,
+                    "operational_restrictions": profile.operational_restrictions_json,
+                    "approval_requirements": profile.approval_requirements_json,
+                    "profile_version": profile.profile_version,
+                    "status": profile.status,
+                    "governed_by_user_id": profile.governed_by_user_id,
+                    "created_at": profile.created_at.isoformat() if profile.created_at else None,
+                    "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+                }
+

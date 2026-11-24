@@ -18,6 +18,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import inspect
 import json
 import logging
 import re
@@ -1555,6 +1556,8 @@ async def _execute_quarantine_flow(
 
     # 1. Record must exist in the caller's tenant (cross-tenant == not found).
     record = mem_repo.get_record(clean_record_id, tenant_id)
+    if inspect.isawaitable(record):
+        record = await record
     if not record:
         raise NotFoundError(f"Memory record '{clean_record_id}' not found.")
 

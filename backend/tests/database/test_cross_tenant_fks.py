@@ -184,7 +184,7 @@ async def test_delete_of_other_tenant_parent_does_not_touch_my_rows(factory: Row
 
 
 TENANT_ID_TABLES = sorted({r.child for r in TENANT_RELATIONSHIPS} | {r.parent for r in TENANT_RELATIONSHIPS} | {
-    "audit_events", "branches", "memberships", "outbox_events", "roles",
+    "audit_events", "branches", "memberships", "observation_events", "outbox_events", "roles",
 })
 
 

@@ -26,3 +26,26 @@ export interface ToolPermission {
   allowed_operations: string[];
   parameter_constraints?: Record<string, unknown>;
 }
+
+export interface AgentSecurityProfile {
+  agent_id: string;
+  tenant_id: string;
+  department: string;
+  approved_purpose: string;
+  approved_goals: string[];
+  authorized_data_scope: string[];
+  operational_restrictions: string[];
+  approval_requirements: string[];
+  profile_version: string;
+  is_active: boolean;
+  branch_id?: string | null;
+  tools: ToolPermission[];
+  updated_at: string;
+}
+
+export interface AgentToolPermissionGrantRequest {
+  tool_id: string;
+  tool_name?: string;
+  allowed_operations?: string[];
+  parameter_constraints?: Record<string, unknown>;
+}

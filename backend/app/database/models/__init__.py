@@ -10,6 +10,17 @@ from backend.app.database.models.agents import (
     AgentVersion,
     ToolRegistration,
 )
+from backend.app.database.models.baseline import (
+    AgentSecurityProfile,
+    BaselineGovernanceLog,
+    EnterpriseBaselineRecord,
+    EnterpriseBaselineVersion,
+    ObservationEvent,
+    TrustDecisionModel,
+)
+from backend.app.database.models.detection import (
+    DetectionResultModel,
+)
 from backend.app.database.models.gateway import (
     Approval,
     PolicyDecision,
@@ -64,15 +75,20 @@ __all__ = [
     "GLOBAL_TABLES",
     "NULLABLE_TENANT_TABLES",
     "Agent",
+    "AgentSecurityProfile",
     "AgentToolPermission",
     "AgentVersion",
     "Approval",
     "AuditEvent",
+    "BaselineGovernanceLog",
     "Branch",
     "Checkpoint",
     "CheckpointItem",
+    "DetectionResultModel",
     "Document",
     "DriftObservation",
+    "EnterpriseBaselineRecord",
+    "EnterpriseBaselineVersion",
     "Incident",
     "IncidentEvidence",
     "KnowledgeEntity",
@@ -80,6 +96,7 @@ __all__ = [
     "Membership",
     "MemoryRecord",
     "MemoryVersion",
+    "ObservationEvent",
     "OutboxEvent",
     "Permission",
     "PolicyDecision",
@@ -99,5 +116,6 @@ __all__ = [
     "Trace",
     "TraceSpan",
     "Transformation",
+    "TrustDecisionModel",
     "User",
 ]
