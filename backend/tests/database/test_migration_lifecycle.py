@@ -24,7 +24,7 @@ from backend.tests.database import helpers
 from backend.tests.database.schema_fingerprint import describe_difference, schema_fingerprint
 from backend.tests.database.seed_fixture import SeedResult, seed_dataset
 
-EXPECTED_TABLES = 37
+EXPECTED_TABLES = 44
 
 
 def _revisions() -> list[str]:
@@ -142,18 +142,41 @@ def test_seeded_database_goes_down_to_0001_and_back_up_without_losing_data(empty
     # Down, one revision at a time, to 0001 (0001 -> base would drop every table by design).
     for index in range(len(revisions) - 1, 0, -1):
         helpers.downgrade(empty_db, revisions[index - 1])
-        if revisions[index] == "0011":
+        if revisions[index] == "0014":
+            counts.pop("detection_results", None)
+        elif revisions[index] == "0013":
+            for t in (
+                "observation_events",
+                "agent_security_profiles",
+                "baseline_governance_logs",
+                "enterprise_baseline_versions",
+                "enterprise_baseline_records",
+                "trust_decisions",
+            ):
+                counts.pop(t, None)
+        elif revisions[index] == "0011":
             # 0011 owns registration_requests; its downgrade intentionally drops that feature table.
-            counts.pop("registration_requests")
+            counts.pop("registration_requests", None)
         assert _row_counts(empty_db) == counts, f"rows lost by downgrade {revisions[index]} -> {revisions[index - 1]}"
 
     # Up again, one revision at a time, to head (every pre-check must pass on this data).
-    # Recreating 0011 creates an empty registration_requests table; its request data was
+    # Recreating 0011/0013/0014 creates empty feature tables; request/detection data was
     # intentionally removed by the documented downgrade above.
     for rev in revisions[1:]:
         helpers.upgrade(empty_db, rev)
         if rev == "0011":
             counts["registration_requests"] = 0
+        elif rev == "0013":
+            counts.update({
+                "observation_events": 0,
+                "agent_security_profiles": 0,
+                "baseline_governance_logs": 0,
+                "enterprise_baseline_versions": 0,
+                "enterprise_baseline_records": 0,
+                "trust_decisions": 0,
+            })
+        elif rev == "0014":
+            counts["detection_results"] = 0
         assert _row_counts(empty_db) == counts, f"rows lost by upgrade to {rev}"
 
     _assert_intact(empty_db, seed)

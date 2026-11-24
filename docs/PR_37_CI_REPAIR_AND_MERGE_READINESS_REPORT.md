@@ -69,6 +69,14 @@ All 84 Ruff errors across the backend codebase were investigated and resolved at
 5. **Fresh-Clone Lifecycle Dependency (`backend/app/core/windows_compat.py`):**
    - *Root Cause:* Commit `790f143` refactored inline Proactor event loop patch logic into `import backend.app.core.windows_compat`, but the source module was omitted from version control.
    - *Fix:* Created `backend/app/core/windows_compat.py` guarded by `sys.platform == "win32"` to ensure seamless execution on Windows local environments and standard Linux CI runners.
+6. **Database Schema Rules & Tenant Ownership Invariants (`test_schema_rules.py:255`):**
+   - *Symptom:* `backend/tests/database/test_schema_rules.py:255: AssertionError: assert set(rules) == tenant_tables, "every tenant_id must have exactly one FK to tenants"` during CI PostgreSQL database tests.
+   - *Root Cause:* Newly added Phase 1 and Phase 2 tenant-owned tables (`trust_decisions`, `enterprise_baseline_records`, `enterprise_baseline_versions`, `baseline_governance_logs`, `agent_security_profiles`, `observation_events`, and `detection_results`) had `tenant_id` columns but lacked explicit foreign key constraints to `tenants.id`, immutability triggers (`trg_forbid_tenant_id_change`), and corresponding entries in `TENANT_RELATIONSHIPS`.
+   - *Fix:*
+     1. Added explicit `ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE")` to all 7 tables in Alembic migrations `0013` and `0014` and aligned ORM models in `baseline.py` and `detection.py`.
+     2. Attached `trg_forbid_tenant_id_change` immutability triggers (`amsc_forbid_tenant_id_change()`) to all 7 tables in migrations `0013` and `0014`.
+     3. Added supporting indexes for composite foreign keys (`idx_baseline_versions_tenant_baseline`, `idx_det_tenant_branch`).
+     4. Updated `backend/tests/database/relationships.py` (`TENANT_RELATIONSHIPS`), `test_migrations.py` (`EXPECTED_TABLE_COUNT = 44`), and `test_migration_lifecycle.py` (`EXPECTED_TABLES = 44`) with seed fixture entries for clean lifecycle round-tripping.
 
 ---
 

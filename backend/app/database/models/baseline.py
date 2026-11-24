@@ -79,7 +79,7 @@ class TrustDecisionModel(Base):
     __tablename__ = "trust_decisions"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     record_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     from_state: Mapped[str] = mapped_column(String(32), nullable=False)
     to_state: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -106,7 +106,7 @@ class EnterpriseBaselineRecord(Base):
     __tablename__ = "enterprise_baseline_records"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     branch_id: Mapped[Optional[str]] = mapped_column(String(ID_LENGTH), nullable=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     category: Mapped[str] = mapped_column(
@@ -163,7 +163,7 @@ class EnterpriseBaselineVersion(Base):
     __tablename__ = "enterprise_baseline_versions"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     baseline_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
@@ -181,6 +181,7 @@ class EnterpriseBaselineVersion(Base):
             ondelete="CASCADE",
         ),
         Index("idx_baseline_versions_hash", "content_sha256"),
+        Index("idx_baseline_versions_tenant_baseline", "tenant_id", "baseline_id"),
     )
 
 
@@ -190,7 +191,7 @@ class BaselineGovernanceLog(Base):
     __tablename__ = "baseline_governance_logs"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     baseline_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -222,7 +223,7 @@ class AgentSecurityProfile(Base):
     __tablename__ = "agent_security_profiles"
 
     id: Mapped[str] = id_column()
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     agent_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False, unique=True)
     owner_department: Mapped[str] = mapped_column(String(128), nullable=False)
     approved_purpose: Mapped[str] = mapped_column(Text, nullable=False)
@@ -274,7 +275,7 @@ class ObservationEvent(Base):
     __tablename__ = "observation_events"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     branch_id: Mapped[Optional[str]] = mapped_column(String(ID_LENGTH), nullable=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     event_category: Mapped[str] = mapped_column(String(64), nullable=False)

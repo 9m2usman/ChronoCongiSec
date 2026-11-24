@@ -45,6 +45,12 @@ def upgrade() -> None:
         ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_trust_decisions_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
             ["tenant_id", "record_id"],
             ["memory_records.tenant_id", "memory_records.id"],
             name="fk_trust_decisions_record_tenant",
@@ -79,6 +85,12 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("tenant_id", "id", name="uq_enterprise_baseline_records_tenant_id_id"),
         sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_enterprise_baseline_records_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
             ["tenant_id", "branch_id"],
             ["branches.tenant_id", "branches.id"],
             name="fk_baseline_records_branch_tenant",
@@ -106,6 +118,12 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("baseline_id", "version", name="uq_baseline_version"),
         sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_enterprise_baseline_versions_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
             ["tenant_id", "baseline_id"],
             ["enterprise_baseline_records.tenant_id", "enterprise_baseline_records.id"],
             name="fk_baseline_versions_record_tenant",
@@ -113,6 +131,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("idx_baseline_versions_hash", "enterprise_baseline_versions", ["content_sha256"])
+    op.create_index("idx_baseline_versions_tenant_baseline", "enterprise_baseline_versions", ["tenant_id", "baseline_id"])
 
     # 4. baseline_governance_logs table
     op.create_table(
@@ -126,6 +145,12 @@ def upgrade() -> None:
         sa.Column("actor_role", sa.String(length=64), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_baseline_governance_logs_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
         sa.ForeignKeyConstraint(
             ["tenant_id", "baseline_id"],
             ["enterprise_baseline_records.tenant_id", "enterprise_baseline_records.id"],
@@ -175,6 +200,12 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("tenant_id", "id", name="uq_agent_security_profiles_tenant_id_id"),
         sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_agent_security_profiles_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
             ["tenant_id", "agent_id"],
             ["agents.tenant_id", "agents.id"],
             name="fk_agent_profiles_agent_tenant",
@@ -221,14 +252,45 @@ def upgrade() -> None:
         ),
         sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("tenant_id", "idempotency_key", name="uq_obs_tenant_idemp"),
+        sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_observation_events_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
     )
     op.create_index("idx_obs_tenant_occurred", "observation_events", ["tenant_id", "occurred_at"])
     op.create_index("idx_obs_tenant_trace", "observation_events", ["tenant_id", "trace_id"])
     op.create_index("idx_obs_tenant_agent", "observation_events", ["tenant_id", "agent_id"])
     op.create_index("idx_obs_tenant_category", "observation_events", ["tenant_id", "event_category"])
 
+    for table in (
+        "trust_decisions",
+        "enterprise_baseline_records",
+        "enterprise_baseline_versions",
+        "baseline_governance_logs",
+        "agent_security_profiles",
+        "observation_events",
+    ):
+        op.execute(
+            f"CREATE TRIGGER trg_forbid_tenant_id_change "
+            f"BEFORE UPDATE OF tenant_id ON {table} "
+            f"FOR EACH ROW EXECUTE FUNCTION amsc_forbid_tenant_id_change()"
+        )
+
 
 def downgrade() -> None:
+    for table in (
+        "observation_events",
+        "agent_security_profiles",
+        "baseline_governance_logs",
+        "enterprise_baseline_versions",
+        "enterprise_baseline_records",
+        "trust_decisions",
+    ):
+        op.execute(f"DROP TRIGGER IF EXISTS trg_forbid_tenant_id_change ON {table}")
+
+    op.drop_index("idx_baseline_versions_tenant_baseline", table_name="enterprise_baseline_versions")
     op.drop_table("observation_events")
     op.drop_table("agent_security_profiles")
     op.drop_table("baseline_governance_logs")

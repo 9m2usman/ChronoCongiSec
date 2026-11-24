@@ -96,7 +96,7 @@ class DetectionResultModel(Base):
     __tablename__ = "detection_results"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    tenant_id: Mapped[str] = tenant_id_column(ondelete="RESTRICT")
+    tenant_id: Mapped[str] = tenant_id_column(ondelete="CASCADE")
     branch_id: Mapped[Optional[str]] = mapped_column(String(ID_LENGTH), nullable=True)
     detection_category: Mapped[str] = mapped_column(String(64), nullable=False)
     classification_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -138,6 +138,7 @@ class DetectionResultModel(Base):
         Index("idx_det_tenant_trace", "tenant_id", "trace_id"),
         Index("idx_det_tenant_status", "tenant_id", "status"),
         Index("idx_det_tenant_classification", "tenant_id", "classification_type"),
+        Index("idx_det_tenant_branch", "tenant_id", "branch_id"),
         CheckConstraint(
             "detection_category IN ("
             + ", ".join(f"'{c}'" for c in DETECTION_CATEGORIES)

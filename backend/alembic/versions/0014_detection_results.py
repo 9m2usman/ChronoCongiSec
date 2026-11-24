@@ -72,6 +72,12 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("tenant_id", "id", name="uq_detection_results_tenant_id_id"),
         sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name=op.f("fk_detection_results_tenant_id_tenants"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
             ["tenant_id", "branch_id"],
             ["branches.tenant_id", "branches.id"],
             name="fk_detection_results_branch_tenant",
@@ -104,9 +110,18 @@ def upgrade() -> None:
     op.create_index("idx_det_tenant_trace", "detection_results", ["tenant_id", "trace_id"])
     op.create_index("idx_det_tenant_status", "detection_results", ["tenant_id", "status"])
     op.create_index("idx_det_tenant_classification", "detection_results", ["tenant_id", "classification_type"])
+    op.create_index("idx_det_tenant_branch", "detection_results", ["tenant_id", "branch_id"])
+
+    op.execute(
+        "CREATE TRIGGER trg_forbid_tenant_id_change "
+        "BEFORE UPDATE OF tenant_id ON detection_results "
+        "FOR EACH ROW EXECUTE FUNCTION amsc_forbid_tenant_id_change()"
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER IF EXISTS trg_forbid_tenant_id_change ON detection_results")
+    op.drop_index("idx_det_tenant_branch", table_name="detection_results")
     op.drop_index("idx_det_tenant_classification", table_name="detection_results")
     op.drop_index("idx_det_tenant_status", table_name="detection_results")
     op.drop_index("idx_det_tenant_trace", table_name="detection_results")

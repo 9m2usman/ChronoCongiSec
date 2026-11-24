@@ -65,6 +65,14 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("memberships", "branch_id", "branches", "RESTRICT"),
     Rel("registration_requests", "assigned_branch_id", "branches", "RESTRICT"),
     Rel("registration_requests", "reviewed_by_user_id", "memberships", "RESTRICT", "user_id"),
+    # Phase 1 & 2 additions:
+    Rel("trust_decisions", "record_id", "memory_records", "CASCADE"),
+    Rel("enterprise_baseline_records", "branch_id", "branches", "RESTRICT"),
+    Rel("enterprise_baseline_versions", "baseline_id", "enterprise_baseline_records", "CASCADE"),
+    Rel("baseline_governance_logs", "baseline_id", "enterprise_baseline_records", "CASCADE"),
+    Rel("agent_security_profiles", "agent_id", "agents", "CASCADE"),
+    Rel("agent_security_profiles", "branch_id", "branches", "RESTRICT"),
+    Rel("detection_results", "branch_id", "branches", "RESTRICT"),
 )
 
 class LinkedRel(NamedTuple):
