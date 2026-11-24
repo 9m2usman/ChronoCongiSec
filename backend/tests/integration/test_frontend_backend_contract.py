@@ -40,6 +40,6 @@ def test_containment_apply(client):
 
 def test_containment_recommendations(client):
     """Test the containment recommendations endpoint."""
-    # This test assumes a valid JWT token is required for authenticated requests
-    response = client.get("/api/v1/security/containment/recommendations")
+    # This endpoint requires a POST request, not GET
+    response = client.post("/api/v1/security/containment/recommendations", json={"incident_id": "inc-001"})
     assert response.status_code == 401  # Expecting unauthorized without token

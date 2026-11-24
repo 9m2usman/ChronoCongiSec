@@ -20,6 +20,7 @@ class BenchmarkEnv:
         self.w = World()
         self.wf = QuarantineWorkflow(self.w.trust, self.w.repo)
         self.benchmark_results = {}
+        self.persisted_evidence = []
 
     def create_memory_record(self, content="Test memo content"):
         return self.w.memory(content=content, agent_id=AGENT)
@@ -30,13 +31,30 @@ class BenchmarkEnv:
             for i in range(num_records)
         ]
 
+        self.persisted_evidence = []
+
+        async def persist_evidence(outcome):
+            self.persisted_evidence.append(outcome)
+
+        outcomes = []
+
         start_time = time.time()
         for record in records:
-            await self.wf.quarantine(
-                ANALYST, {"record_id": record, "reason": "Benchmark quarantine"}
+            outcome = await self.wf.quarantine(
+                ANALYST,
+                {"record_id": record, "reason": "Benchmark quarantine"},
+                persist_evidence=persist_evidence,
             )
-
+            outcomes.append(outcome)
         end_time = time.time()
+
+        # Verify each operation succeeded
+        for outcome in outcomes:
+            assert outcome.success
+
+        # Verify the expected number of evidence records were persisted
+        assert len(self.persisted_evidence) == num_records
+
         return end_time - start_time
 
     def get_benchmark_results(self):
