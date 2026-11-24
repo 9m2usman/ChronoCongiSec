@@ -170,14 +170,111 @@ Branch `feat/integration-verification` (from `main` @ `30fe3eb`). Findings were 
 
 ### 10.2 Open (verified to still exist)
 
-| ID | Owner | Gap | What is needed |
-|---|---|---|---|
-| OPEN-01 | M1 + M6 | `create_app` never creates `app.state.db_session_factory`. In production every persistence-backed service (gateway, incidents, traces, drift, audit, trust store) is therefore unavailable (503 by design). | Create the M6 engine/session factory at startup from `DATABASE_URL` (owner role vs app role per OD-18). |
-| OPEN-02 | M6 (+ M4) | No durable trust-decision store; M4 refuses the in-memory one outside development/test. | Implement against `test_trust_store_contract.py`; resolve sync evaluator vs async UoW. |
-| OPEN-03 | M1 + M6 | Agent registry has only `InMemoryAgentRepository`; tool permissions have no writer. | SQLAlchemy repository on M6 `agents`/`agent_versions`/`agent_tool_permissions`. |
-| OPEN-04 | M3 + M5 | ChroniMem contract mismatch: backend `GET /chronimem/timeline` takes `agent_id` and returns `TimelineEvent[]`; client sends `record_id` and expects `{record_id, versions[]}`. `/chronimem/records/{id}/compare` is unused by the client. | Agree one canonical contract (Doc 05) and align both sides. |
-| OPEN-05 | M6 + M7 | PostgreSQL RLS and the restricted app role are designed (M6 Day 6) but not enabled; nothing verified on PostgreSQL in this pass. | Run CI with PostgreSQL; enable RLS after OD-11/OD-18 prerequisites. |
-| OPEN-06 | M3/M6 + M4 | Recovery ports: no checkpoint reader, recovery-plan store or external-action reader exist, so the recovery service is not wired (routes return 503). | Providers per `docs/security-design/m4-integration-contracts.md` §5.2. |
-| OPEN-07 | M2 | No proposal controller/runtime exists; the M1 gateway is the only proposal path. | Out of scope for this pass (M2 excluded). |
-| OPEN-08 | Owner decision | `src/chronocongisec/security/{gateway,audit}.py` (PR #21) duplicates gateway/audit logic as a standalone research package. Not imported by the backend. | Decide: keep as research library (documented) or retire. |
-| OPEN-09 | All | Local verification used Python 3.14; CI/Docker use 3.12. | Confirm on CI. |
+| ID | Owner | Gap | What is needed | Status |
+|---|---|---|---|---|
+| OPEN-01 | M1 + M6 | `create_app` never creates `app.state.db_session_factory`. In production every persistence-backed service (gateway, incidents, traces, drift, audit, trust store) is therefore unavailable (503 by design). | Create the M6 engine/session factory at startup from `DATABASE_URL` (owner role vs app role per OD-18). | Open (deferred to production deployment / orchestration phase) |
+| OPEN-02 | M6 (+ M4) | No durable trust-decision store; M4 refuses the in-memory one outside development/test. | Implement against `test_trust_store_contract.py`; resolve sync evaluator vs async UoW. | **RESOLVED (Phase 1, VULN-001)**: `SqlTrustDecisionStore` updated to persist to `TrustDecisionModel` (`trust_decisions`) via SQLAlchemy session in `backend/app/recovery/store.py` (Alembic 0013). |
+| OPEN-03 | M1 + M6 | Agent registry has only `InMemoryAgentRepository`; tool permissions have no writer. | SQLAlchemy repository on M6 `agents`/`agent_versions`/`agent_tool_permissions`. | **RESOLVED (Phase 1, VULN-003)**: Added `grant_tool_permission` and `revoke_tool_permission` to `SqlAlchemyAgentRepository` and `InMemoryAgentRepository`. Added `POST/DELETE /agents/{id}/permissions` and authoritative `agent_security_profiles` endpoints with self-modification prevention. |
+| OPEN-04 | M3 + M5 | ChroniMem contract mismatch: backend `GET /chronimem/timeline` takes `agent_id` and returns `TimelineEvent[]`; client sends `record_id` and expects `{record_id, versions[]}`. `/chronimem/records/{id}/compare` is unused by the client. | Agree one canonical contract (Doc 05) and align both sides. | **RESOLVED (Phase 1, VULN-004)**: `GET /chronimem/timeline` updated to support optional `record_id` query param returning `{record_id, versions: [...]}` matching frontend contract and test requirements. |
+| OPEN-05 | M6 + M7 | PostgreSQL RLS and the restricted app role are designed (M6 Day 6) but not enabled; nothing verified on PostgreSQL in this pass. | Run CI with PostgreSQL; enable RLS after OD-11/OD-18 prerequisites. | Open (PostgreSQL production cluster milestone) |
+| OPEN-06 | M3/M6 + M4 | Recovery ports: no checkpoint reader, recovery-plan store or external-action reader exist, so the recovery service is not wired (routes return 503). | Providers per `docs/security-design/m4-integration-contracts.md` §5.2. | Open (Phase 2/3 automated recovery scope) |
+| OPEN-07 | M2 | No proposal controller/runtime exists; the M1 gateway is the only proposal path. | Out of scope for this pass (M2 excluded). | Retained by design |
+| OPEN-08 | Owner decision | `src/chronocongisec/security/{gateway,audit}.py` (PR #21) duplicates gateway/audit logic as a standalone research package. Not imported by the backend. | Decide: keep as research library (documented) or retire. | Open |
+| OPEN-09 | All | Local verification used Python 3.14; CI/Docker use 3.12. | Confirm on CI. | Open |
+
+---
+
+## 11. Phase 1 — Enterprise Baseline & Observation Foundation Resolution (2026-11-24)
+
+### 11.1 Remediated Vulnerabilities and Closed Gaps
+
+1. **VULN-001 / OPEN-02 (Durable Trust Store Persistence)**:
+   - Upgraded `SqlTrustDecisionStore` in `backend/app/recovery/store.py` to persist `TrustDecisionModel` (`trust_decisions`) records with tenant context, decision, risk score, reasons, and timestamp.
+   - Backed by Alembic migration `0013_trust_decisions_baseline_and_observation.py`.
+2. **VULN-002 (Missing Redis Dependency)**:
+   - Added `redis>=5.0.0` to `backend/requirements.txt` to prevent runtime failure during non-in-memory limiter initialization.
+3. **VULN-003 / OPEN-03 (Agent Tool Permission Management & Security Profiles)**:
+   - Implemented `grant_tool_permission` and `revoke_tool_permission` on both `SqlAlchemyAgentRepository` and `InMemoryAgentRepository`.
+   - Added REST endpoints: `POST /api/v1/agents/{agent_id}/permissions` and `DELETE /api/v1/agents/{agent_id}/permissions/{tool_id}`.
+   - Created authoritative `AgentSecurityProfile` persistence and endpoints (`GET/PUT /api/v1/agents/{agent_id}/profile`) enforcing independent governance: agents cannot self-modify their profiles or escalate privileges.
+4. **VULN-004 / OPEN-04 (ChroniMem Timeline API Contract Mismatch & Mock Removal)**:
+   - Enhanced `GET /api/v1/chronimem/timeline` to accept optional `record_id: Optional[str] = Query(None)`. When provided, returns `ChroniMemRecordTimelineResponse` with `versions` array matching frontend expectations. When `agent_id` is supplied, returns `TimelineEvent[]`.
+   - Fixed argument order inversion in `chronimem.py` (`repo.get_record(record_id, tenant_id)`).
+   - Removed insecure mock fallback that returned fake `TRUSTED` data for non-existent records; enforced strict `NotFoundError(404)`.
+   - Seeded demo memory record `rec-8812-441a` with real immutable versions and SHA-256 digests in default repository.
+5. **Independently Governed Enterprise Baseline (Phase 1 Baseline)**:
+   - Implemented authoritative enterprise baseline repositories and endpoints (`/api/v1/baseline`) supporting full governance lifecycle: `CREATE`, `REVIEW`, `APPROVE`, `ACTIVATE`, `SUPERSEDE`, `REVOKE`, `ARCHIVE`.
+   - Baseline records are strictly isolated by tenant and branch, with explicit supersession lineage and content SHA-256 integrity checks.
+   - Mutable agent memory writes can NEVER automatically become approved enterprise baseline records.
+   - Blocked agent user tokens (`AGENT_RUNNER`) from performing lifecycle mutations (403 Forbidden).
+   - Handled concurrent version conflicts by catching `IntegrityError` on unique constraints and returning `ConflictError(409)`.
+6. **Observation & Telemetry Foundation (Phase 1 Observation)**:
+   - Implemented `POST/GET /api/v1/observation/events` supporting 10 canonical event categories with `@field_validator` category membership enforcement.
+   - Automated secret and sensitive data scrubbing (passwords, tokens, api keys, auth headers) across proposal parameters and execution results.
+   - Trace correlation using W3C `traceparent` headers across Gateway and agent adapters.
+   - Deduplication via `idempotency_key` with race-condition handling in `SqlAlchemyObservationRepository`.
+   - Realigned `SqlTrustDecisionStore` to match actual `TrustDecision` dataclass attributes, eliminating double-dispatch and constructor `TypeError` bugs.
+
+---
+
+## 12. Phase 2 — Detection & Action Security Resolution (2026-11-24)
+
+### 12.1 Remediated Vulnerabilities and Closed Gaps
+
+1. **Memory & Knowledge Integrity Detection**:
+   - Implemented `DetectionEngine.detect_memory_integrity`:
+     - Cryptographic content hash verification against immutable memory versions (detects payload tampering).
+     - Modification attempts on `QUARANTINED` and `LOCKED` memory records flagged as high-severity violations.
+     - Cross-agent memory modification attempts flagged as severe boundary violations.
+     - Heuristic indirect prompt injection detection (detects override delimiters, boundary escapes, system prompt extraction prompts).
+     - Memory poisoning indicators (privilege escalation syntax, unauthorized policy overrides).
+     - Inadmissible promotion guard: unverified or suspicious derived memory can never be promoted to `TRUSTED` status.
+   - Implemented `DetectionEngine.detect_provenance_and_baseline_integrity`:
+     - Flags missing, invalid, or cyclic provenance DAG structures.
+     - Flags expired, revoked, superseded, or non-active enterprise baseline references.
+     - Blocks and records unauthorized attempts to mutate approved enterprise baseline records.
+
+2. **Semantic Integrity & Claim Validation**:
+   - Implemented `DetectionEngine.detect_semantic_integrity`:
+     - Grounding verification of agent-retrieved claims against approved baseline records.
+     - Detects unsupported claims presented as authoritative facts.
+     - Summary semantic fidelity evaluation detecting critical omissions or unwarranted divergence.
+     - Direct contradiction and negation detection between source memories and derived records.
+     - Explicit tracking of evidence items, method, and confidence/uncertainty scoring, strictly distinguishing deterministic rules from model-assisted heuristics.
+
+3. **Agent Behavior & Purpose Deviation Detection**:
+   - Implemented `DetectionEngine.detect_behavioral_deviation`:
+     - Authoritative comparison of agent actions against independently governed `AgentSecurityProfile`.
+     - Detects actions outside authorized purpose or scope.
+     - Enforces data classification ceilings (`CONFIDENTIAL`, `RESTRICTED`) and branch boundary confinement.
+     - Detects attempts to tamper with or influence privileged system prompts.
+     - Flags abnormal repeated action bursts while distinguishing benign operational anomalies from confirmed policy violations.
+
+4. **Tool & Execution Threat Detection**:
+   - Implemented `DetectionEngine.detect_tool_threat`:
+     - Pre-execution static payload analysis scanning for destructive shell patterns (`rm -rf`, `format`, `dd`), destructive SQL commands (`DROP TABLE`, `TRUNCATE`), and command injection tokens.
+     - Evaluates requested parameters against authorized ceilings and operational constraints.
+     - Evaluates agent identity, profile version, tenant, branch, and data classification.
+
+5. **Deterministic Policy Enforcement Hardening**:
+   - Hardened Gateway and Policy Engine in `backend/app/security/policy.py` and `backend/app/api/gateway.py`:
+     - Supported outcomes strictly limited to `ALLOW`, `BLOCK`, `REQUIRE_HUMAN_APPROVAL`.
+     - Self-approval prevention: blocks approvals where `approver_user_id == agent_id` or `approver_user_id == context.user_id` (`APPROVAL_SELF_APPROVAL`).
+     - Approval replay prevention: marks approvals as `consumed = True` upon successful action execution and rejects reused approvals (`APPROVAL_ALREADY_USED`).
+     - Scope mismatch prevention: derives canonical `proposal_fingerprint` over proposal attributes and rejects approvals targeting a different action, tool, operation, or parameters (`APPROVAL_SCOPE_MISMATCH`).
+     - Expiration validation: rejects expired approvals (`APPROVAL_EXPIRED`).
+     - Fail-closed evaluation: defaults to `BLOCK` when authorization cannot be established or critical dependencies are missing/indeterminate.
+     - Complete mediation: confirmed tool or behavioral threats directly override policy decisions to `BLOCK`, failing closed before execution.
+
+6. **Detection Result Contract & Multi-Tenant Isolation**:
+   - Implemented declarative `DetectionResultModel` (`detection_results` table) in `backend/app/database/models/detection.py` backed by Alembic migration `0014_detection_results.py`.
+   - Implemented `InMemoryDetectionRepository` and `SqlAlchemyDetectionRepository` supporting full audit logging, review transitions, and tenant/branch isolation.
+   - Added REST endpoints in `backend/app/api/detection.py` for listing, retrieving, evaluating, and reviewing detection results.
+   - Aligned frontend TypeScript contracts (`DetectionResult`, `DetectionCategory`, `DetectionSeverity`, `DetectionClassificationType`) and API client methods in `frontend/src/services/apiClient.ts`.
+
+### 12.2 Verification Record
+- **Phase 2 Test Suite (`backend/tests/unit/test_phase2_detection_and_action_security.py`)**: 28/28 tests passed (100%).
+- **Phase 1 Test Suite (`backend/tests/unit/test_phase1_baseline_and_observation.py`)**: 27/27 tests passed (100%).
+- **Security Test Suite (`backend/tests/security/`)**: 1,252 passed, 5 skipped (100%).
+- **Frontend Test Suite (`npm test`)**: 54/54 tests passed across 7 test suites (100%).
+- **Frontend Production Build (`npm run build`)**: Vite production build succeeded with 0 errors.

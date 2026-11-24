@@ -9,3 +9,6 @@ export * from './chronimem';
 export * from './drift';
 export * from './recovery';
 export * from './audit';
+export * from './baseline';
+export * from './observation';
+export * from './detection';

@@ -130,6 +130,8 @@ def jsonb_object_column(name: str | None = None) -> Mapped[dict[str, Any]]:
     return mapped_column(name, JSONB, nullable=False, server_default=EMPTY_OBJECT)
 
 
-def jsonb_array_column() -> Mapped[list[Any]]:
+def jsonb_array_column(name: str | None = None) -> Mapped[list[Any]]:
     """JSONB NOT NULL DEFAULT '[]'::jsonb."""
-    return mapped_column(JSONB, nullable=False, server_default=EMPTY_ARRAY)
+    if name is None:
+        return mapped_column(JSONB, nullable=False, server_default=EMPTY_ARRAY)
+    return mapped_column(name, JSONB, nullable=False, server_default=EMPTY_ARRAY)

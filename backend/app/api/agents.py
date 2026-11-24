@@ -31,10 +31,12 @@ from backend.app.core.dependencies import (
 )
 from backend.app.core.exceptions import (
     AMSCException,
+    ForbiddenError,
     NotFoundError,
     SecurityDependencyError,
     ValidationError,
 )
+from backend.app.api.audit import record_audit_event
 from backend.app.tenancy.context import TenantContext
 
 logger = logging.getLogger("amsc.api.agents")
@@ -142,6 +144,44 @@ class AgentRepositoryProtocol(Protocol):
         tenant_id: str,
     ) -> List[Dict[str, Any]]:
         """Retrieve read-only tool permissions for agent (owned by M2/M6)."""
+        ...
+
+    async def grant_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+        allowed_operations: str = "*",
+        constraints: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Grant or update tool permission for an agent (TENANT_ADMIN governance)."""
+        ...
+
+    async def revoke_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+    ) -> bool:
+        """Revoke tool permission from an agent (TENANT_ADMIN governance)."""
+        ...
+
+    async def get_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch authoritative agent security profile."""
+        ...
+
+    async def update_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        profile_data: Dict[str, Any],
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Update authoritative agent security profile under independent governance."""
         ...
 
 
@@ -260,6 +300,121 @@ class InMemoryAgentRepository:
             return []
         return deepcopy(self._tool_permissions.get(agent_id, []))
 
+    async def grant_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+        allowed_operations: str = "*",
+        constraints: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        agent = await self.get_agent_by_id(agent_id, tenant_id)
+        if agent is None:
+            raise NotFoundError(f"Agent '{agent_id}' not found.")
+
+        perms = self._tool_permissions.setdefault(agent_id, [])
+        # Check if already exists
+        existing = next((p for p in perms if p.get("tool_id") == tool_id or p.get("tool_name") == tool_id), None)
+        ops = allowed_operations.split(",") if isinstance(allowed_operations, str) else list(allowed_operations)
+        if existing is not None:
+            existing["allowed_operations"] = ops
+            existing["constraints"] = constraints or {}
+            return deepcopy(existing)
+        new_perm = {
+            "tool_id": tool_id,
+            "tool_name": tool_id,
+            "adapter_type": "INTERNAL",
+            "allowed_operations": ops,
+            "constraints": constraints or {},
+            "is_protected": True,
+        }
+        perms.append(new_perm)
+        return deepcopy(new_perm)
+
+    async def revoke_tool_permission(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_id: str,
+    ) -> bool:
+        agent = await self.get_agent_by_id(agent_id, tenant_id)
+        if agent is None:
+            return False
+        perms = self._tool_permissions.get(agent_id, [])
+        initial_len = len(perms)
+        self._tool_permissions[agent_id] = [p for p in perms if p.get("tool_id") != tool_id and p.get("tool_name") != tool_id]
+        return len(self._tool_permissions[agent_id]) < initial_len
+
+    async def get_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not hasattr(self, "_profiles"):
+            self._profiles = {}
+        profile = self._profiles.get((tenant_id, agent_id))
+        if profile is not None:
+            return deepcopy(profile)
+
+        agent = await self.get_agent_by_id(agent_id, tenant_id)
+        if agent is None:
+            return None
+
+        # Synthesize authoritative profile
+        return {
+            "id": f"prof-{agent.id}",
+            "tenant_id": agent.tenant_id,
+            "agent_id": agent.id,
+            "owner_department": "Enterprise Operations",
+            "approved_purpose": f"Approved business task execution for {agent.name}",
+            "approved_goals": ["Execute approved business operations within tenant and branch scope"],
+            "branch_id": agent.branch_id,
+            "data_scope": ["general:*"],
+            "operational_restrictions": {"max_parameter_depth": 5, "require_complete_mediation": True},
+            "approval_requirements": {"threshold_exceeded": "REQUIRE_HUMAN_APPROVAL"},
+            "profile_version": agent.config_version,
+            "status": agent.status,
+            "governed_by_user_id": "system",
+            "created_at": agent.created_at.isoformat() if agent.created_at else None,
+            "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+        }
+
+    async def update_agent_profile(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        profile_data: Dict[str, Any],
+        user_id: str,
+    ) -> Dict[str, Any]:
+        agent = await self.get_agent_by_id(agent_id, tenant_id)
+        if agent is None:
+            raise NotFoundError(f"Agent '{agent_id}' not found.")
+
+        if not hasattr(self, "_profiles"):
+            self._profiles = {}
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        current = await self.get_agent_profile(agent_id, tenant_id) or {}
+        updated = {
+            "id": current.get("id", f"prof-{agent_id}"),
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "owner_department": profile_data.get("owner_department", current.get("owner_department", "Enterprise Operations")),
+            "approved_purpose": profile_data.get("approved_purpose", current.get("approved_purpose", "")),
+            "approved_goals": profile_data.get("approved_goals", current.get("approved_goals", [])),
+            "branch_id": profile_data.get("branch_id", current.get("branch_id", agent.branch_id)),
+            "data_scope": profile_data.get("data_scope", current.get("data_scope", [])),
+            "operational_restrictions": profile_data.get("operational_restrictions", current.get("operational_restrictions", {})),
+            "approval_requirements": profile_data.get("approval_requirements", current.get("approval_requirements", {})),
+            "profile_version": profile_data.get("profile_version", current.get("profile_version", "v1.0.0")),
+            "status": profile_data.get("status", current.get("status", "ACTIVE")),
+            "governed_by_user_id": user_id,
+            "created_at": current.get("created_at", now_iso),
+            "updated_at": now_iso,
+        }
+        self._profiles[(tenant_id, agent_id)] = updated
+        return deepcopy(updated)
+
 
 _default_agent_repo: Optional[AgentRepositoryProtocol] = None
 
@@ -357,6 +512,83 @@ def seed_demo_agents(repo: InMemoryAgentRepository) -> InMemoryAgentRepository:
             "is_protected": True,
         }
     ]
+
+    # Seed authoritative security profiles (Phase 1 §2.B)
+    if not hasattr(repo, "_profiles"):
+        repo._profiles = {}
+
+    profiles_seed = [
+        (
+            "agent-crew-support-001",
+            "Customer Support",
+            "Customer Support Specialist handling ticket resolution and refunds under governance.",
+            ["Resolve customer inquiries", "Process eligible refund tickets within policy"],
+            "branch-ho-001",
+            ["support:*", "customer:read", "policy:refund"],
+            {"max_refund_amount": 300.0, "disallow_external_disbursements": True},
+            {"refund_over_300": "MANAGER_APPROVAL"},
+        ),
+        (
+            "agent-crew-hr-002",
+            "Human Resources",
+            "HR Operations Specialist answering policy inquiries and leave requests.",
+            ["Answer policy questions", "Log employee leave requests"],
+            "branch-isb-004",
+            ["hr:*", "handbook:read"],
+            {"disallow_salary_modifications": True, "disallow_financial_actions": True},
+            {"policy_exception": "HR_DIRECTOR_APPROVAL"},
+        ),
+        (
+            "agent-crew-finance-003",
+            "Finance Operations",
+            "Finance Operations Specialist auditing corporate expenses and submitting disbursements.",
+            ["Audit corporate expenses", "Submit approved supplier disbursements"],
+            "branch-lhr-002",
+            ["finance:*", "invoices:read", "policy:disbursement"],
+            {"max_transfer_amount": 500.0, "disallow_unregistered_recipients": True},
+            {"transfer_over_300": "DUAL_CUSTODY_APPROVAL"},
+        ),
+        (
+            "agent-crew-branch-004",
+            "Branch Operations",
+            "Branch Operations Specialist managing regional branch operations and Head Office synchronization.",
+            ["Manage branch inventory", "Handle local branch operations"],
+            "branch-khi-003",
+            ["branch:khi:*", "inventory:read"],
+            {"branch_isolated": True, "disallow_cross_branch_mutations": True},
+            {"cross_branch_request": "HEAD_OFFICE_APPROVAL"},
+        ),
+        (
+            "agent-crew-coord-005",
+            "Executive Operations",
+            "Enterprise Workflow Coordinator delegating cross-department initiatives.",
+            ["Route cross-department workflows", "Coordinate task handoffs"],
+            "branch-ho-001",
+            ["coordination:*"],
+            {"disallow_direct_tool_execution": True},
+            {"workflow_escalation": "EXECUTIVE_APPROVAL"},
+        ),
+    ]
+
+    for aid, dept, purpose, goals, bid, scope, restr, app_reqs in profiles_seed:
+        repo._profiles[(t_a, aid)] = {
+            "id": f"prof-{aid}",
+            "tenant_id": t_a,
+            "agent_id": aid,
+            "owner_department": dept,
+            "approved_purpose": purpose,
+            "approved_goals": goals,
+            "branch_id": bid,
+            "data_scope": scope,
+            "operational_restrictions": restr,
+            "approval_requirements": app_reqs,
+            "profile_version": "v1.0.0",
+            "status": "ACTIVE",
+            "governed_by_user_id": "usr-admin-001",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
     return repo
 
 
@@ -462,6 +694,60 @@ class AgentListEnvelope(BaseModel):
     limit: int = Field(description="Requested page size limit")
     offset: int = Field(description="Requested page offset")
     has_more: bool = Field(description="Whether additional records exist beyond current page")
+
+
+class AgentToolPermissionGrantRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_id: str = Field(..., min_length=1, max_length=128, description="Tool identifier or registered name")
+    allowed_operations: List[str] = Field(default_factory=lambda: ["*"], description="Permitted tool operations")
+    constraints: Dict[str, Any] = Field(default_factory=dict, description="Operational constraints and parameter ceilings")
+
+
+class AgentToolPermissionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    tool_id: str
+    tool_name: str
+    adapter_type: str
+    allowed_operations: List[str]
+    constraints: Dict[str, Any]
+    is_protected: bool
+
+
+class AgentSecurityProfileResponse(BaseModel):
+    """Authoritative agent security profile response under independent governance."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tenant_id: str
+    agent_id: str
+    owner_department: str
+    approved_purpose: str
+    approved_goals: List[str]
+    branch_id: Optional[str] = None
+    data_scope: List[str]
+    operational_restrictions: Dict[str, Any]
+    approval_requirements: Dict[str, Any]
+    profile_version: str
+    status: str
+    governed_by_user_id: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AgentSecurityProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner_department: Optional[str] = Field(None, max_length=128)
+    approved_purpose: Optional[str] = Field(None, max_length=65535)
+    approved_goals: Optional[List[str]] = None
+    branch_id: Optional[str] = Field(None, max_length=64)
+    data_scope: Optional[List[str]] = None
+    operational_restrictions: Optional[Dict[str, Any]] = None
+    approval_requirements: Optional[Dict[str, Any]] = None
+    profile_version: Optional[str] = Field(None, max_length=32)
+    status: Optional[str] = Field(None, max_length=32)
 
 
 # ============================================================================
@@ -752,3 +1038,216 @@ async def get_agent_details(
         created_at=agent.created_at,
         updated_at=agent.updated_at,
     )
+
+
+@router.post(
+    "/{agent_id}/permissions",
+    response_model=AgentToolPermissionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Grant Agent Tool Permission",
+    description="Grant or update authorized tool permissions and ceilings for an agent. Restricted to TENANT_ADMIN.",
+)
+async def grant_agent_permission(
+    agent_id: str,
+    payload: AgentToolPermissionGrantRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    tenant_context: TenantContext = Depends(require_roles("TENANT_ADMIN")),
+    repo: AgentRepositoryProtocol = AgentRepoDep,
+) -> AgentToolPermissionResponse:
+    """Grant or update tool permission with parameter ceilings. Agents cannot self-grant."""
+    if not agent_id or not SAFE_ID_REGEX.match(agent_id.strip()):
+        raise NotFoundError("Agent not found.")
+    clean_agent_id = agent_id.strip()
+
+    # Agent cannot grant permissions
+    if (
+        getattr(current_user, "id", None) == clean_agent_id
+        or getattr(tenant_context, "role", None) == "AGENT"
+        or (current_user and current_user.id.startswith("agent-"))
+    ):
+        raise ForbiddenError("Agents are strictly prohibited from granting tool permissions.")
+
+    clean_tool_id = payload.tool_id.strip()
+    ops = payload.allowed_operations
+
+    try:
+        perm = await repo.grant_tool_permission(
+            tenant_id=tenant_context.tenant_id,
+            agent_id=clean_agent_id,
+            tool_id=clean_tool_id,
+            allowed_operations=",".join(ops) if isinstance(ops, list) else str(ops),
+            constraints=payload.constraints,
+        )
+    except NotFoundError:
+        raise
+    except Exception as exc:
+        logger.error("Failed to grant tool permission: %s", exc)
+        raise SecurityDependencyError("Failed to update agent tool permissions.") from exc
+
+    await record_audit_event(
+        request=request,
+        tenant_id=tenant_context.tenant_id,
+        actor_id=current_user.id,
+        event_type="AGENT_SECURITY",
+        action="GRANT_TOOL_PERMISSION",
+        resource_id=clean_agent_id,
+        outcome="SUCCESS",
+        details={"tool_id": clean_tool_id, "allowed_operations": ops, "constraints": payload.constraints},
+    )
+
+    return AgentToolPermissionResponse(
+        tool_id=perm["tool_id"],
+        tool_name=perm["tool_name"],
+        adapter_type=perm.get("adapter_type", "INTERNAL"),
+        allowed_operations=perm.get("allowed_operations", ["*"]),
+        constraints=perm.get("constraints", {}),
+        is_protected=perm.get("is_protected", True),
+    )
+
+
+@router.delete(
+    "/{agent_id}/permissions/{tool_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Revoke Agent Tool Permission",
+    description="Revoke tool permission from an agent. Restricted to TENANT_ADMIN.",
+)
+async def revoke_agent_permission(
+    agent_id: str,
+    tool_id: str,
+    request: Request,
+    current_user: CurrentUserDep,
+    tenant_context: TenantContext = Depends(require_roles("TENANT_ADMIN")),
+    repo: AgentRepositoryProtocol = AgentRepoDep,
+) -> Dict[str, Any]:
+    """Revoke tool permission from an agent."""
+    if not agent_id or not SAFE_ID_REGEX.match(agent_id.strip()):
+        raise NotFoundError("Agent not found.")
+    clean_agent_id = agent_id.strip()
+    clean_tool_id = tool_id.strip()
+
+    if (
+        getattr(current_user, "id", None) == clean_agent_id
+        or getattr(tenant_context, "role", None) == "AGENT"
+        or (current_user and current_user.id.startswith("agent-"))
+    ):
+        raise ForbiddenError("Agents are strictly prohibited from modifying tool permissions.")
+
+    try:
+        revoked = await repo.revoke_tool_permission(
+            tenant_id=tenant_context.tenant_id,
+            agent_id=clean_agent_id,
+            tool_id=clean_tool_id,
+        )
+    except Exception as exc:
+        logger.error("Failed to revoke tool permission: %s", exc)
+        raise SecurityDependencyError("Failed to revoke tool permission.") from exc
+
+    if not revoked:
+        raise NotFoundError(f"Permission for tool '{clean_tool_id}' not found on agent.")
+
+    await record_audit_event(
+        request=request,
+        tenant_id=tenant_context.tenant_id,
+        actor_id=current_user.id,
+        event_type="AGENT_SECURITY",
+        action="REVOKE_TOOL_PERMISSION",
+        resource_id=clean_agent_id,
+        outcome="SUCCESS",
+        details={"tool_id": clean_tool_id},
+    )
+
+    return {"status": "REVOKED", "agent_id": clean_agent_id, "tool_id": clean_tool_id}
+
+
+@router.get(
+    "/{agent_id}/profile",
+    response_model=AgentSecurityProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Agent Security Profile",
+    description="Fetch authoritative, independently governed agent security profile (purpose, goals, branch, restrictions).",
+)
+async def get_agent_profile(
+    agent_id: str,
+    tenant_context: TenantContextDep,
+    repo: AgentRepositoryProtocol = AgentRepoDep,
+) -> AgentSecurityProfileResponse:
+    """Fetch authoritative agent security profile under independent governance."""
+    if not agent_id or not SAFE_ID_REGEX.match(agent_id.strip()):
+        raise NotFoundError("Agent not found.")
+    clean_agent_id = agent_id.strip()
+
+    try:
+        profile = await repo.get_agent_profile(
+            agent_id=clean_agent_id,
+            tenant_id=tenant_context.tenant_id,
+        )
+    except Exception as exc:
+        logger.error("Database error retrieving agent profile: %s", exc)
+        raise SecurityDependencyError("Agent profile persistence service unavailable.") from exc
+
+    if profile is None:
+        raise NotFoundError("Agent profile not found.")
+
+    user_branch: Optional[str] = getattr(tenant_context, "branch_id", None)
+    if user_branch and profile.get("branch_id") and profile["branch_id"] != user_branch:
+        raise NotFoundError("Agent profile not found.")
+
+    return AgentSecurityProfileResponse(**profile)
+
+
+@router.put(
+    "/{agent_id}/profile",
+    response_model=AgentSecurityProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Agent Security Profile",
+    description="Update authoritative agent security profile. Restricted to TENANT_ADMIN. Agents cannot self-modify.",
+)
+async def update_agent_profile(
+    agent_id: str,
+    payload: AgentSecurityProfileUpdateRequest,
+    request: Request,
+    current_user: CurrentUserDep,
+    tenant_context: TenantContext = Depends(require_roles("TENANT_ADMIN")),
+    repo: AgentRepositoryProtocol = AgentRepoDep,
+) -> AgentSecurityProfileResponse:
+    """Update authoritative agent security profile under independent administrative governance."""
+    if not agent_id or not SAFE_ID_REGEX.match(agent_id.strip()):
+        raise NotFoundError("Agent not found.")
+    clean_agent_id = agent_id.strip()
+
+    # Agent cannot modify or elevate security profiles
+    if (
+        getattr(current_user, "id", None) == clean_agent_id
+        or getattr(tenant_context, "role", None) == "AGENT"
+        or (current_user and current_user.id.startswith("agent-"))
+    ):
+        raise ForbiddenError("Agents cannot modify or elevate security profiles.")
+
+    update_dict = payload.model_dump(exclude_unset=True)
+    try:
+        updated = await repo.update_agent_profile(
+            agent_id=clean_agent_id,
+            tenant_id=tenant_context.tenant_id,
+            profile_data=update_dict,
+            user_id=current_user.id,
+        )
+    except NotFoundError:
+        raise
+    except Exception as exc:
+        logger.error("Failed to update agent profile: %s", exc)
+        raise SecurityDependencyError("Failed to update agent security profile.") from exc
+
+    await record_audit_event(
+        request=request,
+        tenant_id=tenant_context.tenant_id,
+        actor_id=current_user.id,
+        event_type="AGENT_SECURITY",
+        action="UPDATE_SECURITY_PROFILE",
+        resource_id=clean_agent_id,
+        outcome="SUCCESS",
+        details={"updated_fields": list(update_dict.keys()), "profile_version": updated.get("profile_version")},
+    )
+
+    return AgentSecurityProfileResponse(**updated)
+

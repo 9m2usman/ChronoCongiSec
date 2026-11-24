@@ -123,6 +123,11 @@ class AgentRegistryDirectory:
     async def get_agent(self, agent_id: str, tenant_id: str) -> Any:
         return await self._repo.get_agent_by_id(agent_id, tenant_id)
 
+    async def get_profile(self, agent_id: str, tenant_id: str) -> Optional[dict]:
+        if hasattr(self._repo, "get_agent_profile"):
+            return await self._repo.get_agent_profile(agent_id, tenant_id)
+        return None
+
 
 class AgentRegistryToolGrants:
     """M4 ``ToolGrantDirectory`` port over M1's agent registry and tool adapter registry.
