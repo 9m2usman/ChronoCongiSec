@@ -526,6 +526,25 @@ class ContainmentService:
                 request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
             )
 
+        if self._audit_sink is not None:
+            try:
+                await self._audit_sink(
+                    {
+                        "id": outcome.outcome_id,
+                        "tenant_id": outcome.tenant_id,
+                        "actor_id": outcome.actor_id or "system",
+                        "event_type": "CONTAINMENT_APPLIED",
+                        "resource_id": outcome.target_id or "",
+                        "action": "RESOURCE_ISOLATION",
+                        "outcome": "SUCCESS",
+                        "trace_id": outcome.trace_id,
+                        "details_json": outcome.to_audit_details(),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Resource isolation audit emission failed (%s).", type(exc).__name__
+                )
         return outcome
 
     def _coerce(self, request: Any) -> ContainmentRequest:
