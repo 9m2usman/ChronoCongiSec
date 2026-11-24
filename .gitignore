@@ -20,6 +20,7 @@ ml/datasets/raw/*
 !ml/datasets/raw/.gitkeep
 ml/model_registry/*
 !ml/model_registry/.gitkeep
+!ml/model_registry/*.py
 *.pt
 *.pth
 *.onnx

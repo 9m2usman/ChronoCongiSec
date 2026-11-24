@@ -59,6 +59,7 @@ This matrix reconciles published scientific literature and security benchmarks a
 ### 3.2 Addressed Misconceptions & Differentiations
 - **ChronoMem vs. Rewind:** The codebase's `ChroniMem` router (`backend/app/api/chronimem.py`) is a chronological version-comparison utility (`diff` between versions). It is not an implementation of Prasanth Yadla's multimodal memory architecture (R-004), nor is it an execution recovery engine. True execution recovery is governed by `backend/app/recovery/orchestrator.py` (adapted from AgentRewind, R-003).
 
-### 3.3 Required Future Research Work (Phase 3)
-1. **Phase 3 (AgentRewind R-003):** Implement automated incident blast-radius analysis, execution-state restoration, and side-effect compensation workflows.
-2. **Phase 3 (TrustMem R-010 & DeBERTa NLI):** Deploy local ONNX DeBERTa-v3 cross-encoder to perform deep semantic claim entailment scoring beyond rule-based heuristics.
+### 3.3 Phase 4 ML Security Intelligence & Remaining Future Work
+1. **Phase 4 (AgentPoison R-001, MPBench R-002, AgentDojo R-006, MINJA R-009):** `ml/models/injection_detector/model.py` (`TfidfLinearInjectionClassifier`), `ml/models/anomaly_detector/sequence_anomaly_model.py` (`BehavioralSequenceAnomalyDetector`), `ml/inference/service.py`, and `backend/app/security/ml_intelligence.py` (`MLAdvisoryDetector`) provide calibrated, SHA-256 integrity-verified advisory detection integrated into `DetectionEngine` (`backend/app/security/detection.py`) and benchmarked via `ml/evaluation/evaluator.py` (see `docs/PHASE_4_EVALUATION_REPORT.md`).
+2. **Phase 4 (TrustMem / HaluMem R-010):** `ml/models/memory_trust/semantic_drift_model.py` (`SemanticDriftAndClaimAnalyzer`) provides calibrated linear risk scoring over semantic similarity, entity coverage, constraint preservation, negation flip, permissive expansion, and numeric expansion; heavier ONNX DeBERTa-v3 cross-encoder NLI remains deferred until larger enterprise validation corpora justify its latency/resource footprint.
+3. **Phase 3 (AgentRewind R-003):** Automated incident blast-radius analysis, execution-state restoration, and side-effect compensation workflows remain isolated in Phase 3.
