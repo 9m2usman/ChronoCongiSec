@@ -81,15 +81,25 @@ class InMemoryPreActionCheckpointService:
             "memory_refs": list(memory_refs),
             "scope": "PROPOSAL_METADATA_ONLY",
         }
-        canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str)
-        integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         existing = self._snapshots.get(checkpoint_id)
-        if existing is not None and existing["integrity_hash"] != integrity_hash:
-            raise ValueError("Checkpoint idempotency key was reused with different proposal data.")
-        self._snapshots[checkpoint_id] = {
-            "snapshot": snapshot,
-            "integrity_hash": integrity_hash,
-        }
+        if existing is not None:
+            retry_snapshot = dict(snapshot)
+            # Proposal IDs are generated per request; the idempotency key owns
+            # the checkpoint identity, so compare all caller-controlled content
+            # while retaining the original proposal correlation.
+            retry_snapshot["proposal_id"] = existing["snapshot"]["proposal_id"]
+            canonical = json.dumps(retry_snapshot, sort_keys=True, separators=(",", ":"), default=str)
+            integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if existing["integrity_hash"] != integrity_hash:
+                raise ValueError("Checkpoint idempotency key was reused with different proposal data.")
+            snapshot = existing["snapshot"]
+        else:
+            canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str)
+            integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            self._snapshots[checkpoint_id] = {
+                "snapshot": snapshot,
+                "integrity_hash": integrity_hash,
+            }
         return {
             "committed": True,
             "complete": False,
