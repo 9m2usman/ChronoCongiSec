@@ -1686,7 +1686,8 @@ async def propose_tool_action(
             # adapter. If checkpoint or observation persistence fails, no side effect runs.
             await _emit_gateway_observations(
                 request, tenant_id, body, proposal_id, _decision,
-                "PENDING_EXECUTION", None, context.branch_id, context.user_id, context.role,
+                "PENDING_EXECUTION" if decision_is_executable(_decision) else record["execution_status"],
+                None, context.branch_id, context.user_id, context.role,
             )
         except (HTTPException, AMSCException, SecurityDependencyError):
             raise
