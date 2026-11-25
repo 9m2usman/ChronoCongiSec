@@ -375,16 +375,18 @@ class ContainmentService:
                 )
         except _Stop as stop:
             facts.update(stop.facts)
-            return self._outcome(request, facts, stop.status, stop.codes, context)
+            outcome = self._outcome(request, facts, stop.status, stop.codes, context)
+            return await self._persist_effective_outcome(outcome, persist_evidence)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Containment action failed closed (%s).", type(exc).__name__)
-            return self._outcome(
+            outcome = self._outcome(
                 request,
                 facts,
                 ContainmentStatus.FAILED,
                 (ContainmentReasonCode.ACTION_EXECUTION_FAILED,),
                 context,
             )
+            return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _quarantine_memory(
         self,
