@@ -535,6 +535,9 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # Track factory-provided in-memory adapters so lifespan startup can replace
+    # them with persistent database-backed implementations when configured.
+    app.state._default_in_memory_instances = {}
     app.state.agent_runtime_cancellation = agent_runtime_cancellation
     app.state.company_resource_security_adapter = company_resource_security_adapter
     app.state.pre_action_checkpoint_service = pre_action_checkpoint_service
