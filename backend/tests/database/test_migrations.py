@@ -24,7 +24,7 @@ import backend.app.database.models  # noqa: F401
 from backend.app.database.base import Base
 from backend.tests.database import helpers
 
-EXPECTED_TABLE_COUNT = 44
+EXPECTED_TABLE_COUNT = 50
 
 
 async def _public_tables(database: str) -> set[str]:
@@ -737,6 +737,9 @@ def test_offline_upgrade_generates_sql_for_every_revision() -> None:
         "fk_registration_requests_reviewed_by_membership",    # 0012
         "fk_registration_requests_assigned_branch_tenant",    # 0012
         "trg_forbid_tenant_id_change",                         # 0012 registration_requests trigger
+        "CREATE TABLE enterprise_connectors",                  # 0015
+        "fk_discovered_resources_connector_id_tenant",         # 0015
+        "fk_connector_audit_logs_connector_id_tenant",         # 0015
     ):
         assert marker in sql, f"offline upgrade SQL is missing {marker}"
     assert "UPDATE alembic_version SET version_num='0012'" in sql
@@ -746,6 +749,7 @@ def test_offline_downgrade_generates_sql_back_to_base() -> None:
     sql = _offline_sql("downgrade", "head:base")
 
     for marker in (
+        "DROP TABLE enterprise_connectors",                              # 0015
         "DROP TRIGGER trg_policy_decisions_permanent",                   # 0009
         "DROP TRIGGER trg_forbid_tenant_id_change ON registration_requests", # 0012
         "DROP CONSTRAINT fk_registration_requests_reviewed_by_membership", # 0012

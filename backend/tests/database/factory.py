@@ -180,7 +180,6 @@ class RowFactory:
             }.items():
                 resolved.setdefault(column, value)
             return
-
         if table != "recovery_plans" or "pre_recovery_snapshot_json" in resolved:
             return
         if not any(c.name == "pre_recovery_snapshot_sha256" for c in self.schema.columns[table]):

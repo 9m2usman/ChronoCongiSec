@@ -37,6 +37,13 @@ import {
   EvaluateDetectionRequest,
   EvaluateDetectionResponse,
   DetectionReviewRequest,
+  EnterpriseConnector,
+  DiscoveredResource,
+  SyncJob,
+  KnowledgeClaim,
+  EnterpriseMemoryLink,
+  ConnectorAuditLog,
+  ImpactTrace,
 } from '@/types';
 
 const API_BASE_URL = '/api/v1';
@@ -1077,6 +1084,174 @@ class ApiClient {
       return await res.json();
     }
     throw new ApiError(`POST /detection/results/${detectionId}/review failed (HTTP ${res.status})`, res.status);
+  }
+
+  // --- Enterprise Connectivity, Discovery, Sync & Knowledge Intelligence ---
+
+  async listEnterpriseConnectors(tenantId?: string): Promise<EnterpriseConnector[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/connectors failed (HTTP ${res.status})`, res.status);
+  }
+
+  async createEnterpriseConnector(payload: Record<string, any>, tenantId?: string): Promise<EnterpriseConnector> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/connectors failed (HTTP ${res.status})`, res.status);
+  }
+
+  async authorizeEnterpriseConnector(connectorId: string, payload: Record<string, any> = {}, tenantId?: string): Promise<EnterpriseConnector> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors/${connectorId}/authorize`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/connectors/${connectorId}/authorize failed (HTTP ${res.status})`, res.status);
+  }
+
+  async connectorLifecycleAction(connectorId: string, action: 'pause' | 'resume' | 'revoke', tenantId?: string): Promise<EnterpriseConnector> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors/${connectorId}/${action}`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/connectors/${connectorId}/${action} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async discoverEnterpriseResources(connectorId: string, tenantId?: string): Promise<DiscoveredResource[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors/${connectorId}/discover`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/connectors/${connectorId}/discover failed (HTTP ${res.status})`, res.status);
+  }
+
+  async syncEnterpriseConnector(connectorId: string, strategy = 'INCREMENTAL', tenantId?: string): Promise<SyncJob> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/connectors/${connectorId}/sync`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify({ strategy }),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/connectors/${connectorId}/sync failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listEnterpriseResources(tenantId?: string): Promise<DiscoveredResource[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/resources`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/resources failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listEnterpriseSyncJobs(tenantId?: string): Promise<SyncJob[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/sync-jobs`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/sync-jobs failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listEnterpriseClaims(tenantId?: string): Promise<KnowledgeClaim[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/knowledge/claims`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/knowledge/claims failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listEnterpriseMemoryProvenance(tenantId?: string): Promise<EnterpriseMemoryLink[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/memory/provenance`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/memory/provenance failed (HTTP ${res.status})`, res.status);
+  }
+
+  async extractEnterpriseMemory(resourceId: string, agentId?: string, purpose?: string, tenantId?: string): Promise<EnterpriseMemoryLink> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/memory/extract`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify({ resource_id: resourceId, agent_id: agentId, purpose: purpose || 'ENTERPRISE_KNOWLEDGE_EXTRACTION' }),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`POST /enterprise/memory/extract failed (HTTP ${res.status})`, res.status);
+  }
+
+  async traceEnterpriseImpact(targetId: string, tenantId?: string): Promise<ImpactTrace> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/impact/${targetId}`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/impact/${targetId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listEnterpriseAuditLogs(tenantId?: string): Promise<ConnectorAuditLog[]> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/enterprise/audit`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /enterprise/audit failed (HTTP ${res.status})`, res.status);
   }
 }
 

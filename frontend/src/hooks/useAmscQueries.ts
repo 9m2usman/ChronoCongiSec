@@ -208,3 +208,97 @@ export function useAgentProfile(agentId: string) {
     enabled: Boolean(agentId),
   });
 }
+
+// 15. Enterprise Connectivity, Discovery, Sync & Knowledge Intelligence
+export function useEnterpriseConnectors() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-connectors', active.id],
+    queryFn: () => apiClient.listEnterpriseConnectors(active.id),
+  });
+}
+
+export function useEnterpriseResources() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-resources', active.id],
+    queryFn: () => apiClient.listEnterpriseResources(active.id),
+  });
+}
+
+export function useEnterpriseSyncJobs() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-sync-jobs', active.id],
+    queryFn: () => apiClient.listEnterpriseSyncJobs(active.id),
+  });
+}
+
+export function useEnterpriseClaims() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-claims', active.id],
+    queryFn: () => apiClient.listEnterpriseClaims(active.id),
+  });
+}
+
+export function useEnterpriseMemoryProvenance() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-memory-provenance', active.id],
+    queryFn: () => apiClient.listEnterpriseMemoryProvenance(active.id),
+  });
+}
+
+export function useEnterpriseAuditLogs() {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['enterprise-audit', active.id],
+    queryFn: () => apiClient.listEnterpriseAuditLogs(active.id),
+  });
+}
+
+export function useEnterpriseActions() {
+  const active = useTenantContext();
+  const queryClient = useQueryClient();
+
+  const invalidateAll = () => {
+    queryClient.invalidateQueries({ queryKey: ['enterprise-connectors', active.id] });
+    queryClient.invalidateQueries({ queryKey: ['enterprise-resources', active.id] });
+    queryClient.invalidateQueries({ queryKey: ['enterprise-sync-jobs', active.id] });
+    queryClient.invalidateQueries({ queryKey: ['enterprise-claims', active.id] });
+    queryClient.invalidateQueries({ queryKey: ['enterprise-memory-provenance', active.id] });
+    queryClient.invalidateQueries({ queryKey: ['enterprise-audit', active.id] });
+  };
+
+  return {
+    createConnector: useMutation({
+      mutationFn: (payload: Record<string, any>) => apiClient.createEnterpriseConnector(payload, active.id),
+      onSuccess: invalidateAll,
+    }),
+    authorizeConnector: useMutation({
+      mutationFn: ({ id, payload }: { id: string; payload?: Record<string, any> }) =>
+        apiClient.authorizeEnterpriseConnector(id, payload || {}, active.id),
+      onSuccess: invalidateAll,
+    }),
+    lifecycleAction: useMutation({
+      mutationFn: ({ id, action }: { id: string; action: 'pause' | 'resume' | 'revoke' }) =>
+        apiClient.connectorLifecycleAction(id, action, active.id),
+      onSuccess: invalidateAll,
+    }),
+    discoverResources: useMutation({
+      mutationFn: (id: string) => apiClient.discoverEnterpriseResources(id, active.id),
+      onSuccess: invalidateAll,
+    }),
+    syncConnector: useMutation({
+      mutationFn: ({ id, strategy }: { id: string; strategy?: string }) =>
+        apiClient.syncEnterpriseConnector(id, strategy || 'INCREMENTAL', active.id),
+      onSuccess: invalidateAll,
+    }),
+    extractMemory: useMutation({
+      mutationFn: ({ resourceId, agentId, purpose }: { resourceId: string; agentId?: string; purpose?: string }) =>
+        apiClient.extractEnterpriseMemory(resourceId, agentId, purpose, active.id),
+      onSuccess: invalidateAll,
+    }),
+  };
+}

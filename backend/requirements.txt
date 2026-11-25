@@ -1,7 +1,7 @@
 # Core Backend Technology Baseline
 # Approved in AMSC-DOC-002 (Combined TRD & SRS) Section 5
 fastapi==0.162.4
-uvicorn==0.54.0
+uvicorn[standard]==0.54.0
 pydantic==2.14.3
 pydantic-settings==2.16.2
 sqlalchemy==2.1.8
