@@ -271,7 +271,7 @@ async def api_ingest_memory(
         raise SecurityDependencyError("Production memory detection must use durable persistence.")
 
     try:
-        findings = await detection_engine.detect_memory_integrity(
+        integrity_findings = await detection_engine.detect_memory_integrity(
             tenant_id=tenant_id,
             content=payload.content,
             record=record,
@@ -285,6 +285,35 @@ async def api_ingest_memory(
             trace_id=getattr(request.state, "trace_id", None),
             actor_role=getattr(context, "role", None),
         )
+
+        # Compare derived content with its parent only when that parent is trusted.
+        # An untrusted parent must never be promoted into an authoritative source.
+        parent_content = None
+        if payload.parent_record_id:
+            parent_result = repo.get_record(payload.parent_record_id, tenant_id)
+            if inspect.isawaitable(parent_result):
+                parent_record = await parent_result
+            else:
+                parent_record = parent_result
+            if parent_record is not None and getattr(parent_record, "trust_state", None) == "TRUSTED":
+                parent_version = repo.get_version(
+                    payload.parent_record_id,
+                    getattr(parent_record, "current_version", None),
+                    tenant_id,
+                )
+                if inspect.isawaitable(parent_version):
+                    parent_version = await parent_version
+                parent_content = getattr(parent_version, "content", None) if parent_version else None
+
+        semantic_findings = await detection_engine.detect_semantic_integrity(
+            tenant_id=tenant_id,
+            claim_text=payload.content,
+            source_text=parent_content,
+            agent_id=payload.agent_id,
+            branch_id=getattr(context, "branch_id", None),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+        findings = integrity_findings + semantic_findings
         persisted_findings = []
         for finding in findings:
             persisted = await detection_repo.record_detection(finding.to_dict())
