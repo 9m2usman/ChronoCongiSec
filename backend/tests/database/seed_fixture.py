@@ -34,6 +34,15 @@ from backend.app.database.models import (
     Checkpoint,
     CheckpointItem,
     ConnectorAuditLog,
+    CompanyActivity,
+    CompanyFile,
+    CompanyFileTransfer,
+    CompanyFileVersion,
+    CompanyMessage,
+    CompanyNotification,
+    CompanyTask,
+    CompanyTaskEvent,
+    CompanyWorkspace,
     DetectionResultModel,
     DiscoveredResource,
     Document,
@@ -290,7 +299,66 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
             ),
         ])
 
-    # 2. Gateway chain and audit trail through the unit of work (one transaction per action).
+    # 2. Employee company application records (all nine Phase 2 tables).
+    workspace_id = _id()
+    file_id = _id()
+    task_id = _id()
+    async with session_factory() as session, session.begin():
+        session.add(CompanyWorkspace(
+            id=workspace_id, tenant_id=a, branch_id=ids["branches"][0],
+            owner_user_id=ids["u_admin"], name="Finance Workspace",
+            description=ILLUSTRATIVE, visibility="BRANCH",
+        ))
+        await session.flush()
+        session.add(CompanyFile(
+            id=file_id, tenant_id=a, workspace_id=workspace_id,
+            owner_user_id=ids["u_admin"], name="transfer-policy.txt",
+            content_type="text/plain", current_version=1, status="ACTIVE",
+        ))
+        session.add(CompanyTask(
+            id=task_id, tenant_id=a, workspace_id=workspace_id,
+            branch_id=ids["branches"][0], title="Review transfer policy",
+            description=ILLUSTRATIVE, status="OPEN", priority="NORMAL",
+            created_by_user_id=ids["u_admin"], assigned_to_user_id=ids["u_analyst"],
+        ))
+        await session.flush()
+        session.add_all([
+            CompanyFileVersion(
+                id=_id(), tenant_id=a, file_id=file_id, version_number=1,
+                content="Maximum transfer: 1000", checksum="a" * 64,
+                created_by_user_id=ids["u_admin"],
+            ),
+            CompanyFileTransfer(
+                id=_id(), tenant_id=a, file_id=file_id,
+                sender_user_id=ids["u_admin"], recipient_user_id=ids["u_analyst"],
+                status="PENDING", message=ILLUSTRATIVE,
+            ),
+            CompanyTaskEvent(
+                id=_id(), tenant_id=a, task_id=task_id,
+                actor_user_id=ids["u_admin"], event_type="CREATED",
+                details={"note": ILLUSTRATIVE},
+            ),
+            CompanyMessage(
+                id=_id(), tenant_id=a, sender_user_id=ids["u_admin"],
+                recipient_user_id=ids["u_analyst"], subject="Policy review",
+                body=ILLUSTRATIVE, status="SENT",
+            ),
+            CompanyNotification(
+                id=_id(), tenant_id=a, user_id=ids["u_analyst"],
+                event_type="TASK_ASSIGNED", title="New task",
+                body="Review transfer policy", resource_type="TASK",
+                resource_id=task_id,
+            ),
+            CompanyActivity(
+                id=_id(), tenant_id=a, branch_id=ids["branches"][0],
+                actor_user_id=ids["u_admin"], event_type="TASK_CREATED",
+                resource_type="TASK", resource_id=task_id,
+                summary="Created a policy review task",
+                details={"note": ILLUSTRATIVE},
+            ),
+        ])
+
+    # 3. Gateway chain and audit trail through the unit of work (one transaction per action).
     uow = UnitOfWork(session_factory)
 
     def audit(resource_id: str, event_type: str) -> AuditEvent:
@@ -319,7 +387,7 @@ async def seed_dataset(session_factory: async_sessionmaker[AsyncSession]) -> See
         await tx.audit.append(audit(ids["rec_b"], "MEMORY_INGESTED"))
         await tx.audit.append(audit(ids["rec_b"], "MEMORY_READ"))
 
-    # 3. Rewind of record 1 to checkpoint CP-001 (snapshot committed first, then rollback).
+    # 4. Rewind of record 1 to checkpoint CP-001 (snapshot committed first, then rollback).
     coordinator = RewindCoordinator(session_factory)
     receipt = await coordinator.capture_snapshot(
         a, ids["plan"], {"records": [{"id": ids["rec1"], "current_version": 3, "checksum": "c3"}], "note": ILLUSTRATIVE})
