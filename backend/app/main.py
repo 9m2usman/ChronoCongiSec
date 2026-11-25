@@ -370,6 +370,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory trace repository is strictly forbidden in production."
             )
 
+        for repository_name in ("observation_repo", "detection_repo"):
+            repository = getattr(app.state, repository_name, None)
+            if (
+                repository is None
+                or getattr(repository, "is_in_memory", True)
+                or not getattr(repository, "is_persistent", False)
+            ):
+                raise RuntimeError(
+                    f"Production startup failure: Persistent {repository_name} is not configured. "
+                    "In-memory security evidence stores are strictly forbidden in production."
+                )
+
+        if getattr(app.state, "detection_engine", None) is None:
+            raise RuntimeError(
+                "Production startup failure: Security detection engine is not configured."
+            )
+
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
     if getattr(app.state, "recovery_service", None) is None:
@@ -779,10 +796,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["observation_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(obs_repo, "is_in_memory", True)
+            or not getattr(obs_repo, "is_persistent", False)
+        ):
+            deps["observation_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["observation_repo"] = "ready"
 
-        # Detection Repo Check (Phase 2)
+        # Detection Repo Check (Phase 2 / Phase 4)
         det_repo = getattr(app_instance.state, "detection_repo", None)
         if det_repo is None:
             if cfg.APP_ENV == "production":
@@ -790,8 +813,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["detection_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(det_repo, "is_in_memory", True)
+            or not getattr(det_repo, "is_persistent", False)
+        ):
+            deps["detection_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["detection_repo"] = "ready"
+
+        detection_engine = getattr(app_instance.state, "detection_engine", None)
+        if detection_engine is None:
+            deps["detection_engine"] = "unavailable"
+            all_ready = False
+        else:
+            deps["detection_engine"] = "ready"
 
         return all_ready, deps
 
