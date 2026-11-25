@@ -67,6 +67,23 @@ CREATE TABLE agent_versions (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
     UNIQUE (agent_id, version)
 );
+CREATE TABLE agent_security_profiles (
+    id VARCHAR(36) PRIMARY KEY,
+    tenant_id VARCHAR(36) NOT NULL,
+    agent_id VARCHAR(36) NOT NULL UNIQUE,
+    owner_department VARCHAR(128) NOT NULL,
+    approved_purpose TEXT NOT NULL,
+    approved_goals JSON DEFAULT '[]' NOT NULL,
+    branch_id VARCHAR(36),
+    data_scope JSON DEFAULT '[]' NOT NULL,
+    operational_restrictions JSON DEFAULT '{}' NOT NULL,
+    approval_requirements JSON DEFAULT '{}' NOT NULL,
+    profile_version VARCHAR(32) DEFAULT 'v1.0.0' NOT NULL,
+    status VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL,
+    governed_by_user_id VARCHAR(36) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
 """
 
 MEMORY_DDL = """
