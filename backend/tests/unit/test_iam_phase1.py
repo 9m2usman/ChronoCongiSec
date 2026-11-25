@@ -316,9 +316,22 @@ async def test_08_role_assignment_is_enforced(iam_client: httpx.AsyncClient):
 
 @pytest.mark.asyncio
 async def test_09_branch_access_is_enforced(iam_client: httpx.AsyncClient):
-    """Scenario 9: Branch access is enforced — returns canonical enterprise branches."""
+    """Scenario 9: Tenant Admin sees the canonical branches of the authenticated tenant."""
     async with iam_client as client:
-        res = await client.get("/api/v1/branches?tenant_slug=alphacorp")
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "sarah.admin@alphacorp.com",
+                "password": "SecurePassword123!",
+                "tenant_slug": "alphacorp",
+            },
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+        res = await client.get(
+            "/api/v1/branches?tenant_slug=alphacorp",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert res.status_code == 200
         branches = res.json()
         assert len(branches) == 4
@@ -397,10 +410,9 @@ async def test_11_user_cannot_forge_tenant_id(iam_client: httpx.AsyncClient):
         assert reg_res.status_code == 400
         assert reg_res.json()["error"]["code"] == "BAD_REQUEST"
 
-        # 3. Branch listing with forged tenant slug returns empty list
+        # 3. Branch discovery requires authentication; an untrusted tenant slug is not authorization.
         branch_res = await client.get("/api/v1/branches?tenant_slug=forged-nonexistent-tenant")
-        assert branch_res.status_code == 200
-        assert branch_res.json() == []
+        assert branch_res.status_code == 401
 
 
 @pytest.mark.asyncio
