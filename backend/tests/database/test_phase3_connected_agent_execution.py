@@ -275,36 +275,6 @@ def _assert_adapter_refused(res, db_url, status_code, error_code=None):
 # Wiring
 # ----------------------------------------------------------------------------
 
-def test_000_temporary_gateway_persistence_diagnosis(db_url):  # TEMPORARY: remove after diagnosis
-    from backend.app.api.gateway import (
-        AuditEventEntity, PolicyDecisionEntity, SqlAlchemyGatewayRepository, ToolProposalEntity,
-    )
-
-    repo = SqlAlchemyGatewayRepository(create_session_factory(create_async_engine(db_url, poolclass=NullPool)))
-    out = []
-    for variant in ("no_audit", "with_audit"):
-        pid = str(uuid.uuid4())
-        prop = ToolProposalEntity(id=pid, tenant_id=T_A, agent_id=BRANCH_AGENT, action_id="act-diag",
-                                  tool_name=TOOL, operation="read_inbox", parameters_json={},
-                                  memory_refs_json=[], idempotency_key=f"idem-diag-{uuid.uuid4().hex}",
-                                  trace_id="trace-diag-0001")
-        dec = PolicyDecisionEntity(id=str(uuid.uuid4()), tenant_id=T_A, proposal_id=pid, decision="BLOCK",
-                                   memory_trust="NOT_REFERENCED", policy_result="DENIED", reasons_json=["x"])
-        audit = AuditEventEntity(id=str(uuid.uuid4()), tenant_id=T_A, actor_id=DAVE, event_type="TOOL_POLICY_DECIDED",
-                                 resource_id=pid, action=f"{TOOL}:read_inbox", outcome="BLOCK",
-                                 trace_id="trace-diag-0001", details_json={"a": 1}) if variant == "with_audit" else None
-        try:
-            asyncio.run(repo.save_proposal_atomic(proposal=prop, decision=dec, execution=None, audit_event=audit))
-            out.append(f"{variant}: OK")
-        except Exception as exc:  # noqa: BLE001
-            chain, e = [], exc
-            while e is not None:
-                chain.append(f"{type(e).__name__}: {str(e)[:600]}")
-                e = e.__cause__ or e.__context__
-            out.append(f"{variant}: " + " <- ".join(chain))
-    assert all(o.endswith("OK") for o in out), " || ".join(out)
-
-
 def test_company_adapter_registered_with_persistence(app):
     registry = app.state.tool_registry
     assert registry.get_adapter(TOOL) is not None
