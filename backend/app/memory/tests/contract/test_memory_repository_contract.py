@@ -668,6 +668,25 @@ def test_unit_production_guard_qualification(monkeypatch, request):
     app_persistent.state.memory_repo = SqlAlchemyMemoryRepository(
         session=AsyncMock(spec=AsyncSession), tenant_id="tenant-prod"
     )
+
+    # Satisfy the additional production safety contracts introduced by
+    # Phase 4; this unit test specifically verifies memory-repository
+    # persistence qualification rather than bypassing production guards.
+    from types import SimpleNamespace
+    app_persistent.state.observation_repo = SimpleNamespace(is_in_memory=False, is_persistent=True)
+    app_persistent.state.detection_repo = SimpleNamespace(is_in_memory=False, is_persistent=True)
+    app_persistent.state.detection_engine = object()
+    app_persistent.state.pre_action_checkpoint_service = SimpleNamespace(
+        is_in_memory=False,
+        is_persistent=True,
+        capture_pre_action_checkpoint=lambda *args, **kwargs: None,
+    )
+    app_persistent.state.agent_runtime_cancellation = SimpleNamespace(
+        cancel_agent_work=lambda *args, **kwargs: None,
+    )
+    app_persistent.state.company_resource_security_adapter = SimpleNamespace(
+        isolate_resource=lambda *args, **kwargs: None,
+    )
     with TestClient(app_persistent):
         pass
 

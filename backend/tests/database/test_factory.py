@@ -36,9 +36,9 @@ async def test_schema_info_detects_linked_checkpoint_reference(factory: RowFacto
             derived=(("record_id", "record_id"),),
         )
     ]
-    # Single-column references are still mapped as before.
-    assert factory.schema.references[("checkpoint_items", "version_id")] == "memory_versions"
-    assert factory.schema.references[("checkpoint_items", "record_id")] == "memory_records"
+    # Each FK mapping retains both the parent table and referenced column.
+    assert factory.schema.references[("checkpoint_items", "version_id")] == ("memory_versions", "id")
+    assert factory.schema.references[("checkpoint_items", "record_id")] == ("memory_records", "id")
 
 
 async def test_auto_generated_version_belongs_to_auto_generated_record(factory: RowFactory, tx_conn) -> None:

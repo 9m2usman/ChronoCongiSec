@@ -89,7 +89,7 @@ async def record_audit_event(
 
     # 1. Database-backed durable append when db_session_factory is configured
     session_factory = getattr(request.app.state, "db_session_factory", None)
-    if session_factory is not None:
+    if session_factory is not None and tenant_id and tenant_id != "unknown":
         try:
             import asyncio
 

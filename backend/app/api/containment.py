@@ -44,9 +44,10 @@ async def apply_containment(
 ) -> ContainmentOutcome:
     from backend.app.security.runtime import get_quarantine_workflow, get_audit_sink
     from backend.app.api.memory import get_repository as get_memory_repository
-    from backend.app.api.agents import get_agent_repository
+    from backend.app.api.agents import get_agent_repo
+    from backend.app.core.config import get_settings
 
-    mem_repo = get_memory_repository(http_request) if http_request is not None else None
+    mem_repo = await get_memory_repository(http_request) if http_request is not None else None
     from backend.app.api.incident_management import get_incident_repository
 
     inc_repo = (
@@ -55,7 +56,9 @@ async def apply_containment(
         else None
     )
     agent_repo = (
-        get_agent_repository(http_request) if http_request is not None else None
+        await get_agent_repo(http_request, get_settings())
+        if http_request is not None
+        else None
     )
     inv_svc = InvestigationService(mem_repo, inc_repo)
     quarantine_wf = (
@@ -71,8 +74,30 @@ async def apply_containment(
         quarantine_wf,
         mem_repo,
         agent_repository=agent_repo,
-        audit_sink=audit_sink,
+        runtime_cancellation=getattr(http_request.app.state, "agent_runtime_cancellation", None),
+        resource_isolation_adapter=getattr(http_request.app.state, "company_resource_security_adapter", None),
     )
+
+    async def persist_containment_evidence(outcome: ContainmentOutcome) -> None:
+        if audit_sink is None:
+            raise SecurityDependencyError("Durable containment evidence persistence is unavailable.")
+        await audit_sink({
+            "id": outcome.outcome_id,
+            "tenant_id": outcome.tenant_id,
+            "actor_id": outcome.actor_id or "system",
+            "event_type": (
+                "CONTAINMENT_RECONCILIATION_REQUIRED"
+                if outcome.status.value == "RECONCILIATION_REQUIRED"
+                else "CONTAINMENT_APPLIED"
+                if outcome.success
+                else "CONTAINMENT_FAILED"
+            ),
+            "resource_id": outcome.target_id or outcome.incident_id or "",
+            "action": outcome.containment_type.value if outcome.containment_type else "CONTAINMENT_BATCH",
+            "outcome": outcome.status.value,
+            "trace_id": outcome.trace_id,
+            "details_json": outcome.to_audit_details(),
+        })
 
     """Apply containment actions for an incident.
 
@@ -88,7 +113,7 @@ async def apply_containment(
         outcome = await containment_service.apply_containment(
             context,
             request,
-            persist_evidence=lambda o: _persist_containment_evidence(o),
+            persist_evidence=persist_containment_evidence,
         )
         raise_for_containment_outcome(outcome)
         return outcome
@@ -111,9 +136,9 @@ async def get_containment_recommendations(
     from backend.app.api.memory import get_repository as get_memory_repository
     from backend.app.api.incident_management import get_incident_repository
 
-    mem_repo = get_memory_repository(http_request) if http_request is not None else None
+    mem_repo = await get_memory_repository(http_request) if http_request is not None else None
     inc_repo = (
-        await get_incident_repository(http_request)
+        get_incident_repository(http_request)
         if http_request is not None
         else None
     )
@@ -140,11 +165,6 @@ async def get_containment_recommendations(
     ) as exc:
         logger.warning("Failed to generate containment recommendations: %s", str(exc))
         raise
-
-
-async def _persist_containment_evidence(outcome: ContainmentOutcome) -> None:
-    """Persist containment evidence to audit logs."""
-    logger.info("Containment evidence persisted: %s", outcome.outcome_id)
 
 
 __all__ = ["router"]

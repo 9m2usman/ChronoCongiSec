@@ -18,13 +18,13 @@ Security & Governance:
 
 import inspect
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
-from backend.app.core.exceptions import ForbiddenError, SecurityDependencyError
+from backend.app.core.exceptions import ForbiddenError, NotFoundError, SecurityDependencyError
 from backend.app.memory.models import (
     MemoryDetailResponse,
     MemoryIngestRequest,
@@ -79,6 +79,146 @@ async def get_repository(request: Request) -> MemoryRepository:
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 
+async def _persist_memory_detection_incidents(
+    request: Request,
+    context: TenantContext,
+    record: Any,
+    findings: List[Any],
+    content_checksum: str,
+) -> List[str]:
+    """Idempotently correlate confirmed ingestion findings with the incident ledger."""
+    from hashlib import sha256
+    from uuid import UUID
+
+    from backend.app.api.incident_management import (
+        AuditEventEntity,
+        IncidentEntity,
+        IncidentEvidenceEntity,
+        get_default_incident_repository,
+    )
+
+    qualifying = [
+        finding for finding in findings
+        if getattr(finding.recommended_outcome, "value", finding.recommended_outcome) == "BLOCK"
+        and getattr(finding.classification_type, "value", finding.classification_type)
+        in {"CONFIRMED_SECURITY_INCIDENT", "CONFIRMED_POLICY_VIOLATION"}
+    ]
+    if not qualifying:
+        return []
+
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    incident_repo = getattr(request.app.state, "incident_repo", None)
+    if incident_repo is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Durable incident repository is not configured.")
+        incident_repo = get_default_incident_repository(settings)
+    if not all(
+        callable(getattr(incident_repo, method, None))
+        for method in ("get_incident", "create_incident_atomic", "attach_evidence_atomic")
+    ):
+        raise SecurityDependencyError("Incident repository does not satisfy the required contract.")
+    if settings.APP_ENV == "production" and (
+        getattr(incident_repo, "is_in_memory", True)
+        or not getattr(incident_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production incident correlation must use durable persistence.")
+
+    category_map = {
+        "PROMPT_INJECTION": "PROMPT_INJECTION",
+        "MEMORY_INTEGRITY": "UNTRUSTED_MEMORY_ACTION",
+        "SEMANTIC_INTEGRITY": "DRIFT_DIVERGENCE",
+        "BEHAVIORAL_DEVIATION": "UNAUTHORIZED_TOOL",
+        "TOOL_THREAT": "UNAUTHORIZED_TOOL",
+    }
+    incident_ids: List[str] = []
+    for finding in qualifying:
+        category = getattr(finding.detection_category, "value", finding.detection_category)
+        classification = getattr(finding.classification_type, "value", finding.classification_type)
+        severity = getattr(finding.severity, "value", finding.severity)
+        reason_code = str((finding.details or {}).get("reason_code") or category)
+        digest = sha256(
+            f"{context.tenant_id}:{record.id}:{category}:{reason_code}".encode("utf-8")
+        ).hexdigest()
+        incident_id = f"inc-{digest[:32]}"
+        evidence_id = f"evi-{sha256(f'{incident_id}:{finding.id}'.encode('utf-8')).hexdigest()[:32]}"
+        metadata = {
+            "detection_id": finding.id,
+            "detection_category": str(category),
+            "classification_type": str(classification),
+            "severity": str(severity),
+            "confidence_score": finding.confidence_score,
+            "uncertainty_state": getattr(
+                finding.uncertainty_state, "value", finding.uncertainty_state
+            ),
+            "reason_code": reason_code,
+            "content_sha256": content_checksum,
+            "branch_id": context.branch_id,
+            "trace_id": finding.trace_id,
+        }
+        evidence = IncidentEvidenceEntity(
+            id=evidence_id,
+            tenant_id=context.tenant_id,
+            incident_id=incident_id,
+            evidence_type="MEMORY_RECORD",
+            resource_id=record.id,
+            metadata_json=metadata,
+        )
+        audit_digest = sha256(f"{incident_id}:{finding.id}".encode("utf-8")).hexdigest()[:32]
+        audit = AuditEventEntity(
+            id=str(UUID(audit_digest)),
+            tenant_id=context.tenant_id,
+            actor_id=context.user_id,
+            event_type="MEMORY_SECURITY_INCIDENT_CORRELATED",
+            resource_id=incident_id,
+            action="CORRELATE_DETECTION",
+            outcome="SUCCESS",
+            trace_id=finding.trace_id,
+            details_json={
+                "memory_record_id": record.id,
+                "detection_id": finding.id,
+                "detection_category": str(category),
+                "reason_code": reason_code,
+                "content_sha256": content_checksum,
+            },
+        )
+        existing = await incident_repo.get_incident(context.tenant_id, incident_id)
+        if existing is not None:
+            await incident_repo.attach_evidence_atomic(
+                context.tenant_id, incident_id, [evidence], audit_event=audit
+            )
+        else:
+            incident = IncidentEntity(
+                id=incident_id,
+                tenant_id=context.tenant_id,
+                title=str(finding.title)[:255],
+                classification=category_map.get(str(category), "UNTRUSTED_MEMORY_ACTION"),
+                severity=str(severity),
+                status="OPEN",
+                affected_record_id=record.id,
+                agent_id=finding.agent_id,
+                evidence_json={
+                    "summary": "Automatically correlated high-confidence memory ingestion detection",
+                    "total_count": 1,
+                    "detection_ids": [finding.id],
+                    "content_sha256": content_checksum,
+                },
+            )
+            try:
+                await incident_repo.create_incident_atomic(
+                    incident, [evidence], audit_event=audit
+                )
+            except Exception:
+                # Resolve a concurrent idempotent create; propagate genuine persistence failures.
+                existing = await incident_repo.get_incident(context.tenant_id, incident_id)
+                if existing is None:
+                    raise
+                await incident_repo.attach_evidence_atomic(
+                    context.tenant_id, incident_id, [evidence], audit_event=audit
+                )
+        incident_ids.append(incident_id)
+    return list(dict.fromkeys(incident_ids))
+
+
 @router.post(
     "",
     response_model=MemoryRecordResponse,
@@ -87,6 +227,8 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 )
 async def api_ingest_memory(
     payload: MemoryIngestRequest,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
     tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> MemoryRecordResponse:
@@ -95,6 +237,22 @@ async def api_ingest_memory(
     Matches Document 05 Section 5.1 Route Catalog.
     Tenant ID is strictly derived from verified authentication context.
     """
+    # Bind caller-supplied agent references to the authenticated tenant and branch.
+    if payload.agent_id:
+        agent_repo = getattr(request.app.state, "agent_repo", None)
+        if agent_repo is None:
+            if (getattr(request.app.state, "settings", None) or get_settings()).APP_ENV == "production":
+                raise SecurityDependencyError("Tenant-scoped agent registry is unavailable.")
+            from backend.app.api.agents import get_default_agent_repository
+            agent_repo = get_default_agent_repository()
+        agent = await agent_repo.get_agent_by_id(payload.agent_id, tenant_id)
+        if agent is None or agent.tenant_id != tenant_id:
+            raise NotFoundError("Agent not found.")
+        if agent.status != "ACTIVE":
+            raise ForbiddenError("Memory cannot be ingested for an isolated or inactive agent.")
+        if agent.branch_id is not None and agent.branch_id != context.branch_id:
+            raise NotFoundError("Agent not found.")
+
     res = ingest_memory(
         tenant_id=tenant_id,
         content=payload.content,
@@ -108,6 +266,122 @@ async def api_ingest_memory(
         record, version = await res
     else:
         record, version = res
+
+    # Phase 4: every newly ingested memory is inspected before it can become eligible
+    # for normal retrieval. New records remain UNVERIFIED regardless of detector output.
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    detection_engine = getattr(request.app.state, "detection_engine", None)
+    detection_repo = getattr(request.app.state, "detection_repo", None)
+    if detection_engine is None or detection_repo is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Durable memory detection is not configured.")
+        from backend.app.security.detection import get_default_detection_engine
+        detection_engine = detection_engine or get_default_detection_engine()
+        detection_repo = detection_repo or getattr(detection_engine, "detection_repo", None)
+    if detection_engine is None or detection_repo is None:
+        raise SecurityDependencyError("Memory detection persistence is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(detection_repo, "is_in_memory", True)
+        or not getattr(detection_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production memory detection must use durable persistence.")
+
+    try:
+        integrity_findings = await detection_engine.detect_memory_integrity(
+            tenant_id=tenant_id,
+            content=payload.content,
+            record=record,
+            record_id=record.id,
+            expected_checksum=version.checksum,
+            source_type=payload.record_type,
+            agent_id=payload.agent_id,
+            branch_id=getattr(context, "branch_id", None),
+            parent_record_id=payload.parent_record_id,
+            memory_repo=repo,
+            trace_id=getattr(request.state, "trace_id", None),
+            actor_role=getattr(context, "role", None),
+        )
+
+        # Compare derived content with its parent only when that parent is trusted.
+        # An untrusted parent must never be promoted into an authoritative source.
+        parent_content = None
+        if payload.parent_record_id:
+            parent_result = repo.get_record(payload.parent_record_id, tenant_id)
+            if inspect.isawaitable(parent_result):
+                parent_record = await parent_result
+            else:
+                parent_record = parent_result
+            if parent_record is not None and getattr(parent_record, "trust_state", None) == "TRUSTED":
+                parent_version = repo.get_version(
+                    payload.parent_record_id,
+                    getattr(parent_record, "current_version", None),
+                    tenant_id,
+                )
+                if inspect.isawaitable(parent_version):
+                    parent_version = await parent_version
+                parent_content = getattr(parent_version, "content", None) if parent_version else None
+
+        semantic_findings = await detection_engine.detect_semantic_integrity(
+            tenant_id=tenant_id,
+            claim_text=payload.content,
+            source_text=parent_content,
+            agent_id=payload.agent_id,
+            branch_id=getattr(context, "branch_id", None),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+        findings = integrity_findings + semantic_findings
+        persisted_findings = []
+        for finding in findings:
+            persisted = await detection_repo.record_detection(finding.to_dict())
+            persisted_findings.append(persisted)
+        incident_ids = await _persist_memory_detection_incidents(
+            request, context, record, findings, version.checksum
+        )
+
+        observation_repo = getattr(request.app.state, "observation_repo", None)
+        if observation_repo is None:
+            if settings.APP_ENV == "production":
+                raise SecurityDependencyError("Durable memory observation is not configured.")
+            from backend.app.api.observation import get_default_observation_repository
+            observation_repo = get_default_observation_repository()
+        if settings.APP_ENV == "production" and (
+            getattr(observation_repo, "is_in_memory", True)
+            or not getattr(observation_repo, "is_persistent", False)
+        ):
+            raise SecurityDependencyError("Production memory observations must use durable persistence.")
+        await observation_repo.record_event({
+            "tenant_id": tenant_id,
+            "branch_id": getattr(context, "branch_id", None),
+            "event_type": "MEMORY_INGESTION_EVALUATED",
+            "event_category": "MEMORY_WRITE_AND_TRANSFORMATION",
+            "agent_id": payload.agent_id,
+            "trace_id": getattr(request.state, "trace_id", None),
+            "source_component": "MEMORY_INGESTION",
+            "related_memory_id": record.id,
+            "related_memory_version": record.current_version,
+            "outcome": "DETECTED" if persisted_findings else "STORED_UNVERIFIED",
+            "idempotency_key": f"memory-ingestion-{record.id}-{record.current_version}",
+            "payload_json": {
+                "source_id": record.source_id,
+                "record_type": record.record_type,
+                "content_sha256": version.checksum,
+                "actor_id": context.user_id,
+                "actor_role": context.role,
+                "detection_ids": [item.get("id") for item in persisted_findings],
+                "incident_ids": incident_ids,
+                "detection_categories": sorted({
+                    str(item.get("detection_category")) for item in persisted_findings
+                }),
+            },
+        })
+    except SecurityDependencyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Memory security evaluation or evidence persistence failed.")
+        raise SecurityDependencyError(
+            "Memory was stored as UNVERIFIED but its security evaluation could not be completed."
+        ) from exc
+
     return MemoryRecordResponse(
         id=record.id,
         tenant_id=record.tenant_id,

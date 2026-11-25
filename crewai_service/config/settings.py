@@ -93,7 +93,8 @@ class CrewAISettings(BaseSettings):
     CHRONOCONGISEC_API_BASE_URL: str = "http://127.0.0.1:8000/api/v1"
     CHRONOCONGISEC_TENANT_ID: str = "tenant-a-uuid-001"
     CHRONOCONGISEC_AUTH_TOKEN: Optional[str] = None
-    CHRONOCONGISEC_AUTH_EMAIL: str = "analyst@company-a.com"
+    # Service-principal credentials must be explicitly configured; never reuse employee defaults.
+    CHRONOCONGISEC_AUTH_EMAIL: Optional[str] = None
     # Passwords are deliberately never given a default.  A CrewAI runtime must
     # either receive an explicit service token or obtain credentials from its
     # configured environment/secret store.  A missing value fails closed in the

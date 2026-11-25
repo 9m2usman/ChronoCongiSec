@@ -351,7 +351,14 @@ class RedisRateLimiter:
                     raise SecurityDependencyError("Rate limiting service unavailable.") from exc
                 return RateLimitResult(allowed=True, remaining=max_requests, retry_after=None)
 
-        # In-memory local fallback for tests where redis_client is None
+        # In-memory local fallback is strictly forbidden in production
+        from backend.app.core.config import get_settings
+        if get_settings().APP_ENV == "production":
+            if self.failure_policy == "fail_closed":
+                raise SecurityDependencyError("Rate limiting service unavailable.")
+            return RateLimitResult(allowed=True, remaining=max_requests, retry_after=None)
+
+        # In-memory local fallback for non-production tests where redis_client is None
         cutoff = now - window_seconds
         self._counters[key] = [t for t in self._counters[key] if t > cutoff]
 

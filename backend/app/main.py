@@ -13,7 +13,7 @@ import hashlib
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, Tuple
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -31,6 +31,7 @@ from backend.app.api.chronimem import router as chronimem_router
 from backend.app.api.containment import router as containment_router
 from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
+from backend.app.api.enterprise import router as enterprise_router
 from backend.app.api.gateway import router as gateway_router
 from backend.app.api.incident_management import (
     memory_quarantine_router,
@@ -43,7 +44,7 @@ from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.api.traces import router as traces_router
 from backend.app.core.config import Settings, get_settings
-from backend.app.core.dependencies import InMemoryRateLimiter
+from backend.app.core.dependencies import InMemoryRateLimiter, RedisRateLimiter
 from backend.app.core.exceptions import API_ERROR_RESPONSES, register_exception_handlers
 from backend.app.core.logging import setup_logging
 
@@ -194,47 +195,121 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Wire persistent repositories when session factory is configured
     session_factory = getattr(app.state, "db_session_factory", None)
+    default_in_memory = getattr(app.state, "_default_in_memory_instances", {})
+
+    def _needs_db_wiring(attr_name: str) -> bool:
+        current = getattr(app.state, attr_name, None)
+        return current is None or (attr_name in default_in_memory and current is default_in_memory[attr_name])
+
     if session_factory is not None:
         auth_repo = getattr(app.state, "auth_repo", None)
         if auth_repo is None or getattr(auth_repo, "is_demo", False):
             from backend.app.database.repositories.auth import DatabaseAuthRepository
             app.state.auth_repo = DatabaseAuthRepository(session_factory)
 
-        if getattr(app.state, "agent_repo", None) is None:
+        if _needs_db_wiring("agent_repo"):
             from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
             app.state.agent_repo = SqlAlchemyAgentRepository(session_factory)
 
-        if getattr(app.state, "memory_repo", None) is None:
+        if _needs_db_wiring("memory_repo"):
             from backend.app.memory.adapters import DatabaseMemoryRepository
             app.state.memory_repo = DatabaseMemoryRepository(session_factory)
 
-        if getattr(app.state, "gateway_repo", None) is None:
+        if _needs_db_wiring("gateway_repo"):
             from backend.app.api.gateway import SqlAlchemyGatewayRepository
             app.state.gateway_repo = SqlAlchemyGatewayRepository(session_factory)
 
-        if getattr(app.state, "incident_repo", None) is None:
+        if _needs_db_wiring("incident_repo"):
             from backend.app.api.incident_management import SqlAlchemyIncidentRepository
             app.state.incident_repo = SqlAlchemyIncidentRepository(session_factory)
 
-        if getattr(app.state, "trace_repo", None) is None:
+        if _needs_db_wiring("trace_repo"):
             from backend.app.api.traces import SqlAlchemyTraceRepository
             app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
 
-        if getattr(app.state, "baseline_repo", None) is None:
+        if _needs_db_wiring("baseline_repo"):
             from backend.app.database.repositories.baseline import SqlAlchemyBaselineRepository
             app.state.baseline_repo = SqlAlchemyBaselineRepository(session_factory)
 
-        if getattr(app.state, "observation_repo", None) is None:
+        if _needs_db_wiring("enterprise_repo"):
+            from backend.app.enterprise.repository import SqlAlchemyEnterpriseRepository
+            app.state.enterprise_repo = SqlAlchemyEnterpriseRepository(session_factory)
+
+        if _needs_db_wiring("observation_repo"):
             from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
             app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
+
+        if getattr(app.state, "detection_repo", None) is None:
+            from backend.app.database.repositories.detection import SqlAlchemyDetectionRepository
+            app.state.detection_repo = SqlAlchemyDetectionRepository(session_factory)
+
+        if getattr(app.state, "detection_engine", None) is None:
+            from backend.app.security.detection import DetectionEngine
+            app.state.detection_engine = DetectionEngine(
+                detection_repo=app.state.detection_repo,
+                baseline_repo=app.state.baseline_repo,
+                agent_repo=app.state.agent_repo,
+            )
 
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
 
+        if getattr(app.state, "trust_decision_store", None) is None:
+            from backend.app.recovery.store import SqlTrustDecisionStore
+            app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
+
         if getattr(app.state, "outbox_processor", None) is None:
-            from backend.app.workers.outbox import OutboxProcessor
-            app.state.outbox_processor = OutboxProcessor(session_factory)
+            from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
+            processor = OutboxProcessor(
+                session_factory,
+                worker_id=getattr(settings, "OUTBOX_WORKER_ID", "") or None,
+                max_attempts=getattr(settings, "OUTBOX_MAX_ATTEMPTS", 5),
+                backoff_base_seconds=getattr(settings, "OUTBOX_BACKOFF_BASE_SECONDS", 2.0),
+                backoff_max_seconds=getattr(settings, "OUTBOX_BACKOFF_MAX_SECONDS", 300.0),
+                lease_seconds=getattr(settings, "OUTBOX_LEASE_SECONDS", 60),
+                batch_size=getattr(settings, "OUTBOX_BATCH_SIZE", 50),
+            )
+            register_default_outbox_handlers(processor)
+            app.state.outbox_processor = processor
+    elif getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        raise RuntimeError(
+            "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but PostgreSQL session factory is not configured."
+        )
+
+    # Initialize the selected distributed rate limiter before any request can be served.
+    # Redis selection is explicit; an unavailable Redis instance is never replaced silently
+    # by process-local counters.
+    if (
+        getattr(app.state, "rate_limiter", None) is None
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "redis"
+    ):
+        from redis.asyncio import Redis
+
+        redis_client = Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=False,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            health_check_interval=30,
+        )
+        redis_limiter = RedisRateLimiter(
+            redis_client=redis_client,
+            failure_policy=getattr(settings, "RATE_LIMIT_REDIS_FAILURE_POLICY", "fail_closed"),
+        )
+        try:
+            if not await redis_limiter.ping():
+                raise RuntimeError("Redis readiness ping returned false.")
+        except Exception as exc:
+            await redis_client.aclose()
+            raise RuntimeError(
+                "Redis-backed rate limiter initialization failed; startup is fail-closed."
+            ) from exc
+
+        app.state.redis_client = redis_client
+        app.state.rate_limiter = redis_limiter
+        logger.info("Initialized Redis-backed distributed rate limiter.")
+
 
     # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
@@ -323,9 +398,56 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory trace repository is strictly forbidden in production."
             )
 
+        for repository_name in ("observation_repo", "detection_repo"):
+            repository = getattr(app.state, repository_name, None)
+            if (
+                repository is None
+                or getattr(repository, "is_in_memory", True)
+                or not getattr(repository, "is_persistent", False)
+            ):
+                raise RuntimeError(
+                    f"Production startup failure: Persistent {repository_name} is not configured. "
+                    "In-memory security evidence stores are strictly forbidden in production."
+                )
+
+        if getattr(app.state, "detection_engine", None) is None:
+            raise RuntimeError(
+                "Production startup failure: Security detection engine is not configured."
+            )
+
+        checkpoint_service = getattr(app.state, "pre_action_checkpoint_service", None)
+        if (
+            not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None))
+            or getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Durable pre-action checkpoint service is not configured."
+            )
+
+        runtime_cancellation = getattr(app.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 3 active/queued agent cancellation adapter is not configured."
+            )
+
+        resource_isolation = getattr(app.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 2 company resource isolation adapter is not configured."
+            )
+
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
-    if getattr(app.state, "recovery_service", None) is None:
+    if (
+        session_factory is not None
+        and getattr(app.state, "trust_evaluator", None) is None
+        and getattr(app.state, "memory_repo", None) is not None
+    ):
+        from backend.app.security.runtime import get_trust_evaluator
+        app.state.trust_evaluator = get_trust_evaluator(app.state, app.state.memory_repo)
+
+    if _needs_db_wiring("recovery_service"):
         if session_factory is not None:
             from backend.app.recovery.store import create_recovery_service
             app.state.recovery_service = create_recovery_service(
@@ -333,14 +455,47 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 memory_repo=getattr(app.state, "memory_repo", None),
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
-        elif settings.APP_ENV != "production":
+        elif settings.APP_ENV != "production" and getattr(app.state, "recovery_service", None) is None:
             from backend.app.recovery.store import create_in_memory_recovery_service
             app.state.recovery_service = create_in_memory_recovery_service(
                 memory_repo=getattr(app.state, "memory_repo", None),
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
 
+    if getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        outbox_processor = getattr(app.state, "outbox_processor", None)
+        if outbox_processor is None:
+            raise RuntimeError(
+                "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but outbox_processor is not initialized."
+            )
+        import asyncio
+        app.state.outbox_worker_task = asyncio.create_task(
+            outbox_processor.run_loop(
+                poll_interval_sec=getattr(settings, "OUTBOX_POLL_INTERVAL_SECONDS", 1.0)
+            ),
+            name="amsc-outbox-worker",
+        )
+    else:
+        app.state.outbox_worker_task = None
+
     yield
+    outbox_worker_task = getattr(app.state, "outbox_worker_task", None)
+    outbox_processor = getattr(app.state, "outbox_processor", None)
+    if outbox_worker_task is not None and outbox_processor is not None:
+        await outbox_processor.shutdown(outbox_worker_task)
+        app.state.outbox_worker_task = None
+
+    # Release the Redis connection pool created during application startup.
+    redis_client = getattr(app.state, "redis_client", None)
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+        except Exception as exc:
+            logger.warning("Redis client shutdown failed: %s", exc)
+        finally:
+            app.state.redis_client = None
+            app.state.rate_limiter = None
+
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
@@ -348,7 +503,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 # --- Application Factory ---
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    pre_action_checkpoint_service: Optional[Any] = None,
+    agent_runtime_cancellation: Optional[Any] = None,
+    company_resource_security_adapter: Optional[Any] = None,
+) -> FastAPI:
     """Create and configure the FastAPI application instance."""
     if settings is None:
         settings = get_settings()
@@ -374,6 +535,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # Track factory-provided in-memory adapters so lifespan startup can replace
+    # them with persistent database-backed implementations when configured.
+    app.state._default_in_memory_instances = {}
+    app.state.agent_runtime_cancellation = agent_runtime_cancellation
+    app.state.company_resource_security_adapter = company_resource_security_adapter
+    app.state.pre_action_checkpoint_service = pre_action_checkpoint_service
 
     # Revocation store initialization (GAP-007)
     if settings.APP_ENV != "production":
@@ -382,17 +549,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.revocation_store = getattr(app.state, "revocation_store", None)
 
-    # In development and test, initialize safe in-memory rate limiter if permitted
-    if settings.APP_ENV != "production" and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
+    # In-memory rate limiting is permitted only when explicitly selected.
+    # Redis selection is wired during lifespan startup, with a mandatory ping.
+    if (
+        settings.APP_ENV != "production"
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "in_memory"
+        and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False)
+    ):
         app.state.rate_limiter = InMemoryRateLimiter()
     else:
         app.state.rate_limiter = None
+    app.state.redis_client = None
 
     # Memory repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
         from backend.app.memory.repository import get_default_repository, seed_enterprise_demo_memories
         app.state.memory_repo = get_default_repository()
         seed_enterprise_demo_memories(app.state.memory_repo)
+        app.state._default_in_memory_instances["memory_repo"] = app.state.memory_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -405,6 +579,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.APP_ENV != "production":
         from backend.app.api.agents import get_default_agent_repository
         app.state.agent_repo = get_default_agent_repository()
+        app.state._default_in_memory_instances["agent_repo"] = app.state.agent_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -417,6 +592,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.APP_ENV != "production":
         from backend.app.api.gateway import get_default_gateway_repository
         app.state.gateway_repo = get_default_gateway_repository()
+        app.state._default_in_memory_instances["gateway_repo"] = app.state.gateway_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -429,6 +605,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.APP_ENV != "production":
         from backend.app.api.incident_management import get_default_incident_repository
         app.state.incident_repo = get_default_incident_repository()
+        app.state._default_in_memory_instances["incident_repo"] = app.state.incident_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -441,6 +618,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.APP_ENV != "production":
         from backend.app.api.traces import get_default_trace_repository
         app.state.trace_repo = get_default_trace_repository()
+        app.state._default_in_memory_instances["trace_repo"] = app.state.trace_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -453,6 +631,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.APP_ENV != "production":
         from backend.app.api.baseline import get_default_baseline_repository
         app.state.baseline_repo = get_default_baseline_repository()
+        app.state._default_in_memory_instances["baseline_repo"] = app.state.baseline_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -461,10 +640,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.baseline_repo = None
 
+    # Enterprise Connectivity repository initialization
+    if settings.APP_ENV != "production":
+        from backend.app.enterprise.repository import get_default_enterprise_repository
+        app.state.enterprise_repo = get_default_enterprise_repository()
+        app.state._default_in_memory_instances["enterprise_repo"] = app.state.enterprise_repo
+    else:
+        session_factory = getattr(app.state, "db_session_factory", None)
+        if session_factory is not None:
+            from backend.app.enterprise.repository import SqlAlchemyEnterpriseRepository
+            app.state.enterprise_repo = SqlAlchemyEnterpriseRepository(session_factory)
+        else:
+            app.state.enterprise_repo = None
+
     # Observation repository initialization (Phase 1 §3 & §4)
     if settings.APP_ENV != "production":
         from backend.app.api.observation import get_default_observation_repository
         app.state.observation_repo = get_default_observation_repository()
+        app.state._default_in_memory_instances["observation_repo"] = app.state.observation_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -483,6 +676,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             baseline_repo=app.state.baseline_repo,
             agent_repo=app.state.agent_repo,
         )
+        app.state._default_in_memory_instances["detection_repo"] = app.state.detection_repo
+        app.state._default_in_memory_instances["detection_engine"] = app.state.detection_engine
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -498,6 +693,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.detection_repo = None
             app.state.detection_engine = None
 
+    # Pre-action checkpointing: metadata-only in-memory adapter is allowed only
+    # in development/test. Production must inject a durable resource snapshot service.
+    if settings.APP_ENV != "production" and app.state.pre_action_checkpoint_service is None:
+        from backend.app.security.checkpoints import InMemoryPreActionCheckpointService
+        app.state.pre_action_checkpoint_service = InMemoryPreActionCheckpointService()
+
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
     app.state.quarantine_service = get_default_quarantine_service()
@@ -510,6 +711,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 memory_repo=app.state.memory_repo,
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
+            app.state._default_in_memory_instances["recovery_service"] = app.state.recovery_service
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
@@ -651,6 +853,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 deps["incident_repo"] = "ready"
 
+        # Trust Decision Store Check (Phase 1 Requirement E)
+        trust_store = getattr(app_instance.state, "trust_decision_store", None)
+        if trust_store is None:
+            if cfg.APP_ENV == "production":
+                deps["trust_decision_store"] = "unavailable"
+                all_ready = False
+            else:
+                deps["trust_decision_store"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and not getattr(trust_store, "is_persistent", False):
+            deps["trust_decision_store"] = "rejected (in-memory in production)"
+            all_ready = False
+        else:
+            deps["trust_decision_store"] = "ready"
+
         # Revocation Store Check (GAP-007 / Finding B & N)
         rev_store = getattr(app_instance.state, "revocation_store", None)
         if rev_store is None:
@@ -681,10 +897,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["observation_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(obs_repo, "is_in_memory", True)
+            or not getattr(obs_repo, "is_persistent", False)
+        ):
+            deps["observation_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["observation_repo"] = "ready"
 
-        # Detection Repo Check (Phase 2)
+        # Detection Repo Check (Phase 2 / Phase 4)
         det_repo = getattr(app_instance.state, "detection_repo", None)
         if det_repo is None:
             if cfg.APP_ENV == "production":
@@ -692,8 +914,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["detection_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(det_repo, "is_in_memory", True)
+            or not getattr(det_repo, "is_persistent", False)
+        ):
+            deps["detection_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["detection_repo"] = "ready"
+
+        detection_engine = getattr(app_instance.state, "detection_engine", None)
+        if detection_engine is None:
+            deps["detection_engine"] = "unavailable"
+            all_ready = False
+        else:
+            deps["detection_engine"] = "ready"
+
+        checkpoint_service = getattr(app_instance.state, "pre_action_checkpoint_service", None)
+        if not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None)):
+            if cfg.APP_ENV == "production":
+                deps["pre_action_checkpoint_service"] = "unavailable"
+                all_ready = False
+            else:
+                deps["pre_action_checkpoint_service"] = "not configured (dev/test)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            deps["pre_action_checkpoint_service"] = "rejected (non-durable in production)"
+            all_ready = False
+        else:
+            deps["pre_action_checkpoint_service"] = (
+                "metadata-only (dev/test)"
+                if getattr(checkpoint_service, "is_in_memory", False)
+                else "ready"
+            )
+
+        runtime_cancellation = getattr(app_instance.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            if cfg.APP_ENV == "production":
+                deps["agent_runtime_cancellation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["agent_runtime_cancellation"] = "not configured (dev/test)"
+        else:
+            deps["agent_runtime_cancellation"] = "ready"
+
+        resource_isolation = getattr(app_instance.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            if cfg.APP_ENV == "production":
+                deps["company_resource_isolation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["company_resource_isolation"] = "not configured (dev/test)"
+        else:
+            deps["company_resource_isolation"] = "ready"
 
         return all_ready, deps
 
@@ -767,6 +1042,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router.include_router(branches_router)
     api_router.include_router(admin_router)
     api_router.include_router(tenants_router)
+    api_router.include_router(enterprise_router)
     api_router.include_router(agents_router)
     api_router.include_router(baseline_router)
     api_router.include_router(observation_router)

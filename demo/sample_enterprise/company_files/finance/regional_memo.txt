@@ -1,0 +1,3 @@
+Procurement Policy
+Max_Auto_Approve_Limit: 1000 USD
+Note: Regional branch memo pending HQ signoff.
