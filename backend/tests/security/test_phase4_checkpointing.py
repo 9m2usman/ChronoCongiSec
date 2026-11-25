@@ -24,7 +24,7 @@ async def test_development_checkpoint_is_idempotent_and_explicitly_metadata_only
     }
 
     first = await service.capture_pre_action_checkpoint(**values)
-    retry_values = {**values, "proposal_id": "proposal-retry"}
+    retry_values = {**values, "proposal_id": "proposal-retry", "trace_id": "trace-retry"}
     second = await service.capture_pre_action_checkpoint(**retry_values)
 
     assert first["committed"] is True
