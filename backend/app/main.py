@@ -235,7 +235,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
-            app.state.outbox_processor = OutboxProcessor(session_factory)
+            app.state.outbox_processor = OutboxProcessor(
+                session_factory,
+                worker_id=getattr(settings, "OUTBOX_WORKER_ID", "") or None,
+                max_attempts=getattr(settings, "OUTBOX_MAX_ATTEMPTS", 5),
+                backoff_base_seconds=getattr(settings, "OUTBOX_BACKOFF_BASE_SECONDS", 2.0),
+                backoff_max_seconds=getattr(settings, "OUTBOX_BACKOFF_MAX_SECONDS", 300.0),
+                lease_seconds=getattr(settings, "OUTBOX_LEASE_SECONDS", 60),
+                batch_size=getattr(settings, "OUTBOX_BATCH_SIZE", 50),
+            )
+    elif getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        raise RuntimeError(
+            "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but PostgreSQL session factory is not configured."
+        )
 
     # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
@@ -341,7 +353,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
 
+    if getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        outbox_processor = getattr(app.state, "outbox_processor", None)
+        if outbox_processor is None:
+            raise RuntimeError(
+                "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but outbox_processor is not initialized."
+            )
+        import asyncio
+        app.state.outbox_worker_task = asyncio.create_task(
+            outbox_processor.run_loop(
+                poll_interval_sec=getattr(settings, "OUTBOX_POLL_INTERVAL_SECONDS", 1.0)
+            ),
+            name="amsc-outbox-worker",
+        )
+    else:
+        app.state.outbox_worker_task = None
+
     yield
+    outbox_worker_task = getattr(app.state, "outbox_worker_task", None)
+    outbox_processor = getattr(app.state, "outbox_processor", None)
+    if outbox_worker_task is not None and outbox_processor is not None:
+        await outbox_processor.shutdown(outbox_worker_task)
+        app.state.outbox_worker_task = None
+
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
