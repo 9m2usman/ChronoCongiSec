@@ -399,6 +399,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Production startup failure: Security detection engine is not configured."
             )
 
+        runtime_cancellation = getattr(app.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 3 active/queued agent cancellation adapter is not configured."
+            )
+
+        resource_isolation = getattr(app.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 2 company resource isolation adapter is not configured."
+            )
+
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
     if getattr(app.state, "recovery_service", None) is None:
@@ -840,6 +852,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             all_ready = False
         else:
             deps["detection_engine"] = "ready"
+
+        runtime_cancellation = getattr(app_instance.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            deps["agent_runtime_cancellation"] = "unavailable"
+            all_ready = False
+        else:
+            deps["agent_runtime_cancellation"] = "ready"
+
+        resource_isolation = getattr(app_instance.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            deps["company_resource_isolation"] = "unavailable"
+            all_ready = False
+        else:
+            deps["company_resource_isolation"] = "ready"
 
         return all_ready, deps
 
