@@ -28,7 +28,7 @@ import logging
 import math
 import re
 import time
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple, runtime_checkable
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
