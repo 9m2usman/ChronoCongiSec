@@ -18,7 +18,7 @@ Security & Governance:
 
 import inspect
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
