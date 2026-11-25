@@ -22,7 +22,7 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
     def _annotate(nodeid, longrepr):
         text = str(longrepr)[-1800:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
         title = nodeid.replace("::", " ").replace(",", " ")[:180]
-        _sys.__stdout__.write(f"::error title={title}::{text}\n")
+        _sys.__stdout__.write("\n" + f"::error title={title}::{text}\n")
         _sys.__stdout__.flush()
 
     @_pytest.hookimpl(hookwrapper=True)
