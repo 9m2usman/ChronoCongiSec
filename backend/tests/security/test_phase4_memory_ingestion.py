@@ -29,6 +29,9 @@ async def test_memory_ingestion_runs_detection_and_persists_correlated_observati
         enable_ml_advisory=False,
     )
     app.state.observation_repo = observation_repo
+    from backend.app.api.incident_management import InMemoryIncidentRepository
+    incident_repo = InMemoryIncidentRepository()
+    app.state.incident_repo = incident_repo
     app.dependency_overrides[get_repository] = lambda: memory_repo
 
     token = create_access_token(
@@ -73,9 +76,19 @@ async def test_memory_ingestion_runs_detection_and_persists_correlated_observati
         limit=100,
         offset=0,
     )
-    assert any(
-        event.get("related_memory_id") == payload["id"]
-        and event.get("outcome") == "DETECTED"
-        and event.get("payload", {}).get("content_sha256") == payload["checksum"]
-        for event in events
+    correlated_event = next(
+        (
+            event for event in events
+            if event.get("related_memory_id") == payload["id"]
+            and event.get("outcome") == "DETECTED"
+            and event.get("payload", {}).get("content_sha256") == payload["checksum"]
+        ),
+        None,
     )
+    assert correlated_event is not None
+    incident_ids = correlated_event.get("payload", {}).get("incident_ids", [])
+    assert incident_ids
+    incident, evidence = await incident_repo.get_incident("tenant-a-uuid-001", incident_ids[0])
+    assert incident.affected_record_id == payload["id"]
+    assert evidence
+    assert evidence[0].metadata_json["content_sha256"] == payload["checksum"]
