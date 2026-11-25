@@ -87,6 +87,8 @@ router = APIRouter(prefix="/memory", tags=["memory"])
 )
 async def api_ingest_memory(
     payload: MemoryIngestRequest,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
     tenant_id: str = Depends(get_memory_tenant_id),
     repo: MemoryRepository = Depends(get_repository),
 ) -> MemoryRecordResponse:
@@ -108,6 +110,79 @@ async def api_ingest_memory(
         record, version = await res
     else:
         record, version = res
+
+    # Phase 4: every newly ingested memory is inspected before it can become eligible
+    # for normal retrieval. New records remain UNVERIFIED regardless of detector output.
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    detection_engine = getattr(request.app.state, "detection_engine", None)
+    detection_repo = getattr(request.app.state, "detection_repo", None)
+    if detection_engine is None or detection_repo is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Durable memory detection is not configured.")
+        from backend.app.security.detection import get_default_detection_engine
+        detection_engine = detection_engine or get_default_detection_engine()
+        detection_repo = detection_repo or getattr(detection_engine, "detection_repo", None)
+    if detection_engine is None or detection_repo is None:
+        raise SecurityDependencyError("Memory detection persistence is unavailable.")
+
+    try:
+        findings = await detection_engine.detect_memory_integrity(
+            tenant_id=tenant_id,
+            content=payload.content,
+            record=record,
+            record_id=record.id,
+            expected_checksum=version.checksum,
+            source_type=payload.record_type,
+            agent_id=payload.agent_id,
+            branch_id=getattr(context, "branch_id", None),
+            parent_record_id=payload.parent_record_id,
+            memory_repo=repo,
+            trace_id=getattr(request.state, "trace_id", None),
+            actor_role=getattr(context, "role", None),
+        )
+        persisted_findings = []
+        for finding in findings:
+            persisted = await detection_repo.record_detection(finding.to_dict())
+            persisted_findings.append(persisted)
+
+        observation_repo = getattr(request.app.state, "observation_repo", None)
+        if observation_repo is None:
+            if settings.APP_ENV == "production":
+                raise SecurityDependencyError("Durable memory observation is not configured.")
+            from backend.app.api.observation import get_default_observation_repository
+            observation_repo = get_default_observation_repository()
+        await observation_repo.record_event({
+            "tenant_id": tenant_id,
+            "branch_id": getattr(context, "branch_id", None),
+            "event_type": "MEMORY_INGESTION_EVALUATED",
+            "event_category": "MEMORY_WRITE_AND_TRANSFORMATION",
+            "agent_id": payload.agent_id,
+            "trace_id": getattr(request.state, "trace_id", None),
+            "source_component": "MEMORY_INGESTION",
+            "related_memory_id": record.id,
+            "related_memory_version": record.current_version,
+            "outcome": "DETECTED" if persisted_findings else "STORED_UNVERIFIED",
+            "idempotency_key": f"memory-ingestion-{record.id}-{record.current_version}",
+            "payload_json": {
+                "source_id": record.source_id,
+                "record_type": record.record_type,
+                "content_sha256": version.checksum,
+                "actor_id": context.user_id,
+                "actor_role": context.role,
+                "detection_ids": [item.get("id") for item in persisted_findings],
+                "detection_categories": sorted({
+                    str(item.get("detection_category")) for item in persisted_findings
+                }),
+            },
+        })
+    except SecurityDependencyError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Memory security evaluation or evidence persistence failed.")
+        raise SecurityDependencyError(
+            "Memory was stored as UNVERIFIED but its security evaluation could not be completed."
+        ) from exc
+
     return MemoryRecordResponse(
         id=record.id,
         tenant_id=record.tenant_id,
