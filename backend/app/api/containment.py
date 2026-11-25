@@ -130,9 +130,9 @@ async def get_containment_recommendations(
     from backend.app.api.memory import get_repository as get_memory_repository
     from backend.app.api.incident_management import get_incident_repository
 
-    mem_repo = get_memory_repository(http_request) if http_request is not None else None
+    mem_repo = await get_memory_repository(http_request) if http_request is not None else None
     inc_repo = (
-        await get_incident_repository(http_request)
+        get_incident_repository(http_request)
         if http_request is not None
         else None
     )
