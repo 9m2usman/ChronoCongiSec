@@ -44,7 +44,7 @@ from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.api.traces import router as traces_router
 from backend.app.core.config import Settings, get_settings
-from backend.app.core.dependencies import InMemoryRateLimiter
+from backend.app.core.dependencies import InMemoryRateLimiter, RedisRateLimiter
 from backend.app.core.exceptions import API_ERROR_RESPONSES, register_exception_handlers
 from backend.app.core.logging import setup_logging
 
@@ -249,6 +249,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but PostgreSQL session factory is not configured."
         )
 
+    # Initialize the selected distributed rate limiter before any request can be served.
+    # Redis selection is explicit; an unavailable Redis instance is never replaced silently
+    # by process-local counters.
+    if (
+        getattr(app.state, "rate_limiter", None) is None
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "redis"
+    ):
+        from redis.asyncio import Redis
+
+        redis_client = Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=False,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            health_check_interval=30,
+        )
+        redis_limiter = RedisRateLimiter(
+            redis_client=redis_client,
+            failure_policy=getattr(settings, "RATE_LIMIT_REDIS_FAILURE_POLICY", "fail_closed"),
+        )
+        try:
+            if not await redis_limiter.ping():
+                raise RuntimeError("Redis readiness ping returned false.")
+        except Exception as exc:
+            await redis_client.aclose()
+            raise RuntimeError(
+                "Redis-backed rate limiter initialization failed; startup is fail-closed."
+            ) from exc
+
+        app.state.redis_client = redis_client
+        app.state.rate_limiter = redis_limiter
+        logger.info("Initialized Redis-backed distributed rate limiter.")
+
+
     # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
         auth_repo = getattr(app.state, "auth_repo", None)
@@ -417,11 +451,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.revocation_store = getattr(app.state, "revocation_store", None)
 
-    # In development and test, initialize safe in-memory rate limiter if permitted
-    if settings.APP_ENV != "production" and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
+    # In-memory rate limiting is permitted only when explicitly selected.
+    # Redis selection is wired during lifespan startup, with a mandatory ping.
+    if (
+        settings.APP_ENV != "production"
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "in_memory"
+        and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False)
+    ):
         app.state.rate_limiter = InMemoryRateLimiter()
     else:
         app.state.rate_limiter = None
+    app.state.redis_client = None
 
     # Memory repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":

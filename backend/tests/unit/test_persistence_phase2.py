@@ -67,6 +67,23 @@ CREATE TABLE agent_versions (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
     UNIQUE (agent_id, version)
 );
+CREATE TABLE agent_security_profiles (
+    id VARCHAR(36) PRIMARY KEY,
+    tenant_id VARCHAR(36) NOT NULL,
+    agent_id VARCHAR(36) NOT NULL UNIQUE,
+    owner_department VARCHAR(128) NOT NULL,
+    approved_purpose TEXT NOT NULL,
+    approved_goals JSON DEFAULT '[]' NOT NULL,
+    branch_id VARCHAR(36),
+    data_scope JSON DEFAULT '[]' NOT NULL,
+    operational_restrictions JSON DEFAULT '{}' NOT NULL,
+    approval_requirements JSON DEFAULT '{}' NOT NULL,
+    profile_version VARCHAR(32) DEFAULT 'v1.0.0' NOT NULL,
+    status VARCHAR(32) DEFAULT 'ACTIVE' NOT NULL,
+    governed_by_user_id VARCHAR(36) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
 """
 
 MEMORY_DDL = """
@@ -509,3 +526,91 @@ async def test_outbox_processor_safe_limit_and_wildcard_handler():
     processor.stop()
     assert processor._running is False
 
+
+
+# ---------------------------------------------------------------------------
+# 5. Redis Rate Limiter Lifecycle
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_lifespan_initializes_and_closes_real_redis_rate_limiter(monkeypatch):
+    """Redis selection creates a connected client and closes its pool at shutdown."""
+    from redis.asyncio import Redis
+
+    from backend.app.core.dependencies import RedisRateLimiter
+
+    class FakeRedis:
+        def __init__(self):
+            self.ping_calls = 0
+            self.close_calls = 0
+
+        async def ping(self):
+            self.ping_calls += 1
+            return True
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    fake_client = FakeRedis()
+    monkeypatch.setattr(
+        Redis,
+        "from_url",
+        classmethod(lambda cls, url, **kwargs: fake_client),
+    )
+    settings = Settings(
+        APP_ENV="development",
+        DATABASE_URL="",
+        REDIS_URL="redis://redis-test:6379/0",
+        RATE_LIMITER_BACKEND="redis",
+        ALLOW_IN_MEMORY_RATE_LIMITER=False,
+    )
+    app = create_app(settings=settings)
+
+    assert app.state.rate_limiter is None
+    async with lifespan(app):
+        assert isinstance(app.state.rate_limiter, RedisRateLimiter)
+        assert app.state.rate_limiter.backend == "redis"
+        assert app.state.rate_limiter.redis_client is fake_client
+        assert fake_client.ping_calls == 1
+        assert fake_client.close_calls == 0
+
+    assert fake_client.close_calls == 1
+    assert app.state.redis_client is None or app.state.redis_client is fake_client
+
+
+@pytest.mark.asyncio
+async def test_lifespan_fails_closed_when_selected_redis_is_unavailable(monkeypatch):
+    """A configured Redis backend never falls back to local in-memory counters."""
+    from redis.asyncio import Redis
+
+    class UnavailableRedis:
+        def __init__(self):
+            self.close_calls = 0
+
+        async def ping(self):
+            raise ConnectionError("Redis unavailable")
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    fake_client = UnavailableRedis()
+    monkeypatch.setattr(
+        Redis,
+        "from_url",
+        classmethod(lambda cls, url, **kwargs: fake_client),
+    )
+    settings = Settings(
+        APP_ENV="development",
+        DATABASE_URL="",
+        REDIS_URL="redis://redis-test:6379/0",
+        RATE_LIMITER_BACKEND="redis",
+        ALLOW_IN_MEMORY_RATE_LIMITER=True,
+    )
+    app = create_app(settings=settings)
+
+    with pytest.raises(RuntimeError, match="startup is fail-closed"):
+        async with lifespan(app):
+            pytest.fail("Lifespan must not start with unavailable Redis")
+
+    assert fake_client.close_calls == 1
+    assert app.state.rate_limiter is None

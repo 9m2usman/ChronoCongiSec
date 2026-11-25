@@ -144,7 +144,7 @@ def test_production_lifespan_wires_database_auth_before_rate_limiter_guard():
     with pytest.raises(RuntimeError) as exc:
         with TestClient(app):
             pass
-    assert "Redis-backed rate limiter is not configured" in str(exc.value)
+    assert "Redis-backed rate limiter initialization failed" in str(exc.value)
     assert getattr(app.state.auth_repo, "is_demo", False) is False
 
 
@@ -546,7 +546,7 @@ def test_production_lifespan_detects_missing_or_in_memory_rate_limiter():
     with pytest.raises(RuntimeError) as exc:
         with TestClient(app):
             pass
-    assert "Redis-backed rate limiter is not configured" in str(exc.value)
+    assert "Redis-backed rate limiter initialization failed" in str(exc.value)
 
 
 # ============================================================================
