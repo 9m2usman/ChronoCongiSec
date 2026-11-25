@@ -153,6 +153,7 @@ class ReasonCode(str, Enum):
     POLICY_CONSTRAINT_MISSING = "POLICY_CONSTRAINT_MISSING"
     POLICY_CONFIG_INVALID = "POLICY_CONFIG_INVALID"
     APPROVAL_THRESHOLD_EXCEEDED = "APPROVAL_THRESHOLD_EXCEEDED"
+    HIGH_IMPACT_APPROVAL_REQUIRED = "HIGH_IMPACT_APPROVAL_REQUIRED"
     APPROVAL_INVALID = "APPROVAL_INVALID"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     APPROVAL_SCOPE_MISMATCH = "APPROVAL_SCOPE_MISMATCH"
@@ -227,6 +228,9 @@ class ToolPolicy:
     mandatory_constraints: Tuple[str, ...] = ()
     requires_memory_justification: bool = False
     review_permitted: bool = True
+    # High-impact operations whose risk does not depend on an agent-supplied number:
+    # every proposal needs a valid, bound human approval before it may be ALLOWed.
+    always_requires_review: bool = False
 
 
 DEFAULT_TOOL_POLICIES: Mapping[Tuple[str, str], ToolPolicy] = {
@@ -235,6 +239,12 @@ DEFAULT_TOOL_POLICIES: Mapping[Tuple[str, str], ToolPolicy] = {
         mandatory_constraints=("max_amount",),
         requires_memory_justification=True,
         review_permitted=True,
+    ),
+    # Phase 3: moving a company document to another employee is a high-impact mutation
+    # (agent profiles declare high_impact_mutations: REQUIRE_HUMAN_APPROVAL).
+    ("company_workspace", "transfer_file"): ToolPolicy(
+        review_permitted=True,
+        always_requires_review=True,
     ),
 }
 
@@ -539,6 +549,7 @@ _HUMAN_REASONS: Mapping[str, str] = {
     "POLICY_CONSTRAINT_MISSING": "A mandatory policy constraint is not configured for this tool operation.",
     "POLICY_CONFIG_INVALID": "Tool permission constraints are invalid or unrecognized.",
     "APPROVAL_THRESHOLD_EXCEEDED": "A parameter exceeds the approval threshold; human approval is required.",
+    "HIGH_IMPACT_APPROVAL_REQUIRED": "This operation is a high-impact mutation; human approval is required.",
     "REVIEW_NOT_PERMITTED": "This tool operation does not permit human review; the action is blocked.",
     "REFERENCED_UNTRUSTED_MEMORY": "A referenced memory is not eligible TRUSTED memory and cannot justify this action.",
     "MEMORY_JUSTIFICATION_REQUIRED": "This tool operation requires trusted memory justification.",
@@ -780,7 +791,7 @@ class PolicyEngine:
                 ev.set(PolicyCheck.PARAMETER_CEILINGS, CheckOutcome.BLOCK, ReasonCode.DESTINATION_NOT_ALLOWED)
 
         # Check 5 — approval thresholds (threshold < value; hard ceiling handled above).
-        needs_review = False
+        needs_review = tool_policy.always_requires_review
         for name in sorted(parsed.threshold):
             value = _number(facts.parameters.get(name))
             if value is None:
@@ -797,7 +808,13 @@ class PolicyEngine:
             ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.PASS)
             return
         if approval is None:
-            ev.set(PolicyCheck.APPROVAL_THRESHOLD, CheckOutcome.REVIEW, ReasonCode.APPROVAL_THRESHOLD_EXCEEDED)
+            ev.set(
+                PolicyCheck.APPROVAL_THRESHOLD,
+                CheckOutcome.REVIEW,
+                ReasonCode.HIGH_IMPACT_APPROVAL_REQUIRED
+                if tool_policy.always_requires_review
+                else ReasonCode.APPROVAL_THRESHOLD_EXCEEDED,
+            )
             return
         problem = self._approval_problem(approval, fingerprint, context, facts.agent_id)
         if problem is None:
