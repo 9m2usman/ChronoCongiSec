@@ -61,6 +61,7 @@ class CompanyFile(Base):
         ForeignKeyConstraint(["tenant_id", "workspace_id"], ["company_workspaces.tenant_id", "company_workspaces.id"], name="fk_company_files_workspace_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "owner_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_files_owner_membership", ondelete="RESTRICT"),
         Index("idx_company_files_tenant_workspace", "tenant_id", "workspace_id"),
+        Index("idx_company_files_owner", "tenant_id", "owner_user_id"),
     )
 
 
@@ -79,6 +80,7 @@ class CompanyFileVersion(Base):
         ForeignKeyConstraint(["tenant_id", "file_id"], ["company_files.tenant_id", "company_files.id"], name="fk_company_file_versions_file_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "created_by_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_versions_creator_membership", ondelete="RESTRICT"),
         Index("idx_company_file_versions_file", "tenant_id", "file_id", "version_number"),
+        Index("idx_company_file_versions_creator", "tenant_id", "created_by_user_id"),
     )
 
 
@@ -99,6 +101,8 @@ class CompanyFileTransfer(Base):
         ForeignKeyConstraint(["tenant_id", "file_id"], ["company_files.tenant_id", "company_files.id"], name="fk_company_file_transfers_file_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "sender_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_transfers_sender_membership", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "recipient_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_transfers_recipient_membership", ondelete="RESTRICT"),
+        Index("idx_company_file_transfers_file", "tenant_id", "file_id"),
+        Index("idx_company_file_transfers_sender", "tenant_id", "sender_user_id"),
         Index("idx_company_file_transfers_recipient", "tenant_id", "recipient_user_id", "status"),
     )
 
@@ -126,7 +130,9 @@ class CompanyTask(Base):
         ForeignKeyConstraint(["tenant_id", "branch_id"], ["branches.tenant_id", "branches.id"], name="fk_company_tasks_branch_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "created_by_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_tasks_creator_membership", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "assigned_to_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_tasks_assignee_membership", ondelete="RESTRICT"),
+        Index("idx_company_tasks_workspace", "tenant_id", "workspace_id"),
         Index("idx_company_tasks_branch_status", "tenant_id", "branch_id", "status"),
+        Index("idx_company_tasks_creator", "tenant_id", "created_by_user_id"),
         Index("idx_company_tasks_assignee", "tenant_id", "assigned_to_user_id", "status"),
     )
 
@@ -144,6 +150,7 @@ class CompanyTaskEvent(Base):
         ForeignKeyConstraint(["tenant_id", "task_id"], ["company_tasks.tenant_id", "company_tasks.id"], name="fk_company_task_events_task_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "actor_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_task_events_actor_membership", ondelete="RESTRICT"),
         Index("idx_company_task_events_task", "tenant_id", "task_id", "created_at"),
+        Index("idx_company_task_events_actor", "tenant_id", "actor_user_id"),
     )
 
 
@@ -163,6 +170,7 @@ class CompanyMessage(Base):
         CheckConstraint("sender_user_id <> recipient_user_id", name="different_participants"),
         ForeignKeyConstraint(["tenant_id", "sender_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_messages_sender_membership", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "recipient_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_messages_recipient_membership", ondelete="RESTRICT"),
+        Index("idx_company_messages_sender", "tenant_id", "sender_user_id"),
         Index("idx_company_messages_inbox", "tenant_id", "recipient_user_id", "sent_at"),
     )
 
@@ -201,4 +209,5 @@ class CompanyActivity(Base):
         ForeignKeyConstraint(["tenant_id", "branch_id"], ["branches.tenant_id", "branches.id"], name="fk_company_activity_branch_tenant", ondelete="RESTRICT"),
         ForeignKeyConstraint(["tenant_id", "actor_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_activity_actor_membership", ondelete="RESTRICT"),
         Index("idx_company_activity_timeline", "tenant_id", "branch_id", "created_at"),
+        Index("idx_company_activity_actor", "tenant_id", "actor_user_id"),
     )
