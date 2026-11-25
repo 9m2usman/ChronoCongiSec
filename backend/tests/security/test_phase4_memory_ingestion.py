@@ -152,4 +152,5 @@ async def test_memory_ingestion_rejects_agent_id_from_another_tenant():
     )
 
     assert response.status_code == 404
-    assert response.json()["error"]["message"] == "Agent not found."
+    assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+    assert "agent" not in response.json()["error"]["message"].lower()
