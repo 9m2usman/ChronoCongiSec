@@ -1330,13 +1330,11 @@ class TestSqlAlchemyRepositoriesParity:
                     )
                     session.add(agent)
 
-            # 1. Fetch unconfigured agent profile -> synthesized default
-            default_prof = await repo.get_agent_profile(agent_id=agent_id, tenant_id=tenant_id)
-            assert default_prof is not None
-            assert default_prof["agent_id"] == agent_id
-            assert default_prof["owner_department"] == "Enterprise Operations"
+            # 1. Missing profile is fail-closed: never synthesize permissions.
+            missing_prof = await repo.get_agent_profile(agent_id=agent_id, tenant_id=tenant_id)
+            assert missing_prof is None
 
-            # 2. Update profile with authoritative governance restrictions
+            # 2. Persist an explicit administrator-governed profile.
             update_payload = {
                 "owner_department": "Customer Support Operations",
                 "approved_purpose": "Handle tier-1 CRM tickets only",
@@ -1346,6 +1344,7 @@ class TestSqlAlchemyRepositoriesParity:
                 "approval_requirements": {"ticket_closure": "REQUIRE_HUMAN_APPROVAL"},
                 "profile_version": "v1.1.0",
                 "status": "ACTIVE",
+                "branch_id": None,
             }
             updated = await repo.update_agent_profile(
                 agent_id=agent_id,

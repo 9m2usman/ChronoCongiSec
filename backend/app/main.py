@@ -44,7 +44,7 @@ from backend.app.api.recovery import router as recovery_router
 from backend.app.api.tenants import router as tenants_router
 from backend.app.api.traces import router as traces_router
 from backend.app.core.config import Settings, get_settings
-from backend.app.core.dependencies import InMemoryRateLimiter
+from backend.app.core.dependencies import InMemoryRateLimiter, RedisRateLimiter
 from backend.app.core.exceptions import API_ERROR_RESPONSES, register_exception_handlers
 from backend.app.core.logging import setup_logging
 
@@ -235,7 +235,53 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
-            app.state.outbox_processor = OutboxProcessor(session_factory)
+            app.state.outbox_processor = OutboxProcessor(
+                session_factory,
+                worker_id=getattr(settings, "OUTBOX_WORKER_ID", "") or None,
+                max_attempts=getattr(settings, "OUTBOX_MAX_ATTEMPTS", 5),
+                backoff_base_seconds=getattr(settings, "OUTBOX_BACKOFF_BASE_SECONDS", 2.0),
+                backoff_max_seconds=getattr(settings, "OUTBOX_BACKOFF_MAX_SECONDS", 300.0),
+                lease_seconds=getattr(settings, "OUTBOX_LEASE_SECONDS", 60),
+                batch_size=getattr(settings, "OUTBOX_BATCH_SIZE", 50),
+            )
+    elif getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        raise RuntimeError(
+            "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but PostgreSQL session factory is not configured."
+        )
+
+    # Initialize the selected distributed rate limiter before any request can be served.
+    # Redis selection is explicit; an unavailable Redis instance is never replaced silently
+    # by process-local counters.
+    if (
+        getattr(app.state, "rate_limiter", None) is None
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "redis"
+    ):
+        from redis.asyncio import Redis
+
+        redis_client = Redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=False,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            health_check_interval=30,
+        )
+        redis_limiter = RedisRateLimiter(
+            redis_client=redis_client,
+            failure_policy=getattr(settings, "RATE_LIMIT_REDIS_FAILURE_POLICY", "fail_closed"),
+        )
+        try:
+            if not await redis_limiter.ping():
+                raise RuntimeError("Redis readiness ping returned false.")
+        except Exception as exc:
+            await redis_client.aclose()
+            raise RuntimeError(
+                "Redis-backed rate limiter initialization failed; startup is fail-closed."
+            ) from exc
+
+        app.state.redis_client = redis_client
+        app.state.rate_limiter = redis_limiter
+        logger.info("Initialized Redis-backed distributed rate limiter.")
+
 
     # Production startup validation: Enforce real database repositories and Redis rate limiter configuration
     if settings.APP_ENV == "production":
@@ -341,7 +387,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
 
+    if getattr(settings, "OUTBOX_WORKER_ENABLED", False):
+        outbox_processor = getattr(app.state, "outbox_processor", None)
+        if outbox_processor is None:
+            raise RuntimeError(
+                "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but outbox_processor is not initialized."
+            )
+        import asyncio
+        app.state.outbox_worker_task = asyncio.create_task(
+            outbox_processor.run_loop(
+                poll_interval_sec=getattr(settings, "OUTBOX_POLL_INTERVAL_SECONDS", 1.0)
+            ),
+            name="amsc-outbox-worker",
+        )
+    else:
+        app.state.outbox_worker_task = None
+
     yield
+    outbox_worker_task = getattr(app.state, "outbox_worker_task", None)
+    outbox_processor = getattr(app.state, "outbox_processor", None)
+    if outbox_worker_task is not None and outbox_processor is not None:
+        await outbox_processor.shutdown(outbox_worker_task)
+        app.state.outbox_worker_task = None
+
+    # Close the Redis connection pool created during startup. The rate limiter
+    # owns no separate lifecycle; the app owns the client and must release it.
+    redis_client = getattr(app.state, "redis_client", None)
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+        except Exception as exc:
+            logger.warning("Redis client shutdown failed: %s", exc)
+        finally:
+            app.state.redis_client = None
+            app.state.rate_limiter = None
+
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
@@ -383,11 +463,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         app.state.revocation_store = getattr(app.state, "revocation_store", None)
 
-    # In development and test, initialize safe in-memory rate limiter if permitted
-    if settings.APP_ENV != "production" and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False):
+    # In-memory rate limiting is permitted only when explicitly selected.
+    # Redis selection is wired during lifespan startup, with a mandatory ping.
+    if (
+        settings.APP_ENV != "production"
+        and getattr(settings, "RATE_LIMITER_BACKEND", "in_memory") == "in_memory"
+        and getattr(settings, "ALLOW_IN_MEMORY_RATE_LIMITER", False)
+    ):
         app.state.rate_limiter = InMemoryRateLimiter()
     else:
         app.state.rate_limiter = None
+    app.state.redis_client = None
 
     # Memory repository initialization: auto-attach in-memory repository for dev/test only
     if settings.APP_ENV != "production":
