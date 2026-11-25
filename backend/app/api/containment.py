@@ -47,11 +47,11 @@ async def apply_containment(
     from backend.app.api.agents import get_agent_repo
     from backend.app.core.config import get_settings
 
-    mem_repo = get_memory_repository(http_request) if http_request is not None else None
+    mem_repo = await get_memory_repository(http_request) if http_request is not None else None
     from backend.app.api.incident_management import get_incident_repository
 
     inc_repo = (
-        await get_incident_repository(http_request)
+        get_incident_repository(http_request)
         if http_request is not None
         else None
     )
