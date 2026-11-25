@@ -91,6 +91,7 @@ class ContainmentReasonCode(str, Enum):
     RUNTIME_CANCELLATION_UNAVAILABLE = "RUNTIME_CANCELLATION_UNAVAILABLE"
     RESOURCE_ISOLATION_UNAVAILABLE = "RESOURCE_ISOLATION_UNAVAILABLE"
     PARTIAL_CONTAINMENT_FAILURE = "PARTIAL_CONTAINMENT_FAILURE"
+    EVIDENCE_PERSISTENCE_FAILED = "EVIDENCE_PERSISTENCE_FAILED"
 
 
 # =============================================================================
@@ -459,8 +460,7 @@ class ContainmentService:
                 (ContainmentReasonCode.RUNTIME_CANCELLATION_UNAVAILABLE,),
                 context,
             )
-            await persist_evidence(outcome)
-            return outcome
+            return await self._persist_effective_outcome(outcome, persist_evidence)
 
         try:
             cancellation_result = await cancel(
@@ -485,11 +485,7 @@ class ContainmentService:
                 (ContainmentReasonCode.RUNTIME_CANCELLATION_UNAVAILABLE,),
                 context,
             )
-            try:
-                await persist_evidence(outcome)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Isolation reconciliation evidence failed (%s).", type(exc).__name__)
-            return outcome
+            return await self._persist_effective_outcome(outcome, persist_evidence)
 
         outcome = self._outcome(
             request,
@@ -505,17 +501,7 @@ class ContainmentService:
             reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
             action_outcomes=(),
         )
-        try:
-            await persist_evidence(outcome)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Agent isolation evidence persistence failed (%s).", type(exc).__name__)
-            return replace(
-                outcome,
-                success=False,
-                status=ContainmentStatus.RECONCILIATION_REQUIRED,
-                reason_codes=(ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE.value,),
-            )
-        return outcome
+        return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _block_actions(
         self,
@@ -612,8 +598,7 @@ class ContainmentService:
             self._outcome(request, facts, status, (), context),
             reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
         )
-        await persist_evidence(outcome)
-        return outcome
+        return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _isolate_resource(
         self,
@@ -665,8 +650,29 @@ class ContainmentService:
             self._outcome(request, facts, ContainmentStatus.APPLIED, (), context),
             reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
         )
-        await persist_evidence(outcome)
-        return outcome
+        return await self._persist_effective_outcome(outcome, persist_evidence)
+
+    async def _persist_effective_outcome(
+        self,
+        outcome: ContainmentOutcome,
+        persist_evidence: Callable[[ContainmentOutcome], Awaitable[Any]],
+    ) -> ContainmentOutcome:
+        """Persist evidence after enforcement; never call a changed state fully contained without it."""
+        try:
+            result = await persist_evidence(outcome)
+            if result is False:
+                raise SecurityDependencyError("Containment evidence sink refused the event.")
+            return outcome
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Containment evidence persistence failed (%s).", type(exc).__name__)
+            return replace(
+                outcome,
+                success=False,
+                status=ContainmentStatus.RECONCILIATION_REQUIRED,
+                reason_codes=tuple(dict.fromkeys(
+                    outcome.reason_codes + (ContainmentReasonCode.EVIDENCE_PERSISTENCE_FAILED.value,)
+                )),
+            )
 
     def _coerce(self, request: Any) -> ContainmentRequest:
         """Validate and coerce a containment request."""
