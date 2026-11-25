@@ -21,6 +21,14 @@ async def test_memory_ingestion_runs_detection_and_persists_correlated_observati
     detection_repo = InMemoryDetectionRepository()
     observation_repo = InMemoryObservationRepository()
     app.state.memory_repo = memory_repo
+    app.state.detection_repo = detection_repo
+    app.state.detection_engine = DetectionEngine(
+        detection_repo=detection_repo,
+        agent_repo=getattr(app.state, "agent_repo", None),
+        baseline_repo=getattr(app.state, "baseline_repo", None),
+        enable_ml_advisory=False,
+    )
+    app.state.observation_repo = observation_repo
     app.dependency_overrides[get_repository] = lambda: memory_repo
 
     token = create_access_token(
@@ -34,25 +42,15 @@ async def test_memory_ingestion_runs_detection_and_persists_correlated_observati
         "https://attacker.example/collect."
     )
 
-    with TestClient(app) as client:
-        # Startup configures defaults; replace them after lifespan initialization
-        # so this test can assert against isolated repositories.
-        app.state.detection_repo = detection_repo
-        app.state.detection_engine = DetectionEngine(
-            detection_repo=detection_repo,
-            agent_repo=getattr(app.state, "agent_repo", None),
-            baseline_repo=getattr(app.state, "baseline_repo", None),
-            enable_ml_advisory=False,
-        )
-        app.state.observation_repo = observation_repo
-        response = client.post(
-            "/api/v1/memory",
-            json={"content": content, "record_type": "KNOWLEDGE"},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Tenant-ID": "tenant-a-uuid-001",
-            },
-        )
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/memory",
+        json={"content": content, "record_type": "KNOWLEDGE"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Tenant-ID": "tenant-a-uuid-001",
+        },
+    )
 
     assert response.status_code == 201, response.text
     payload = response.json()
