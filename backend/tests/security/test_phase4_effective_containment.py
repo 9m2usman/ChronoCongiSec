@@ -14,6 +14,9 @@ from backend.app.security.containment import (
     ContainmentType,
 )
 from backend.app.security.investigation import IncidentStatus
+from backend.app.security.policy import PolicyOutcome
+from backend.app.security.runtime import get_gateway_enforcement
+from backend.app.memory.repository import InMemoryMemoryRepository
 from backend.app.tenancy.context import TenantContext
 
 
@@ -262,3 +265,50 @@ async def test_evidence_failure_after_agent_isolation_is_reconciliation_required
     assert stored.status == "ISOLATED"
     assert outcome.success is False
     assert outcome.status is ContainmentStatus.RECONCILIATION_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_is_blocked_by_authoritative_gateway_policy():
+    repo, agent, version = make_repository()
+    await repo.create_agent_atomic(agent, version)
+    await repo.set_agent_status(AGENT, TENANT, "ISOLATED")
+    await repo.grant_tool_permission(
+        tenant_id=TENANT,
+        agent_id=AGENT,
+        tool_id="sandbox_transfer",
+        allowed_operations="transfer_funds",
+    )
+
+    class ToolRegistry:
+        def get_adapter(self, _name):
+            return object()
+
+    engine, _guard = get_gateway_enforcement(
+        SimpleNamespace(),
+        InMemoryMemoryRepository(),
+        repo,
+        ToolRegistry(),
+    )
+    developer = TenantContext(
+        tenant_id=TENANT,
+        tenant_slug="test",
+        tenant_name="Test",
+        user_id="developer-containment",
+        role="AI_DEVELOPER",
+        is_active=True,
+    )
+    proposal = SimpleNamespace(
+        action_id="action-after-isolation",
+        agent_id=AGENT,
+        tool_name="sandbox_transfer",
+        operation="transfer_funds",
+        parameters={"amount": 10},
+        memory_refs=[],
+        idempotency_key="idempotency-after-isolation",
+        trace_id="trace-after-isolation",
+    )
+
+    decision = await engine.evaluate(proposal, developer)
+
+    assert decision.outcome is PolicyOutcome.BLOCK
+    assert "AGENT_ISOLATED" in decision.reason_codes
