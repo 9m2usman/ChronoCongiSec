@@ -19,11 +19,19 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
 
     import pytest as _pytest
 
+    def _annotate(nodeid, longrepr):
+        text = str(longrepr)[-1800:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+        title = nodeid.replace("::", " ").replace(",", " ")[:180]
+        _sys.__stdout__.write(f"::error title={title}::{text}\n")
+        _sys.__stdout__.flush()
+
     @_pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(item, call):
         outcome = yield
         rep = outcome.get_result()
         if rep.failed:
-            text = str(rep.longrepr)[-1800:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
-            _sys.__stdout__.write(f"::error title={item.nodeid[:180]}::{text}\n")
-            _sys.__stdout__.flush()
+            _annotate(item.nodeid, rep.longrepr)
+
+    def pytest_collectreport(report):
+        if report.failed:
+            _annotate(report.nodeid or "collection", report.longrepr)
