@@ -1608,10 +1608,6 @@ async def propose_tool_action(
 
     async def persist_decision(_decision: Any) -> None:
         try:
-            await gateway_repo.save_proposal_atomic(
-                proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
-            )
-
             if decision_is_executable(_decision):
                 # Capture and commit the pre-mutation snapshot before any protected adapter
                 # is invoked. Production requires a complete, durable resource snapshot.
@@ -1654,6 +1650,12 @@ async def propose_tool_action(
                 ):
                     raise SecurityDependencyError("A complete durable pre-action checkpoint is required.")
 
+            # Persist the decision only after a required checkpoint is committed.
+            await gateway_repo.save_proposal_atomic(
+                proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
+            )
+
+            if decision_is_executable(_decision):
                 obs_repo = getattr(request.app.state, "observation_repo", None)
                 if obs_repo is None:
                     raise SecurityDependencyError("Pre-action checkpoint observation store is unavailable.")
