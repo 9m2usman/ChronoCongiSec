@@ -495,6 +495,25 @@ def test_production_startup_succeeds_with_approved_persistent_repository(monkeyp
     app.state.rate_limiter = object()
     app.state.memory_repo = MockPersistentMemoryRepository()  # Approved persistent repo attached
 
+    # Production startup also requires durable evidence/checkpoint adapters and
+    # explicit Phase 2/3 integration contracts. Supply contract-compliant test
+    # doubles so this test isolates the memory-repository qualification.
+    from types import SimpleNamespace
+    app.state.observation_repo = SimpleNamespace(is_in_memory=False, is_persistent=True)
+    app.state.detection_repo = SimpleNamespace(is_in_memory=False, is_persistent=True)
+    app.state.detection_engine = object()
+    app.state.pre_action_checkpoint_service = SimpleNamespace(
+        is_in_memory=False,
+        is_persistent=True,
+        capture_pre_action_checkpoint=lambda *args, **kwargs: None,
+    )
+    app.state.agent_runtime_cancellation = SimpleNamespace(
+        cancel_agent_work=lambda *args, **kwargs: None,
+    )
+    app.state.company_resource_security_adapter = SimpleNamespace(
+        isolate_resource=lambda *args, **kwargs: None,
+    )
+
     # Lifespan executes cleanly without error
     with TestClient(app):
         pass

@@ -140,6 +140,43 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                 updated_at=row.updated_at,
             )
 
+    async def set_agent_status(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        status: str,
+    ) -> Optional[str]:
+        """Atomically update the authoritative agent enforcement status."""
+        if status not in {"ACTIVE", "ISOLATED", "DEPRECATED"}:
+            raise ValidationError("Unsupported agent status.")
+        async with self.session_factory() as session:
+            async with session.begin():
+                stmt = (
+                    select(OrmAgent)
+                    .where(OrmAgent.id == agent_id, OrmAgent.tenant_id == tenant_id)
+                    .with_for_update()
+                )
+                agent = (await session.execute(stmt)).scalar_one_or_none()
+                if agent is None:
+                    return None
+                previous_status = agent.status
+                agent.status = status
+                agent.updated_at = datetime.now(timezone.utc)
+                profile_stmt = (
+                    select(OrmAgentSecurityProfile)
+                    .where(
+                        OrmAgentSecurityProfile.agent_id == agent_id,
+                        OrmAgentSecurityProfile.tenant_id == tenant_id,
+                    )
+                    .with_for_update()
+                )
+                profile = (await session.execute(profile_stmt)).scalar_one_or_none()
+                if profile is None:
+                    raise ValidationError("Agent security profile is missing; isolation cannot be verified.")
+                profile.status = status
+                profile.updated_at = agent.updated_at
+                return previous_status
+
     async def list_agents(
         self,
         tenant_id: str,

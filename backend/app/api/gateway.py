@@ -28,7 +28,7 @@ import logging
 import math
 import re
 import time
-from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple, runtime_checkable
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -117,82 +117,98 @@ async def _emit_gateway_observations(
     decision: Any,
     execution_status: str,
     result_payload: Optional[Dict[str, Any]] = None,
+    branch_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> None:
-    """Emit correlated Phase 1 observation events without breaking gateway response contracts.
-    
-    Enforces strict secret and credential scrubbing and avoids idempotency key collisions
-    when callers submit proposals without an explicit idempotency key.
+    """Persist sanitized, idempotent proposal/decision/receipt observations.
+
+    Proposal and decision events are emitted from the gateway's durable decision
+    callback, before any protected adapter is invoked. A missing or failed
+    observation store therefore prevents the protected side effect.
     """
-    try:
-        obs_repo = getattr(request.app.state, "observation_repo", None)
-        if obs_repo is not None:
-            clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
-            prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
-            dec_idemp = f"obs-dec-{body.idempotency_key}" if body.idempotency_key else None
-            exec_idemp = f"obs-exec-{body.idempotency_key}" if body.idempotency_key else None
+    obs_repo = getattr(request.app.state, "observation_repo", None)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    if obs_repo is None or not callable(getattr(obs_repo, "record_event", None)):
+        raise SecurityDependencyError("Durable gateway observation repository is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(obs_repo, "is_in_memory", True)
+        or not getattr(obs_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production gateway observations must use durable persistence.")
 
-            # 1. Tool Action Proposal (Category 6)
-            await obs_repo.record_event({
-                "tenant_id": tenant_id,
-                "event_type": "TOOL_PROPOSAL_SUBMITTED",
-                "event_category": "TOOL_ACTION_PROPOSAL",
-                "agent_id": body.agent_id,
-                "action_id": body.action_id,
-                "trace_id": body.trace_id,
-                "source_component": "GATEWAY",
-                "tool_name": body.tool_name,
-                "outcome": "SUBMITTED",
-                "idempotency_key": prop_idemp,
-                "payload_json": {
-                    "operation": body.operation,
-                    "parameters": clean_params,
-                    "memory_refs": body.memory_refs,
-                },
-            })
+    clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
+    idempotency_digest = hashlib.sha256(body.idempotency_key.encode("utf-8")).hexdigest()[:48]
+    prop_idemp = f"obs-prop-{idempotency_digest}"
+    dec_idemp = f"obs-dec-{idempotency_digest}"
+    exec_idemp = f"obs-exec-{idempotency_digest}"
 
-            # 2. Policy Decision (Category 7)
-            decision_val = getattr(decision, "decision", None) or getattr(decision, "decision_value", "UNKNOWN")
-            reason_codes = list(getattr(decision, "reason_codes", []))
-            await obs_repo.record_event({
-                "tenant_id": tenant_id,
-                "event_type": "POLICY_DECISION_EVALUATED",
-                "event_category": "POLICY_DECISION",
-                "agent_id": body.agent_id,
-                "action_id": body.action_id,
-                "trace_id": body.trace_id,
-                "source_component": "POLICY_ENGINE",
-                "policy_decision_id": getattr(decision, "decision_id", proposal_id),
-                "tool_name": body.tool_name,
-                "outcome": str(decision_val),
-                "idempotency_key": dec_idemp,
-                "payload_json": {
-                    "decision": str(decision_val),
-                    "reason_codes": reason_codes,
-                    "execution_status": execution_status,
-                },
-            })
+    await obs_repo.record_event({
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "event_type": "TOOL_PROPOSAL_SUBMITTED",
+        "event_category": "TOOL_ACTION_PROPOSAL",
+        "agent_id": body.agent_id,
+        "action_id": body.action_id,
+        "trace_id": body.trace_id,
+        "source_component": "GATEWAY",
+        "tool_name": body.tool_name,
+        "outcome": "SUBMITTED",
+        "idempotency_key": prop_idemp,
+        "payload_json": {
+            "operation": body.operation,
+            "parameters": clean_params,
+            "memory_refs": body.memory_refs,
+            "actor_id": actor_id,
+            "actor_role": actor_role,
+        },
+    })
 
-            # 3. Tool Execution Receipt (Category 8)
-            if execution_status in ("EXECUTED", "FAILED", "UNKNOWN"):
-                clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
-                await obs_repo.record_event({
-                    "tenant_id": tenant_id,
-                    "event_type": "TOOL_EXECUTION_RECEIPT",
-                    "event_category": "TOOL_EXECUTION_RECEIPT",
-                    "agent_id": body.agent_id,
-                    "action_id": body.action_id,
-                    "trace_id": body.trace_id,
-                    "source_component": "GATEWAY_ADAPTER",
-                    "tool_name": body.tool_name,
-                    "outcome": execution_status,
-                    "idempotency_key": exec_idemp,
-                    "payload_json": {
-                        "execution_status": execution_status,
-                        "result": clean_result,
-                    },
-                })
-    except Exception as exc:
-        logger.warning("Observation telemetry emission non-fatally bypassed: %s", exc)
+    decision_val = getattr(decision, "decision", None) or getattr(decision, "decision_value", "UNKNOWN")
+    reason_codes = list(getattr(decision, "reason_codes", []))
+    await obs_repo.record_event({
+        "tenant_id": tenant_id,
+        "branch_id": branch_id,
+        "event_type": "POLICY_DECISION_EVALUATED",
+        "event_category": "POLICY_DECISION",
+        "agent_id": body.agent_id,
+        "action_id": body.action_id,
+        "trace_id": body.trace_id,
+        "source_component": "POLICY_ENGINE",
+        "policy_decision_id": getattr(decision, "decision_id", proposal_id),
+        "tool_name": body.tool_name,
+        "outcome": str(decision_val),
+        "idempotency_key": dec_idemp,
+        "payload_json": {
+            "decision": str(decision_val),
+            "reason_codes": reason_codes,
+            "execution_status": execution_status,
+            "actor_id": actor_id,
+            "actor_role": actor_role,
+        },
+    })
+
+    if execution_status in ("EXECUTED", "FAILED", "UNKNOWN"):
+        clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
+        await obs_repo.record_event({
+            "tenant_id": tenant_id,
+            "branch_id": branch_id,
+            "event_type": "TOOL_EXECUTION_RECEIPT",
+            "event_category": "TOOL_EXECUTION_RECEIPT",
+            "agent_id": body.agent_id,
+            "action_id": body.action_id,
+            "trace_id": body.trace_id,
+            "source_component": "GATEWAY_ADAPTER",
+            "tool_name": body.tool_name,
+            "outcome": execution_status,
+            "idempotency_key": exec_idemp,
+            "payload_json": {
+                "execution_status": execution_status,
+                "result": clean_result,
+                "actor_id": actor_id,
+                "actor_role": actor_role,
+            },
+        })
 
 
 def _validate_finite_and_depth(val: Any, current_depth: int = 1) -> None:
@@ -1412,9 +1428,13 @@ async def propose_tool_action(
                 consumed=False,
             )
 
-    # Phase 2: Run pre-execution Detection Engine threat analysis
+    # Phase 2: Run pre-execution Detection Engine threat analysis.
+    # Production must use the app's configured engine, never a process-local fallback.
     detection_engine = getattr(request.app.state, "detection_engine", None)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     if detection_engine is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Production detection engine is not configured.")
         detection_engine = get_default_detection_engine()
 
     tool_threats: List[Any] = []
@@ -1512,17 +1532,26 @@ async def propose_tool_action(
     if record["decision"] == "BLOCK":
         detection_engine.record_blocked_event(tenant_id, body.agent_id)
 
-    # Record detections if repository is present
+    # Detection findings are part of the forensic decision chain. Never dispatch
+    # a protected action if the detection store is absent or cannot persist a finding.
     det_repo = getattr(request.app.state, "detection_repo", None)
-    if det_repo is not None:
-        for finding in detected_findings:
-            finding.policy_decision_id = decision.decision_id
-            try:
-                res = det_repo.record_detection(finding.to_dict())
-                if inspect.isawaitable(res):
-                    await res
-            except Exception as exc:
-                logger.warning("Failed to record detection in gateway: %s", exc)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    if det_repo is None:
+        raise SecurityDependencyError("Durable detection repository is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(det_repo, "is_in_memory", True)
+        or not getattr(det_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production gateway detections must use durable persistence.")
+    for finding in detected_findings:
+        finding.policy_decision_id = decision.decision_id
+        try:
+            res = det_repo.record_detection(finding.to_dict())
+            if inspect.isawaitable(res):
+                await res
+        except Exception as exc:
+            logger.error("Failed to persist gateway detection evidence (%s).", type(exc).__name__)
+            raise SecurityDependencyError("Gateway detection evidence could not be persisted.") from exc
 
     proposal_id = str(uuid.uuid4())
     proposal_entity = ToolProposalEntity(
@@ -1579,13 +1608,93 @@ async def propose_tool_action(
 
     async def persist_decision(_decision: Any) -> None:
         try:
+            if decision_is_executable(_decision):
+                # Capture and commit the pre-mutation snapshot before any protected adapter
+                # is invoked. Production requires a complete, durable resource snapshot.
+                checkpoint_service = getattr(request.app.state, "pre_action_checkpoint_service", None)
+                capture_checkpoint = getattr(checkpoint_service, "capture_pre_action_checkpoint", None)
+                if not callable(capture_checkpoint):
+                    raise SecurityDependencyError("Pre-action checkpoint service is unavailable.")
+                checkpoint = await capture_checkpoint(
+                    tenant_id=tenant_id,
+                    branch_id=context.branch_id,
+                    actor_id=context.user_id,
+                    agent_id=body.agent_id,
+                    proposal_id=proposal_id,
+                    action_id=body.action_id,
+                    trace_id=body.trace_id,
+                    idempotency_key=body.idempotency_key,
+                    tool_name=body.tool_name,
+                    operation=body.operation,
+                    parameters=body.parameters,
+                    memory_refs=list(body.memory_refs or []),
+                )
+                checkpoint_id = checkpoint.get("checkpoint_id") if isinstance(checkpoint, Mapping) else None
+                checkpoint_hash = checkpoint.get("integrity_hash") if isinstance(checkpoint, Mapping) else None
+                checkpoint_complete = checkpoint.get("complete") is True if isinstance(checkpoint, Mapping) else False
+                checkpoint_scope = checkpoint.get("scope") if isinstance(checkpoint, Mapping) else None
+                if (
+                    not isinstance(checkpoint_id, str)
+                    or not SAFE_ID_REGEX.fullmatch(checkpoint_id)
+                    or not isinstance(checkpoint_hash, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", checkpoint_hash)
+                    or not isinstance(checkpoint, Mapping)
+                    or checkpoint.get("committed") is not True
+                ):
+                    raise SecurityDependencyError("Pre-action checkpoint was not durably committed.")
+                if settings.APP_ENV == "production" and (
+                    checkpoint_complete is not True
+                    or checkpoint_scope != "COMPLETE"
+                    or getattr(checkpoint_service, "is_in_memory", True)
+                    or not getattr(checkpoint_service, "is_persistent", False)
+                ):
+                    raise SecurityDependencyError("A complete durable pre-action checkpoint is required.")
+
+            # Persist the decision only after a required checkpoint is committed.
             await gateway_repo.save_proposal_atomic(
                 proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
             )
-        except (HTTPException, AMSCException):
+
+            if decision_is_executable(_decision):
+                obs_repo = getattr(request.app.state, "observation_repo", None)
+                if obs_repo is None:
+                    raise SecurityDependencyError("Pre-action checkpoint observation store is unavailable.")
+                checkpoint_digest = hashlib.sha256(
+                    f"{tenant_id}:{body.idempotency_key}".encode("utf-8")
+                ).hexdigest()[:48]
+                await obs_repo.record_event({
+                    "tenant_id": tenant_id,
+                    "branch_id": context.branch_id,
+                    "event_type": "PRE_ACTION_CHECKPOINT_CAPTURED",
+                    "event_category": "TOOL_ACTION_PROPOSAL",
+                    "agent_id": body.agent_id,
+                    "action_id": body.action_id,
+                    "trace_id": body.trace_id,
+                    "source_component": "PRE_ACTION_CHECKPOINT",
+                    "outcome": "COMMITTED" if checkpoint_complete else "METADATA_ONLY",
+                    "idempotency_key": f"obs-checkpoint-{checkpoint_digest}",
+                    "payload_json": {
+                        "checkpoint_id": checkpoint_id,
+                        "integrity_hash": checkpoint_hash,
+                        "scope": checkpoint_scope,
+                        "complete": checkpoint_complete,
+                        "actor_id": context.user_id,
+                        "actor_role": context.role,
+                        "memory_refs": list(body.memory_refs or []),
+                    },
+                })
+
+            # This callback is invoked by the protected execution guard before the
+            # adapter. If checkpoint or observation persistence fails, no side effect runs.
+            await _emit_gateway_observations(
+                request, tenant_id, body, proposal_id, _decision,
+                "PENDING_EXECUTION" if decision_is_executable(_decision) else record["execution_status"],
+                None, context.branch_id, context.user_id, context.role,
+            )
+        except (HTTPException, AMSCException, SecurityDependencyError):
             raise
         except Exception as exc:
-            logger.exception("Failed to persist gateway proposal and security decision: %s", exc)
+            logger.exception("Failed to persist gateway proposal, decision, or observation: %s", exc)
             raise
 
     def response(decision_value: str, execution_status: str, reason_codes: List[str],
@@ -1615,7 +1724,7 @@ async def propose_tool_action(
                 status_code=500,
             ) from exc
         await _emit_gateway_observations(
-            request, tenant_id, body, proposal_id, decision, record["execution_status"], None
+            request, tenant_id, body, proposal_id, decision, record["execution_status"], None, context.branch_id, context.user_id, context.role
         )
         return response(record["decision"], record["execution_status"], list(decision.reason_codes))
 
@@ -1725,7 +1834,7 @@ async def propose_tool_action(
         execution=execution_entity, execution_status=execution_status,
     )
     await _emit_gateway_observations(
-        request, tenant_id, body, proposal_id, decision, execution_status, result_payload
+        request, tenant_id, body, proposal_id, decision, execution_status, result_payload, context.branch_id, context.user_id, context.role
     )
     return response(record["decision"], execution_status, list(outcome.reason_codes), result_payload)
 

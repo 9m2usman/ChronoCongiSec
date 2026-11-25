@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.agents import AgentEntity, AgentVersionEntity
+from backend.app.core.exceptions import ValidationError
 from backend.app.database.models.agents import Agent
 from backend.app.database.models.identity import Branch, Tenant
 from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
@@ -109,3 +110,80 @@ async def test_agent_without_governed_profile_is_not_given_synthetic_profile(ses
         lambda: _session_scope(session.bind)
     )
     assert await repository.get_agent_profile("agent-profile-missing", tenant_id) is None
+
+
+
+@pytest.mark.asyncio
+async def test_agent_isolation_updates_agent_and_governed_profile_atomically(session):
+    tenant_id = "tenant-agent-isolation"
+    branch_id = "branch-agent-isolation"
+    now = datetime.now(timezone.utc)
+    session.add(Tenant(id=tenant_id, name="Isolation Test Co", slug="isolation-test-co"))
+    await session.flush()
+    session.add(Branch(id=branch_id, tenant_id=tenant_id, name="Main", code="MAIN"))
+    await session.flush()
+
+    repository = SqlAlchemyAgentRepository(lambda: _session_scope(session.bind))
+    agent = AgentEntity(
+        id="agent-isolation-test",
+        tenant_id=tenant_id,
+        name="Isolation Test Agent",
+        runtime="CREWAI",
+        model="test-model",
+        status="ACTIVE",
+        config_version="v1.0.0",
+        system_prompt="Test prompt",
+        branch_id=branch_id,
+        created_at=now,
+        updated_at=now,
+    )
+    version = AgentVersionEntity(
+        id="version-isolation-test",
+        tenant_id=tenant_id,
+        agent_id=agent.id,
+        version="v1.0.0",
+        config_payload={"registered_by": "test-admin"},
+        created_at=now,
+    )
+    await repository.create_agent_atomic(agent, version)
+
+    previous = await repository.set_agent_status(agent.id, tenant_id, "ISOLATED")
+    assert previous == "ACTIVE"
+    stored_agent = await repository.get_agent_by_id(agent.id, tenant_id)
+    stored_profile = await repository.get_agent_profile(agent.id, tenant_id)
+    assert stored_agent.status == "ISOLATED"
+    assert stored_profile["status"] == "ISOLATED"
+
+    # A foreign tenant cannot observe or change the isolated agent.
+    assert await repository.set_agent_status(agent.id, "another-tenant", "ACTIVE") is None
+    assert (await repository.get_agent_by_id(agent.id, tenant_id)).status == "ISOLATED"
+
+
+@pytest.mark.asyncio
+async def test_agent_isolation_rolls_back_if_governed_profile_is_missing(session):
+    tenant_id = "tenant-agent-no-profile"
+    now = datetime.now(timezone.utc)
+    session.add(Tenant(id=tenant_id, name="No Profile Co", slug="no-profile-co"))
+    await session.flush()
+    session.add(
+        Agent(
+            id="agent-no-profile",
+            tenant_id=tenant_id,
+            name="Unprofiled Agent",
+            runtime="LANGCHAIN",
+            model="test-model",
+            status="ACTIVE",
+            config_version="v1.0.0",
+            system_prompt="Test prompt",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.flush()
+    repository = SqlAlchemyAgentRepository(lambda: _session_scope(session.bind))
+
+    with pytest.raises(ValidationError):
+        await repository.set_agent_status("agent-no-profile", tenant_id, "ISOLATED")
+
+    stored = await repository.get_agent_by_id("agent-no-profile", tenant_id)
+    assert stored.status == "ACTIVE"
