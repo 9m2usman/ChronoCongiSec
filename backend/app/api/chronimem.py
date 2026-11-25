@@ -64,6 +64,9 @@ async def api_get_timeline(
         record = await repo.get_record(record_id, tenant_id)
         if record is None:
             raise NotFoundError(f"Memory record '{record_id}' not found.")
+        trust_val = record.trust_state.value if hasattr(record.trust_state, "value") else str(record.trust_state)
+        if trust_val in {"QUARANTINED", "REJECTED"}:
+            raise NotFoundError(f"Memory record '{record_id}' not found.")
 
         versions = await repo.get_versions(record_id, tenant_id)
         formatted_versions: List[ChroniMemVersion] = []

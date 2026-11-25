@@ -180,6 +180,11 @@ async def compare_versions(
         raise MemoryNotFoundError(
             f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
         )
+    record_state = record.trust_state.value if hasattr(record.trust_state, "value") else str(record.trust_state)
+    if record_state in {TrustState.QUARANTINED.value, TrustState.REJECTED.value}:
+        raise MemoryNotFoundError(
+            f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
+        )
 
     vf_res = repo.get_version(record_id, v_from, tenant_id)
     ver_from = await vf_res if inspect.isawaitable(vf_res) else vf_res

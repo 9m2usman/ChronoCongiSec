@@ -742,6 +742,8 @@ class ContainmentService:
             status=self._map_quarantine_status(quarantine_outcome.status),
             reason_codes=tuple(
                 ContainmentReasonCode(code).value
+                if code in {item.value for item in ContainmentReasonCode}
+                else str(code)
                 for code in quarantine_outcome.reason_codes
             ),
             tenant_id=quarantine_outcome.tenant_id,

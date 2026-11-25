@@ -28,6 +28,7 @@ from backend.app.api.auth import router as auth_router
 from backend.app.api.baseline import router as baseline_router
 from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
+from backend.app.api.company import router as company_router
 from backend.app.api.containment import router as containment_router
 from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
@@ -244,6 +245,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
+
+        if getattr(app.state, "pre_action_checkpoint_service", None) is None:
+            from backend.app.security.checkpoints import SqlPreActionCheckpointService
+            app.state.pre_action_checkpoint_service = SqlPreActionCheckpointService(session_factory)
+
+        if getattr(app.state, "company_resource_security_adapter", None) is None:
+            from backend.app.company.service import SqlCompanyResourceIsolationAdapter
+            app.state.company_resource_security_adapter = SqlCompanyResourceIsolationAdapter(session_factory)
+
+        if getattr(app.state, "company_resource_service", None) is None:
+            from backend.app.company.service import CompanyResourceService
+            app.state.company_resource_service = CompanyResourceService(
+                session_factory,
+                isolation_adapter=app.state.company_resource_security_adapter,
+                observation_repo=app.state.observation_repo,
+            )
+
+        if getattr(app.state, "agent_runtime_cancellation", None) is None:
+            from backend.app.security.runtime_cancellation import SqlAgentRuntimeCancellationService
+            app.state.agent_runtime_cancellation = SqlAgentRuntimeCancellationService(
+                session_factory,
+                observation_repo=app.state.observation_repo,
+            )
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor
@@ -1004,6 +1028,7 @@ def create_app(
     api_router.include_router(recovery_router)
     api_router.include_router(audit_router)
     api_router.include_router(chronimem_router)
+    api_router.include_router(company_router)
     api_router.include_router(containment_router)
     api_router.include_router(knowledge_router)
 

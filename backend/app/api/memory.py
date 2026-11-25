@@ -246,11 +246,16 @@ async def api_ingest_memory(
             from backend.app.api.agents import get_default_agent_repository
             agent_repo = get_default_agent_repository()
         agent = await agent_repo.get_agent_by_id(payload.agent_id, tenant_id)
+        if agent is None:
+            fallback_agent = repo.get_agent(payload.agent_id, tenant_id)
+            if inspect.isawaitable(fallback_agent):
+                fallback_agent = await fallback_agent
+            agent = fallback_agent
         if agent is None or agent.tenant_id != tenant_id:
             raise NotFoundError("Agent not found.")
         if agent.status != "ACTIVE":
             raise ForbiddenError("Memory cannot be ingested for an isolated or inactive agent.")
-        if agent.branch_id is not None and agent.branch_id != context.branch_id:
+        if getattr(agent, "branch_id", None) is not None and agent.branch_id != context.branch_id:
             raise NotFoundError("Agent not found.")
 
     res = ingest_memory(
