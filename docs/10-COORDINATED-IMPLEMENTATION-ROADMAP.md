@@ -417,3 +417,128 @@ Use a single integration branch as the merge target. Feature branches should be 
 - First action: verify team roster and assign A–E; then run P1-A runtime/persistence mapping against the current source and lock Phase 1 file/API/migration ownership.
 - No Phase 1 implementation has been claimed by this roadmap document.
 - Do not begin Phase 2 until Phase 1 acceptance is demonstrated.
+
+
+---
+
+## 9. Project operating model — two-person core team
+
+**This section supersedes the five-teammate staffing assumptions in Sections 3 and 7.** The current core team is the project owner (Usman) and ChatGPT. A vibe-coding tool may be used as an implementation assistant, but it is not an independent architecture owner or source of truth.
+
+### Responsibilities
+
+**Project owner (Usman)**
+- Product owner and final decision-maker.
+- Runs the application and commands on the local Windows machine.
+- Supplies local test results, screenshots/logs and runtime observations.
+- Reviews product behavior and approves merges/releases.
+- Uses the vibe-coding tool only with the current phase prompt, agreed contracts and exact scope.
+
+**ChatGPT**
+- Maintains the architecture and phase plan.
+- Audits current source before implementation and checks existing code before proposing changes.
+- Produces complete, bounded implementation prompts and file-level plans.
+- Implements suitable documentation and code changes directly through GitHub where possible.
+- Reviews diffs, tests, security boundaries and integration evidence.
+- Does not claim to have run code on the owner's PC or access localhost.
+- Coordinates the vibe-coding tool's work by giving it exact scope and reviewing its output; it must not independently redesign shared contracts.
+
+### Parallel execution without multiple human teammates
+
+Use two complementary lanes only when their file ownership is disjoint:
+
+1. **GitHub lane (ChatGPT):** repository audit, architecture/contracts, focused implementation PRs, review and CI verification.
+2. **Local lane (project owner + vibe-coding assistant):** local runtime inspection, local-only integration/testing, and implementation tasks explicitly delegated with isolated paths.
+
+Do not have both lanes edit the same file or migration concurrently. Before a local implementation task, record the exact branch/base commit and owned paths. Afterward, provide the diff/commit SHA and test output for review. If both lanes need a shared file, pause one lane and integrate sequentially.
+
+We will not create artificial A–E teammate assignments or generate five redundant prompts. Work packages remain useful as technical boundaries, but the project owner and ChatGPT coordinate them directly.
+
+---
+
+## 10. Frontend product requirements — mandatory end-to-end demonstration
+
+**The final frontend phase is a product workflow phase, not a dashboard-card presentation exercise.** This requirement is binding across Phase 2–6: backend contracts and event models must be designed so the final UI can expose the real workflow without fabricating state.
+
+There are two connected, understandable user-facing experiences:
+
+### A. Simulated Company Application
+
+This is where employees do actual work:
+- Employee sign-in and role/branch-aware workspace.
+- Real files, folders/organization, file versions, ownership and transfers.
+- Real company knowledge/source management, with source identity and provenance.
+- Tasks, assignments and handoffs.
+- Internal inbox, messages and notifications.
+- Agent-assisted work with visible task/run status and results.
+- Clear indication of who performed an action: employee or agent.
+
+### B. ChronoCongiSec Security Center
+
+This is where authorized security users investigate and control the connected company:
+- Company/agent connection status and authorized scope.
+- Agent runs and step-by-step activity trace.
+- Knowledge/source provenance and retrieval trace: which source/version was encountered, by which agent/run, and when.
+- Poisoning/injection finding with reason, severity, evidence and confidence/decision explanation.
+- Quarantine action and current source trust state.
+- Gateway decision history showing the proposed operation, policy result, reason and whether a side effect occurred.
+- Active-run and queued-work containment status.
+- Checkpoint history and rewind/recovery workflow, including preview of affected resources and verification result.
+- Incident timeline that links source → retrieval → agent run → proposed tool/action → gateway decision → mutation or block → containment → recovery.
+- Auditor-readable evidence and immutable action history.
+
+### C. Required UI journey for the acceptance scenario
+
+The final acceptance test must be executable and understandable through the user frontend. It must demonstrate all eight steps, not just backend test assertions:
+
+1. **Poison source:** an authorized employee uses the Company Application to add a poisoned instruction/knowledge item to a company source. The UI records its author, source, version and time.
+2. **Agent encounters it:** the employee starts or assigns a genuine company task that causes an agent to retrieve that source. The Company Application shows the task and agent run; the Security Center shows the matching retrieval event.
+3. **Observe and evaluate:** the Security Center displays the source provenance, retrieval, run context, proposed action and the evaluation result. The trace must correlate using stable source, run and action IDs.
+4. **Detect and quarantine:** the Security Center presents the detection evidence and quarantine status. The source is visibly marked quarantined in both relevant company/security views, with access behavior reflecting the actual backend enforcement.
+5. **Block and stop:** the UI shows the gateway's BLOCK decision and reason, confirms that the prohibited mutation did not happen, and shows active-run cancellation and queued-job cancellation (or clearly reports which cancellation was not applicable/possible).
+6. **Restore reversible changes:** an authorized security operator reviews the checkpoint/impact preview, initiates rewind, and sees each restoration result. The UI must distinguish restored state from compensating actions and from irreversible actions that cannot be undone.
+7. **Verify employee state and security evidence:** employees can see the actual resulting files/tasks/messages and notifications in their Company Application. Security Analysts can inspect the incident and response; Auditors can inspect evidence/history within their read-only authorization.
+8. **Prove the audit trail:** the Security Center provides a correlated timeline showing allowed actions, blocked actions, source quarantine, run/job cancellation, completed restoration and any compensation/pending items. Every displayed state is backed by persisted records.
+
+The journey must use real persisted company and security services. Test fixtures may support a clearly labelled demo/test mode, but they must never be shown as live activity.
+
+### D. Frontend information architecture and quality bar
+
+Do not leave generic dashboard cards, decorative metric tiles, duplicated summary cards, fake charts, or placeholder panels merely to make screens look populated. The user explicitly wants the earlier dashboard-card approach removed.
+
+Keep a page, panel or component only when it supports a meaningful task, investigation, decision, configuration or evidence review. Prefer:
+- A clear employee workspace organized around files, tasks, inbox and agent-assisted work.
+- A clear security workspace organized around live activity/trace, knowledge trust, gateway decisions, incidents, containment, checkpoints/rewind and audit evidence.
+- Detail pages and linked timelines that explain how records relate.
+- Action controls with authorization, confirmation, loading, success/failure and resulting state.
+- Empty, unavailable, simulated and live states that are unmistakably different.
+- Search/filtering and useful tables/lists for operational records instead of decorative metric cards.
+- Consistent navigation and plain-language explanations so a normal employee understands the Company Application and a Security Analyst/Auditor understands the Security Center.
+
+Do not remove useful existing security pages merely because they are not dashboard cards. Reuse and simplify them where they serve a real workflow. The frontend must not be a static mockup of backend capabilities.
+
+### E. Frontend completion gate
+
+Phase 6 is not complete until:
+- The full eight-step poisoning-to-recovery scenario can be followed through the UI.
+- The Company Application and Security Center show consistent persisted state and linked records.
+- Employee, Security Analyst and Auditor permissions are enforced by the backend and reflected in the UI.
+- The UI distinguishes allowed, blocked, quarantined, cancelled, restored, compensated and irreversible outcomes.
+- No decorative or misleading dashboard cards remain; each retained screen/component has a clear operational purpose.
+- Two separate employee sessions can demonstrate a real file/task/message workflow and observe the relevant updates.
+- No fixture or synthetic response is represented as live company activity.
+
+---
+
+## 11. Updated immediate execution sequence
+
+1. Treat this two-person operating model and frontend acceptance journey as binding.
+2. Review and merge this roadmap PR after the project owner approves it.
+3. Begin Phase 1 with a focused runtime/persistence wiring map and exact file ownership; do not start company-domain feature implementation prematurely.
+4. Implement Phase 1 in small, coherent PRs coordinated by the project owner and ChatGPT. Use the vibe-coding assistant only for isolated, explicitly scoped work.
+5. Complete Phase 1 acceptance and phase review.
+6. Build Phase 2 company workflows with the future frontend journey and security observation hooks in mind.
+7. Continue Phases 3–5 so the UI later has real agent, detection, containment and recovery events to display.
+8. Build/refine the final user-facing experiences in Phase 6 and prove the complete eight-step journey.
+
+The eight-step frontend scenario is a product-level acceptance requirement. It is not optional polish and must influence the data model, APIs, events, permissions, checkpoints and audit records from the earlier phases.
