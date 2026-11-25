@@ -112,7 +112,10 @@ async def _persist_memory_detection_incidents(
         if settings.APP_ENV == "production":
             raise SecurityDependencyError("Durable incident repository is not configured.")
         incident_repo = get_default_incident_repository(settings)
-    if not isinstance(incident_repo, IncidentRepositoryProtocol):
+    if not all(
+        callable(getattr(incident_repo, method, None))
+        for method in ("get_incident", "create_incident_atomic", "attach_evidence_atomic")
+    ):
         raise SecurityDependencyError("Incident repository does not satisfy the required contract.")
 
     category_map = {
