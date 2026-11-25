@@ -383,10 +383,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:
             logger.warning("Redis connection pool shutdown failed: %s", exc)
 
-    db_engine = getattr(app.state, "db_engine", None)
-    if db_engine is not None:
-        await db_engine.dispose()
-
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
