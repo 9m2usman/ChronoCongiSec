@@ -112,6 +112,8 @@ async def test_agent_suspension_changes_authoritative_agent_state_and_records_ev
     assert outcome.success is True
     assert outcome.status is ContainmentStatus.APPLIED
     assert stored.status == "ISOLATED"
+    profile = await repo.get_agent_profile(AGENT, TENANT)
+    assert profile["status"] == "ISOLATED"
     assert len(persisted) == 1
     assert persisted[0].resulting_state == "ISOLATED"
 
