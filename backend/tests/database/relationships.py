@@ -82,6 +82,27 @@ TENANT_RELATIONSHIPS: tuple[Rel, ...] = (
     Rel("enterprise_memory_links", "memory_record_id", "memory_records", "CASCADE"),
     Rel("enterprise_memory_links", "resource_id", "discovered_resources", "CASCADE"),
     Rel("connector_audit_logs", "connector_id", "enterprise_connectors", "SET NULL"),
+    # Company application (0017): every owner/actor/reference stays in the same tenant.
+    Rel("company_workspaces", "branch_id", "branches", "RESTRICT"),
+    Rel("company_workspaces", "owner_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_files", "workspace_id", "company_workspaces", "RESTRICT"),
+    Rel("company_files", "owner_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_file_versions", "file_id", "company_files", "RESTRICT"),
+    Rel("company_file_versions", "created_by_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_file_transfers", "file_id", "company_files", "RESTRICT"),
+    Rel("company_file_transfers", "sender_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_file_transfers", "recipient_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_tasks", "workspace_id", "company_workspaces", "RESTRICT"),
+    Rel("company_tasks", "branch_id", "branches", "RESTRICT"),
+    Rel("company_tasks", "created_by_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_tasks", "assigned_to_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_task_events", "task_id", "company_tasks", "RESTRICT"),
+    Rel("company_task_events", "actor_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_messages", "sender_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_messages", "recipient_user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_notifications", "user_id", "memberships", "RESTRICT", "user_id"),
+    Rel("company_activity", "branch_id", "branches", "RESTRICT"),
+    Rel("company_activity", "actor_user_id", "memberships", "RESTRICT", "user_id"),
 )
 
 class LinkedRel(NamedTuple):
@@ -131,6 +152,9 @@ FORENSIC_TENANT_TABLES = frozenset({
     "registration_requests",
     "enterprise_connectors",
     "connector_audit_logs",
+    "company_workspaces", "company_files", "company_file_versions",
+    "company_file_transfers", "company_tasks", "company_task_events",
+    "company_messages", "company_notifications", "company_activity",
 })
 
 # Columns that look like references but intentionally have no FK.

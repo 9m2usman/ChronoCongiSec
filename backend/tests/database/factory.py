@@ -52,7 +52,7 @@ class LinkedReference:
 class SchemaInfo:
     columns: dict[str, list[_Column]] = field(default_factory=dict)
     # (table, column) -> referenced table, for single-column refs and composite tenant refs
-    references: dict[tuple[str, str], str] = field(default_factory=dict)
+    references: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
     # table -> linked (multi-column) references
     linked: dict[str, list[LinkedReference]] = field(default_factory=dict)
 
@@ -93,7 +93,7 @@ class SchemaInfo:
             if not pairs:
                 continue  # tenant_id -> tenants.id: filled from the tenant argument
             if len(pairs) == 1:
-                info.references[(r["child"], pairs[0][0])] = r["parent"]
+                info.references[(r["child"], pairs[0][0])] = (r["parent"], pairs[0][1])
                 continue
             anchors = [c for c, p in pairs if p == "id"]
             if len(anchors) != 1:
@@ -194,11 +194,20 @@ class RowFactory:
 
     async def _generate(self, table: str, col: _Column, tenant_id: str | None) -> Any:
         """Value for a required column: a new same-tenant parent for references, else a dummy value."""
-        parent = self.schema.references.get((table, col.name))
-        if parent is None:
+        reference = self.schema.references.get((table, col.name))
+        if reference is None:
             return _value_for(col)
+        parent, parent_column = reference
         parent_tenant = None if parent in GLOBAL_PARENT_VALUES else tenant_id
-        return await self.create(parent, parent_tenant)
+        parent_id = await self.create(parent, parent_tenant)
+        if parent_column == "id":
+            return parent_id
+        # Composite tenant FKs may reference a natural key such as
+        # memberships.user_id rather than the parent's primary key.
+        return await self.conn.fetchval(
+            f'SELECT "{parent_column}" FROM "{parent}" WHERE id = $1',
+            parent_id,
+        )
 
     async def _resolve_linked(self, link: LinkedReference, tenant_id: str | None, resolved: dict[str, Any]) -> None:
         """Make the columns of one linked FK point at the SAME parent row (see module docstring)."""
