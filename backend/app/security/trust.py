@@ -37,6 +37,8 @@ Key properties (details in ``docs/security-design/trust-state-machine.md``):
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import threading
 import uuid
@@ -429,6 +431,12 @@ class TrustDecisionStore(Protocol):
         ...
 
 
+async def _maybe_await(value: object) -> object:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 class InMemoryTrustDecisionStore:
     """Development/test store. Append-only; refused in production by ``TrustEvaluator``."""
 
@@ -516,6 +524,22 @@ class TrustEvaluator:
         # (finding M4-F5). Cross-process atomicity needs a repository compare-and-set (M3/M6 contract).
         self._locks: Dict[Tuple[str, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._async_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+    async def _astore_append(self, decision: TrustDecision) -> None:
+        if hasattr(self._store, "aappend"):
+            await self._store.aappend(decision)
+        else:
+            self._store.append(decision)
+
+    async def _astore_list(self, tenant_id: str, record_id: str) -> Sequence[TrustDecision]:
+        if hasattr(self._store, "alist_for_record"):
+            return await self._store.alist_for_record(tenant_id, record_id)
+        return self._store.list_for_record(tenant_id, record_id)
+
+    def _async_record_lock(self, tenant_id: str, record_id: str) -> asyncio.Lock:
+        with self._locks_guard:
+            return self._async_locks.setdefault((tenant_id, record_id), asyncio.Lock())
 
     # -- public API -----------------------------------------------------------
 
@@ -1078,6 +1102,453 @@ class TrustEvaluator:
             return  # unscoped denials (no verified actor) are logged only
         try:
             self._store.append(decision)
+        except Exception as exc:  # noqa: BLE001 — denial stands regardless
+            logger.error("Could not persist denied trust decision (%s).", type(exc).__name__)
+
+    # -- async durable API ----------------------------------------------------
+
+    async def ahistory(self, actor: TrustActor, record_id: str) -> Tuple[TrustDecision, ...]:
+        """Async tenant-scoped decision history for a record."""
+        tenant_id = self._actor_tenant(actor)
+        if tenant_id is None:
+            raise ForbiddenError("Trust history requires a verified tenant context.")
+        return tuple(await self._astore_list(tenant_id, record_id))
+
+    async def aeffective_state(self, tenant_id: str, record_id: str) -> Optional[str]:
+        """Async most restrictive of stored state and durable decision history."""
+        record = await _maybe_await(self._repo.get_record(record_id, tenant_id))
+        if record is None or not record or getattr(record, "tenant_id", None) != tenant_id:
+            return None
+        stored = _state_value(record.trust_state)
+        if stored is None:
+            return None
+        effective, _, _ = await self._areconcile(stored, record.current_version, tenant_id, record_id)
+        return effective
+
+    async def aassess_for_action(
+        self,
+        tenant_id: str,
+        record_id: str,
+        pinned_version: Optional[int] = None,
+    ) -> "ActionMemoryAssessment":
+        """Async version of ``assess_for_action`` using durable decision history."""
+        record = await _maybe_await(self._repo.get_record(record_id, tenant_id))
+        if record is None or not record or getattr(record, "tenant_id", None) != tenant_id:
+            return ActionMemoryAssessment(
+                record_id=record_id, found=False, eligible=False,
+                reason_codes=("MEMORY_REFERENCE_NOT_FOUND",),
+            )
+        stored = _state_value(getattr(record, "trust_state", None))
+        version = getattr(record, "current_version", None)
+        if stored is None or type(version) is not int or version < 1:
+            return ActionMemoryAssessment(
+                record_id=record_id, found=True, eligible=False,
+                reason_codes=("MEMORY_STATE_UNKNOWN",),
+            )
+
+        codes: List[str] = []
+        effective, drift, _ = await self._areconcile(stored, version, tenant_id, record_id)
+        if drift:
+            codes.append("MEMORY_STATE_HISTORY_MISMATCH")
+        if pinned_version is not None and pinned_version != version:
+            codes.append("MEMORY_VERSION_STALE")
+        if effective != TrustState.TRUSTED.value:
+            codes.append(f"MEMORY_{effective}")
+
+        versions = await _maybe_await(self._repo.get_versions(record_id, tenant_id))
+        current = [v for v in versions if getattr(v, "version", None) == version]
+        checksum: Optional[str] = None
+        if len(current) != 1:
+            codes.append("MEMORY_INTEGRITY_UNVERIFIABLE")
+        else:
+            checksum = current[0].checksum
+            if any(sha256_hex(v.content) != v.checksum for v in versions):
+                codes.append("MEMORY_INTEGRITY_VIOLATION")
+
+        history = await self._astore_list(tenant_id, record_id)
+        trusted = [
+            d for d in history
+            if d.applied and d.resulting_state == TrustState.TRUSTED.value
+        ]
+        evidence = trusted[-1] if trusted else None
+        if (
+            evidence is None
+            or evidence.record_version != version
+            or checksum is None
+            or evidence.version_checksum != checksum
+        ):
+            codes.append("MEMORY_TRUST_EVIDENCE_MISSING")
+
+        lineage_ctx = _Ctx(tenant_id=tenant_id)
+        lineage_codes, lineage_summary = await self._averify_lineage(record_id, lineage_ctx)
+        codes.extend(f"MEMORY_{c.value}" for c in lineage_codes)
+
+        return ActionMemoryAssessment(
+            record_id=record_id,
+            found=True,
+            eligible=not codes,
+            reason_codes=tuple(_dedupe_str(codes)),
+            stored_state=stored,
+            effective_state=effective,
+            version=version,
+            checksum=checksum,
+            agent_id=getattr(record, "agent_id", None),
+            trust_decision_id=(evidence.decision_id if evidence else None),
+            ancestors=dict(lineage_summary.get("ancestors", {})),
+        )
+
+    async def aevaluate(self, request: object, actor: Optional[TrustActor]) -> TrustDecision:
+        return await self._arun(request, actor, apply=False)
+
+    async def aapply(self, request: object, actor: Optional[TrustActor]) -> TrustDecision:
+        return await self._arun(request, actor, apply=True)
+
+    async def _arun(self, request: object, actor: Optional[TrustActor], *, apply: bool) -> TrustDecision:
+        ctx = _Ctx()
+        req: Optional[TrustTransitionRequest] = None
+        try:
+            req = self._coerce_request(request)
+            self._resolve_actor(actor, ctx)
+            self._check_target(req)
+            record = await self._aload_record(req, ctx)
+            await self._acheck_state_and_history(req, record, ctx)
+            rule = self._rule_for_state(req, ctx)
+            ctx.rule = rule
+            self._authorize_actor(rule, actor, ctx)
+            self._check_reason_and_evidence(req, rule)
+            await self._acheck_operation_specific(req, rule, record, ctx)
+            if not apply:
+                decision = self._decision(
+                    req, ctx, allowed=True, applied=False,
+                    codes=(TrustReason.TRANSITION_PERMITTED,),
+                )
+                self._log(decision)
+                return decision
+            decision = await self._aapply(req, record, ctx)
+            if decision.applied:
+                self._log(decision)
+                return decision
+        except _Deny as deny:
+            ctx.summary.update(deny.summary)
+            decision = self._decision(
+                req, ctx, allowed=False, applied=False, codes=deny.codes,
+                raw_record_id=_raw_record_id(request),
+            )
+        except Exception:  # noqa: BLE001 — fail closed
+            logger.exception("Trust evaluation error; transition denied (fail closed).")
+            decision = self._decision(
+                req, ctx, allowed=False, applied=False,
+                codes=(TrustReason.EVALUATION_ERROR,),
+                raw_record_id=_raw_record_id(request),
+            )
+        if apply:
+            await self._arecord_denial(decision)
+        self._log(decision)
+        return decision
+
+    async def _aload_record(self, req: TrustTransitionRequest, ctx: _Ctx):
+        try:
+            record = await _maybe_await(self._repo.get_record(req.record_id, ctx.tenant_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
+        if record is None or not record or getattr(record, "tenant_id", None) != ctx.tenant_id:
+            raise _Deny(TrustReason.RECORD_NOT_FOUND)
+        return record
+
+    async def _areconcile(self, stored: str, version: int, tenant_id: str, record_id: str) -> Tuple[str, bool, bool]:
+        applied = [d for d in await self._astore_list(tenant_id, record_id) if d.applied]
+        if not applied:
+            return stored, False, False
+        last = applied[-1]
+        history_state = last.resulting_state
+        if history_state not in _KNOWN_STATES:
+            return stored, True, True
+        if history_state == stored:
+            return stored, False, True
+        if (
+            history_state == TrustState.TRUSTED.value
+            and stored == TrustState.UNVERIFIED.value
+            and last.record_version is not None
+            and version > last.record_version
+        ):
+            return stored, False, True
+        effective = history_state if _RESTRICTION_RANK[history_state] > _RESTRICTION_RANK[stored] else stored
+        return effective, True, True
+
+    async def _acheck_state_and_history(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> None:
+        stored = _state_value(getattr(record, "trust_state", None))
+        if stored is None:
+            raise _Deny(TrustReason.CURRENT_STATE_UNKNOWN)
+        version = getattr(record, "current_version", None)
+        if type(version) is not int or version < 1:
+            raise _Deny(TrustReason.CURRENT_STATE_UNKNOWN)
+        ctx.stored_state = stored
+        ctx.version = version
+
+        try:
+            effective, drift, history_available = await self._areconcile(stored, version, ctx.tenant_id, req.record_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.DECISION_STORE_UNAVAILABLE) from exc
+        ctx.effective_state = effective
+        ctx.history_available = history_available
+        if drift:
+            ctx.summary["state_history_mismatch"] = {"stored": stored, "history": effective}
+
+        if req.expected_state.value != effective:
+            codes = [TrustReason.STALE_STATE]
+            if drift:
+                codes.append(TrustReason.STATE_HISTORY_MISMATCH)
+            raise _Deny(*codes)
+        if req.expected_version != version:
+            raise _Deny(TrustReason.STALE_VERSION)
+        ctx.drift = drift
+
+    async def _acheck_operation_specific(self, req: TrustTransitionRequest, rule: TransitionRule, record, ctx: _Ctx) -> None:
+        op = rule.operation
+        if op is TrustOperation.VALIDATE:
+            await self._acheck_validation(req, record, ctx)
+        elif op is TrustOperation.SUPERSEDE:
+            await self._acheck_supersession(req, ctx)
+        elif op is TrustOperation.RELEASE_QUARANTINE:
+            await self._acheck_release_separation(req, ctx)
+        elif op is TrustOperation.RECOVERY_RESTORE:
+            if not (req.evidence.recovery_plan_id and req.evidence.checkpoint_id):
+                raise _Deny(TrustReason.RECOVERY_EVIDENCE_MISSING)
+
+    async def _acheck_validation(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> None:
+        validation = req.evidence.validation
+        if validation is None:
+            raise _Deny(TrustReason.VALIDATION_EVIDENCE_MISSING)
+
+        codes: List[TrustReason] = []
+        dims: Dict[str, str] = {}
+
+        if validation.assessed_version != ctx.version:
+            raise _Deny(TrustReason.ASSESSMENT_VERSION_MISMATCH)
+
+        for dim in TrustDimension:
+            assessment = validation.dimensions.get(dim)
+            if assessment is None or assessment.status is DimensionStatus.UNAVAILABLE:
+                codes.append(TrustReason.DIMENSION_UNAVAILABLE)
+                dims[dim.value] = "UNAVAILABLE"
+                continue
+            if assessment.status is DimensionStatus.FAIL:
+                codes.append(TrustReason.DIMENSION_FAILED)
+                dims[dim.value] = "FAIL"
+                continue
+            if assessment.status is DimensionStatus.NOT_APPLICABLE:
+                if dim not in NOT_APPLICABLE_PERMITTED or not (assessment.note and assessment.note.strip()):
+                    codes.append(TrustReason.DIMENSION_NOT_APPLICABLE_FORBIDDEN)
+                    dims[dim.value] = "NOT_APPLICABLE_FORBIDDEN"
+                    continue
+                dims[dim.value] = "NOT_APPLICABLE"
+                continue
+            dims[dim.value] = "PASS(attested)"
+
+        integrity_codes = await self._averify_integrity(req, validation, ctx)
+        dims[TrustDimension.INTEGRITY.value] = "PASS(verified)" if not integrity_codes else "FAIL(verified)"
+        codes.extend(integrity_codes)
+
+        source_codes = await self._averify_source(record, ctx)
+        dims[TrustDimension.SOURCE_IDENTITY.value] = "PASS(verified)" if not source_codes else "FAIL(verified)"
+        codes.extend(source_codes)
+
+        lineage_codes, lineage_summary = await self._averify_lineage(req.record_id, ctx)
+        dims[TrustDimension.LINEAGE.value] = "PASS(verified)" if not lineage_codes else "FAIL(verified)"
+        codes.extend(lineage_codes)
+
+        if not getattr(record, "source_id", None) and not lineage_summary.get("ancestors"):
+            codes.append(TrustReason.PROVENANCE_MISSING)
+
+        if any(s.severity is SignalSeverity.HIGH and not s.resolved for s in req.evidence.signals):
+            codes.append(TrustReason.UNRESOLVED_HIGH_SIGNAL)
+
+        ctx.summary["dimensions"] = dims
+        ctx.summary["lineage"] = lineage_summary
+        if req.evidence.signals:
+            ctx.summary["signals"] = [
+                {"source": s.source, "label": s.label, "severity": s.severity.value,
+                 "model_version": s.model_version, "resolved": s.resolved}
+                for s in req.evidence.signals
+            ]
+        if codes:
+            raise _Deny(*_dedupe(codes))
+
+    async def _averify_integrity(self, req, validation: TrustValidationEvidence, ctx: _Ctx) -> List[TrustReason]:
+        try:
+            versions = await _maybe_await(self._repo.get_versions(req.record_id, ctx.tenant_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
+        current = [v for v in versions if getattr(v, "version", None) == ctx.version]
+        if len(current) != 1:
+            return [TrustReason.INTEGRITY_UNVERIFIABLE]
+        codes: List[TrustReason] = []
+        for ver in versions:
+            try:
+                if sha256_hex(ver.content) != ver.checksum:
+                    codes.append(TrustReason.INTEGRITY_FAILED)
+                    break
+            except Exception:  # noqa: BLE001
+                return [TrustReason.INTEGRITY_UNVERIFIABLE]
+        ctx.checksum = current[0].checksum
+        if validation.assessed_checksum != current[0].checksum:
+            codes.append(TrustReason.ASSESSMENT_CHECKSUM_MISMATCH)
+        return codes
+
+    async def _averify_source(self, record, ctx: _Ctx) -> List[TrustReason]:
+        source_id = getattr(record, "source_id", None)
+        if not source_id:
+            return []
+        try:
+            source = await _maybe_await(self._repo.get_source(source_id, ctx.tenant_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
+        if source is None or getattr(source, "tenant_id", None) != ctx.tenant_id or getattr(source, "status", None) != "ACTIVE":
+            return [TrustReason.SOURCE_INVALID]
+        return []
+
+    async def _averify_lineage(self, record_id: str, ctx: _Ctx) -> Tuple[List[TrustReason], Dict[str, object]]:
+        lineage_relations = {ProvenanceRelationType.DERIVED_FROM.value, ProvenanceRelationType.TRANSFORMED_INTO.value}
+        visited = {record_id}
+        frontier: List[Tuple[str, int]] = [(record_id, 0)]
+        ancestors: Dict[str, str] = {}
+        edges_seen = 0
+        codes: List[TrustReason] = []
+        try:
+            while frontier:
+                current, depth = frontier.pop(0)
+                edges = await _maybe_await(self._repo.get_edges_for_record(current, ctx.tenant_id))
+                for edge in edges:
+                    relation = _state_like(getattr(edge, "relation_type", None))
+                    if getattr(edge, "to_record_id", None) != current or relation not in lineage_relations:
+                        continue
+                    edges_seen += 1
+                    if edges_seen > MAX_LINEAGE_EDGES:
+                        return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
+                    if getattr(edge, "tenant_id", None) != ctx.tenant_id:
+                        return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
+                    parent_id = edge.from_record_id
+                    if parent_id in visited:
+                        continue
+                    if depth + 1 > MAX_LINEAGE_DEPTH or len(visited) >= MAX_LINEAGE_NODES:
+                        return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
+                    visited.add(parent_id)
+                    parent = await _maybe_await(self._repo.get_record(parent_id, ctx.tenant_id))
+                    if parent is None or not parent or getattr(parent, "tenant_id", None) != ctx.tenant_id:
+                        return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
+                    parent_stored = _state_value(parent.trust_state)
+                    if parent_stored is None:
+                        return [TrustReason.LINEAGE_INCOMPLETE], {"ancestors": ancestors, "complete": False}
+                    parent_effective, _, _ = await self._areconcile(parent_stored, parent.current_version, ctx.tenant_id, parent_id)
+                    ancestors[parent_id] = parent_effective
+                    if parent_effective in (TrustState.SUSPICIOUS.value, TrustState.QUARANTINED.value, TrustState.REJECTED.value):
+                        codes.append(TrustReason.LINEAGE_TAINTED)
+                    elif parent_effective == TrustState.UNVERIFIED.value:
+                        codes.append(TrustReason.LINEAGE_UNVERIFIED)
+                    elif parent_effective == TrustState.SUPERSEDED.value:
+                        codes.append(TrustReason.LINEAGE_SUPERSEDED)
+                    frontier.append((parent_id, depth + 1))
+        except _Deny:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
+        return _dedupe(codes), {"ancestors": ancestors, "complete": True}
+
+    async def _acheck_supersession(self, req: TrustTransitionRequest, ctx: _Ctx) -> None:
+        successor_id = req.evidence.successor_record_id
+        if not successor_id or successor_id == req.record_id:
+            raise _Deny(TrustReason.SUCCESSOR_INVALID)
+        try:
+            successor = await _maybe_await(self._repo.get_record(successor_id, ctx.tenant_id))
+            if successor is None or not successor or getattr(successor, "tenant_id", None) != ctx.tenant_id:
+                raise _Deny(TrustReason.SUCCESSOR_INVALID)
+            succ_state = _state_value(successor.trust_state)
+            if succ_state is None:
+                raise _Deny(TrustReason.SUCCESSOR_INVALID)
+            succ_effective, _, _ = await self._areconcile(succ_state, successor.current_version, ctx.tenant_id, successor_id)
+            if succ_effective != TrustState.TRUSTED.value:
+                raise _Deny(TrustReason.SUCCESSOR_INVALID)
+            edges = await _maybe_await(self._repo.get_edges_for_record(req.record_id, ctx.tenant_id))
+        except _Deny:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.REPOSITORY_UNAVAILABLE) from exc
+        has_edge = any(
+            getattr(e, "from_record_id", None) == successor_id
+            and getattr(e, "to_record_id", None) == req.record_id
+            and _state_like(getattr(e, "relation_type", None)) == ProvenanceRelationType.SUPERSEDES.value
+            and getattr(e, "tenant_id", None) == ctx.tenant_id
+            for e in edges
+        )
+        if not has_edge:
+            raise _Deny(TrustReason.SUPERSESSION_EDGE_MISSING)
+        ctx.summary["successor_record_id"] = successor_id
+
+    async def _acheck_release_separation(self, req: TrustTransitionRequest, ctx: _Ctx) -> None:
+        try:
+            history = await self._astore_list(ctx.tenant_id, req.record_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _Deny(TrustReason.DECISION_STORE_UNAVAILABLE) from exc
+        quarantines = [d for d in history if d.applied and d.resulting_state == TrustState.QUARANTINED.value]
+        is_admin = ctx.actor_role == Role.TENANT_ADMIN.value
+        if not quarantines:
+            if not is_admin:
+                raise _Deny(TrustReason.QUARANTINE_ORIGIN_UNKNOWN)
+            return
+        if quarantines[-1].actor_id == ctx.actor_id and not is_admin:
+            raise _Deny(TrustReason.SEPARATION_OF_DUTIES)
+
+    async def _aapply(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> TrustDecision:
+        async with self._async_record_lock(ctx.tenant_id or "", req.record_id):
+            return await self._aapply_locked(req, record, ctx)
+
+    async def _aapply_locked(self, req: TrustTransitionRequest, record, ctx: _Ctx) -> TrustDecision:
+        rule = ctx.rule
+        assert rule is not None
+        now = self._clock()
+        try:
+            fresh = await _maybe_await(self._repo.get_record(req.record_id, ctx.tenant_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Trust transition not applied: repository re-read failed (%s).", type(exc).__name__)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.REPOSITORY_UNAVAILABLE,))
+        if fresh is None or getattr(fresh, "tenant_id", None) != ctx.tenant_id:
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.RECORD_NOT_FOUND,))
+        if _state_value(fresh.trust_state) != _state_value(record.trust_state):
+            logger.warning("Trust transition refused: record %s state changed during evaluation.", req.record_id)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.STALE_STATE,))
+        if fresh.current_version != record.current_version:
+            logger.warning("Trust transition refused: record %s version changed during evaluation.", req.record_id)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.STALE_VERSION,))
+        previous = fresh
+        try:
+            updated = fresh.model_copy(update={"trust_state": rule.to_state.value, "updated_at": now})
+            await _maybe_await(self._repo.update_record(updated))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Trust transition not applied: repository update failed (%s).", type(exc).__name__)
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.REPOSITORY_UNAVAILABLE,))
+
+        decision = self._decision(req, ctx, allowed=True, applied=True, codes=(TrustReason.TRANSITION_APPLIED,))
+        try:
+            await self._astore_append(decision)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Trust decision store append failed (%s); reverting transition.", type(exc).__name__)
+            try:
+                current = await _maybe_await(self._repo.get_record(req.record_id, ctx.tenant_id))
+                if current is None or _state_value(current.trust_state) != rule.to_state.value or current.current_version != previous.current_version:
+                    raise RuntimeError("record changed after the transition; revert skipped")
+                await _maybe_await(self._repo.update_record(previous))
+            except Exception:  # noqa: BLE001
+                logger.critical(
+                    "Trust transition revert FAILED for record %s; manual reconciliation required.", req.record_id
+                )
+            return self._decision(req, ctx, allowed=False, applied=False, codes=(TrustReason.DECISION_STORE_UNAVAILABLE,))
+        return decision
+
+    async def _arecord_denial(self, decision: TrustDecision) -> None:
+        if not decision.tenant_id:
+            return
+        try:
+            await self._astore_append(decision)
         except Exception as exc:  # noqa: BLE001 — denial stands regardless
             logger.error("Could not persist denied trust decision (%s).", type(exc).__name__)
 

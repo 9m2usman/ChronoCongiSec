@@ -683,7 +683,7 @@ class PolicyEngine:
         self._check_parameters(ev, facts, grant, tool_policy, approval, fingerprint, context)
 
         # Check 6 — memory trust (Day 3 trust evaluator is the authority).
-        self._check_memory(ev, facts, tenant_id, tool_policy)
+        await _maybe_await(self._check_memory(ev, facts, tenant_id, tool_policy))
 
         return self._conclude(ev, facts, context, fingerprint, tool_policy, started)
 
@@ -835,7 +835,7 @@ class PolicyEngine:
             return ReasonCode.APPROVAL_INVALID
         return None
 
-    def _check_memory(self, ev: _Eval, facts: ProposalFacts, tenant_id: str, tool_policy: ToolPolicy) -> None:
+    async def _check_memory(self, ev: _Eval, facts: ProposalFacts, tenant_id: str, tool_policy: ToolPolicy) -> None:
         if not facts.memory_refs:
             ev.memory_trust = "NOT_REFERENCED"
             if tool_policy.requires_memory_justification:
@@ -848,7 +848,17 @@ class PolicyEngine:
         worst_rank, worst_label = -1, "TRUSTED"
         for ref in facts.memory_refs:
             try:
-                assessment = self._trust.assess_for_action(tenant_id, ref.record_id, ref.version)
+                store = getattr(self._trust, "_store", None)
+                repo = getattr(self._trust, "_repo", None)
+                use_async = (
+                    getattr(store, "session_factory", None) is not None
+                    or getattr(repo, "session_factory", None) is not None
+                    or inspect.iscoroutinefunction(getattr(repo, "get_record", None))
+                )
+                if use_async and hasattr(self._trust, "aassess_for_action"):
+                    assessment = await self._trust.aassess_for_action(tenant_id, ref.record_id, ref.version)
+                else:
+                    assessment = self._trust.assess_for_action(tenant_id, ref.record_id, ref.version)
                 if not isinstance(assessment, ActionMemoryAssessment) or assessment.record_id != ref.record_id:
                     raise TypeError("malformed trust assessment")
             except Exception:  # noqa: BLE001 — trust evaluator unavailable => BLOCK

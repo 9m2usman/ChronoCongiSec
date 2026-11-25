@@ -35,6 +35,7 @@ this module never relaxes it. No LLM or score participates in any decision.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 import uuid
@@ -229,6 +230,22 @@ class _Stop(Exception):
         self.facts = facts
 
 
+def _needs_async_trust(trust: Any) -> bool:
+    store = getattr(trust, "_store", None)
+    repo = getattr(trust, "_repo", None)
+    return (
+        getattr(store, "session_factory", None) is not None
+        or getattr(repo, "session_factory", None) is not None
+        or inspect.iscoroutinefunction(getattr(repo, "get_record", None))
+    )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 class QuarantineWorkflow:
     """Authorized, idempotent, fail-closed quarantine through the Day 3 trust evaluator."""
 
@@ -299,8 +316,9 @@ class QuarantineWorkflow:
 
     async def _quarantine(self, context, req, facts, persist_evidence, invalidate_cache) -> QuarantineOutcome:
         retries = 0
+        use_async = _needs_async_trust(self._trust)
         while True:
-            record, effective = self._load(context, req, facts)
+            record, effective = await self._aload(context, req, facts)
 
             if effective == TrustState.QUARANTINED.value:
                 reconciled = self._reconcile_stored_state(context, req, record, facts)
@@ -312,7 +330,10 @@ class QuarantineWorkflow:
                 return self._outcome(req, facts, QuarantineStatus.ALREADY_QUARANTINED, tuple(codes), context)
 
             rule = self._rule_for(effective, req)
-            decision = self._trust.apply(self._trust_request(req, record, effective, facts), UserActor(context))
+            if use_async and hasattr(self._trust, "aapply"):
+                decision = await self._trust.aapply(self._trust_request(req, record, effective, facts), UserActor(context))
+            else:
+                decision = self._trust.apply(self._trust_request(req, record, effective, facts), UserActor(context))
             if decision.applied:
                 break
             if self._is_stale(decision) and retries < MAX_CONCURRENCY_RETRIES:
@@ -325,8 +346,11 @@ class QuarantineWorkflow:
 
         # Post-condition: stored and effective state must both read QUARANTINED.
         try:
-            after = self._repo.get_record(req.record_id, context.tenant_id)
-            after_effective = self._trust.effective_state(context.tenant_id, req.record_id)
+            after = await _maybe_await(self._repo.get_record(req.record_id, context.tenant_id))
+            if use_async and hasattr(self._trust, "aeffective_state"):
+                after_effective = await self._trust.aeffective_state(context.tenant_id, req.record_id)
+            else:
+                after_effective = self._trust.effective_state(context.tenant_id, req.record_id)
         except Exception:  # noqa: BLE001
             after, after_effective = None, None
         stored_after = getattr(after, "trust_state", None) if after is not None else None
@@ -387,6 +411,28 @@ class QuarantineWorkflow:
             raise _Stop(QuarantineStatus.DENIED, QuarantineReason.RECORD_NOT_FOUND)
         try:
             effective = self._trust.effective_state(context.tenant_id, req.record_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _Stop(QuarantineStatus.FAILED, QuarantineReason.TRUST_DECISION_STORE_UNAVAILABLE) from exc
+        if effective is None:
+            raise _Stop(QuarantineStatus.DENIED, QuarantineReason.CURRENT_STATE_UNKNOWN)
+        version = getattr(record, "current_version", None)
+        facts["record_version"] = version
+        facts["previous_state"] = effective
+        facts["version_checksum"] = self._current_checksum(context.tenant_id, req.record_id, version)
+        return record, effective
+
+    async def _aload(self, context: TenantContext, req: QuarantineRequest, facts: Dict[str, Any]):
+        try:
+            record = await _maybe_await(self._repo.get_record(req.record_id, context.tenant_id))
+        except Exception as exc:  # noqa: BLE001
+            raise _Stop(QuarantineStatus.FAILED, QuarantineReason.REPOSITORY_UNAVAILABLE) from exc
+        if record is None or getattr(record, "tenant_id", None) != context.tenant_id:
+            raise _Stop(QuarantineStatus.DENIED, QuarantineReason.RECORD_NOT_FOUND)
+        try:
+            if _needs_async_trust(self._trust) and hasattr(self._trust, "aeffective_state"):
+                effective = await self._trust.aeffective_state(context.tenant_id, req.record_id)
+            else:
+                effective = self._trust.effective_state(context.tenant_id, req.record_id)
         except Exception as exc:  # noqa: BLE001
             raise _Stop(QuarantineStatus.FAILED, QuarantineReason.TRUST_DECISION_STORE_UNAVAILABLE) from exc
         if effective is None:
@@ -647,7 +693,10 @@ class ForensicAccess:
             rec, versions, provenance = get_memory_detail(
                 tenant_id=context.tenant_id, record_id=record_id, for_forensic=True, repository=self._repo,
             )
-            history = self._trust.history(UserActor(context), record_id)
+            if _needs_async_trust(self._trust) and hasattr(self._trust, "ahistory"):
+                history = await self._trust.ahistory(UserActor(context), record_id)
+            else:
+                history = self._trust.history(UserActor(context), record_id)
         except (NotFoundError, AMSCException):
             raise
         except Exception as exc:  # noqa: BLE001

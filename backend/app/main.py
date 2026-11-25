@@ -196,37 +196,47 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Wire persistent repositories when session factory is configured
     session_factory = getattr(app.state, "db_session_factory", None)
+    default_in_memory = getattr(app.state, "_default_in_memory_instances", {})
+
+    def _needs_db_wiring(attr_name: str) -> bool:
+        current = getattr(app.state, attr_name, None)
+        return current is None or (attr_name in default_in_memory and current is default_in_memory[attr_name])
+
     if session_factory is not None:
         auth_repo = getattr(app.state, "auth_repo", None)
         if auth_repo is None or getattr(auth_repo, "is_demo", False):
             from backend.app.database.repositories.auth import DatabaseAuthRepository
             app.state.auth_repo = DatabaseAuthRepository(session_factory)
 
-        if getattr(app.state, "agent_repo", None) is None:
+        if _needs_db_wiring("agent_repo"):
             from backend.app.database.repositories.agents import SqlAlchemyAgentRepository
             app.state.agent_repo = SqlAlchemyAgentRepository(session_factory)
 
-        if getattr(app.state, "memory_repo", None) is None:
+        if _needs_db_wiring("memory_repo"):
             from backend.app.memory.adapters import DatabaseMemoryRepository
             app.state.memory_repo = DatabaseMemoryRepository(session_factory)
 
-        if getattr(app.state, "gateway_repo", None) is None:
+        if _needs_db_wiring("gateway_repo"):
             from backend.app.api.gateway import SqlAlchemyGatewayRepository
             app.state.gateway_repo = SqlAlchemyGatewayRepository(session_factory)
 
-        if getattr(app.state, "incident_repo", None) is None:
+        if _needs_db_wiring("incident_repo"):
             from backend.app.api.incident_management import SqlAlchemyIncidentRepository
             app.state.incident_repo = SqlAlchemyIncidentRepository(session_factory)
 
-        if getattr(app.state, "trace_repo", None) is None:
+        if _needs_db_wiring("trace_repo"):
             from backend.app.api.traces import SqlAlchemyTraceRepository
             app.state.trace_repo = SqlAlchemyTraceRepository(session_factory)
 
-        if getattr(app.state, "baseline_repo", None) is None:
+        if _needs_db_wiring("baseline_repo"):
             from backend.app.database.repositories.baseline import SqlAlchemyBaselineRepository
             app.state.baseline_repo = SqlAlchemyBaselineRepository(session_factory)
 
-        if getattr(app.state, "observation_repo", None) is None:
+        if _needs_db_wiring("enterprise_repo"):
+            from backend.app.enterprise.repository import SqlAlchemyEnterpriseRepository
+            app.state.enterprise_repo = SqlAlchemyEnterpriseRepository(session_factory)
+
+        if _needs_db_wiring("observation_repo"):
             from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
             app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
 
@@ -245,6 +255,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
+
+        if getattr(app.state, "trust_decision_store", None) is None:
+            from backend.app.recovery.store import SqlTrustDecisionStore
+            app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
 
         if getattr(app.state, "pre_action_checkpoint_service", None) is None:
             from backend.app.security.checkpoints import SqlPreActionCheckpointService
@@ -270,8 +284,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
         if getattr(app.state, "outbox_processor", None) is None:
-            from backend.app.workers.outbox import OutboxProcessor
-            app.state.outbox_processor = OutboxProcessor(
+            from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
+            processor = OutboxProcessor(
                 session_factory,
                 worker_id=getattr(settings, "OUTBOX_WORKER_ID", "") or None,
                 max_attempts=getattr(settings, "OUTBOX_MAX_ATTEMPTS", 5),
@@ -280,6 +294,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 lease_seconds=getattr(settings, "OUTBOX_LEASE_SECONDS", 60),
                 batch_size=getattr(settings, "OUTBOX_BATCH_SIZE", 50),
             )
+            register_default_outbox_handlers(processor)
+            app.state.outbox_processor = processor
     elif getattr(settings, "OUTBOX_WORKER_ENABLED", False):
         raise RuntimeError(
             "Outbox worker is enabled (OUTBOX_WORKER_ENABLED=True) but PostgreSQL session factory is not configured."
@@ -447,7 +463,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
-    if getattr(app.state, "recovery_service", None) is None:
+    if (
+        session_factory is not None
+        and getattr(app.state, "trust_evaluator", None) is None
+        and getattr(app.state, "memory_repo", None) is not None
+    ):
+        from backend.app.security.runtime import get_trust_evaluator
+        app.state.trust_evaluator = get_trust_evaluator(app.state, app.state.memory_repo)
+
+    if _needs_db_wiring("recovery_service"):
         if session_factory is not None:
             from backend.app.recovery.store import create_recovery_service
             app.state.recovery_service = create_recovery_service(
@@ -455,7 +479,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 memory_repo=getattr(app.state, "memory_repo", None),
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
-        elif settings.APP_ENV != "production":
+        elif settings.APP_ENV != "production" and getattr(app.state, "recovery_service", None) is None:
             from backend.app.recovery.store import create_in_memory_recovery_service
             app.state.recovery_service = create_in_memory_recovery_service(
                 memory_repo=getattr(app.state, "memory_repo", None),
@@ -535,6 +559,9 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # Track factory-provided in-memory adapters so lifespan startup can replace
+    # them with persistent database-backed implementations when configured.
+    app.state._default_in_memory_instances = {}
     app.state.agent_runtime_cancellation = agent_runtime_cancellation
     app.state.company_resource_security_adapter = company_resource_security_adapter
     app.state.pre_action_checkpoint_service = pre_action_checkpoint_service
@@ -563,6 +590,7 @@ def create_app(
         from backend.app.memory.repository import get_default_repository, seed_enterprise_demo_memories
         app.state.memory_repo = get_default_repository()
         seed_enterprise_demo_memories(app.state.memory_repo)
+        app.state._default_in_memory_instances["memory_repo"] = app.state.memory_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -575,6 +603,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.agents import get_default_agent_repository
         app.state.agent_repo = get_default_agent_repository()
+        app.state._default_in_memory_instances["agent_repo"] = app.state.agent_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -587,6 +616,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.gateway import get_default_gateway_repository
         app.state.gateway_repo = get_default_gateway_repository()
+        app.state._default_in_memory_instances["gateway_repo"] = app.state.gateway_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -599,6 +629,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.incident_management import get_default_incident_repository
         app.state.incident_repo = get_default_incident_repository()
+        app.state._default_in_memory_instances["incident_repo"] = app.state.incident_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -611,6 +642,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.traces import get_default_trace_repository
         app.state.trace_repo = get_default_trace_repository()
+        app.state._default_in_memory_instances["trace_repo"] = app.state.trace_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -623,6 +655,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.baseline import get_default_baseline_repository
         app.state.baseline_repo = get_default_baseline_repository()
+        app.state._default_in_memory_instances["baseline_repo"] = app.state.baseline_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -635,6 +668,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.enterprise.repository import get_default_enterprise_repository
         app.state.enterprise_repo = get_default_enterprise_repository()
+        app.state._default_in_memory_instances["enterprise_repo"] = app.state.enterprise_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -647,6 +681,7 @@ def create_app(
     if settings.APP_ENV != "production":
         from backend.app.api.observation import get_default_observation_repository
         app.state.observation_repo = get_default_observation_repository()
+        app.state._default_in_memory_instances["observation_repo"] = app.state.observation_repo
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -665,6 +700,8 @@ def create_app(
             baseline_repo=app.state.baseline_repo,
             agent_repo=app.state.agent_repo,
         )
+        app.state._default_in_memory_instances["detection_repo"] = app.state.detection_repo
+        app.state._default_in_memory_instances["detection_engine"] = app.state.detection_engine
     else:
         session_factory = getattr(app.state, "db_session_factory", None)
         if session_factory is not None:
@@ -698,6 +735,7 @@ def create_app(
                 memory_repo=app.state.memory_repo,
                 trust_evaluator=getattr(app.state, "trust_evaluator", None),
             )
+            app.state._default_in_memory_instances["recovery_service"] = app.state.recovery_service
 
     # 1. Register Context & Tracing Middleware
     app.add_middleware(RequestContextMiddleware)
@@ -838,6 +876,20 @@ def create_app(
                 all_ready = False
             else:
                 deps["incident_repo"] = "ready"
+
+        # Trust Decision Store Check (Phase 1 Requirement E)
+        trust_store = getattr(app_instance.state, "trust_decision_store", None)
+        if trust_store is None:
+            if cfg.APP_ENV == "production":
+                deps["trust_decision_store"] = "unavailable"
+                all_ready = False
+            else:
+                deps["trust_decision_store"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and not getattr(trust_store, "is_persistent", False):
+            deps["trust_decision_store"] = "rejected (in-memory in production)"
+            all_ready = False
+        else:
+            deps["trust_decision_store"] = "ready"
 
         # Revocation Store Check (GAP-007 / Finding B & N)
         rev_store = getattr(app_instance.state, "revocation_store", None)
