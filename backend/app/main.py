@@ -258,10 +258,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
 
-        if getattr(app.state, "trust_evaluator", None) is None and getattr(app.state, "memory_repo", None) is not None:
-            from backend.app.security.runtime import get_trust_evaluator
-            app.state.trust_evaluator = get_trust_evaluator(app.state, app.state.memory_repo)
-
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
             processor = OutboxProcessor(
@@ -409,6 +405,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Construct services that depend on validated production repositories only after
     # the production guards have rejected any in-memory or missing persistence layer.
+    if (
+        session_factory is not None
+        and getattr(app.state, "trust_evaluator", None) is None
+        and getattr(app.state, "memory_repo", None) is not None
+    ):
+        from backend.app.security.runtime import get_trust_evaluator
+        app.state.trust_evaluator = get_trust_evaluator(app.state, app.state.memory_repo)
+
     if _needs_db_wiring("recovery_service"):
         if session_factory is not None:
             from backend.app.recovery.store import create_recovery_service
