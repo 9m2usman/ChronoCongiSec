@@ -55,6 +55,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "owner_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_files_owner_membership", ondelete="RESTRICT"),
     )
     op.create_index("idx_company_files_tenant_workspace", "company_files", ["tenant_id", "workspace_id"])
+    op.create_index("idx_company_files_owner", "company_files", ["tenant_id", "owner_user_id"])
 
     op.create_table(
         "company_file_versions",
@@ -71,6 +72,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "created_by_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_versions_creator_membership", ondelete="RESTRICT"),
     )
     op.create_index("idx_company_file_versions_file", "company_file_versions", ["tenant_id", "file_id", "version_number"])
+    op.create_index("idx_company_file_versions_creator", "company_file_versions", ["tenant_id", "created_by_user_id"])
 
     op.create_table(
         "company_file_transfers",
@@ -89,6 +91,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "sender_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_transfers_sender_membership", ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["tenant_id", "recipient_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_file_transfers_recipient_membership", ondelete="RESTRICT"),
     )
+    op.create_index("idx_company_file_transfers_file", "company_file_transfers", ["tenant_id", "file_id"])
+    op.create_index("idx_company_file_transfers_sender", "company_file_transfers", ["tenant_id", "sender_user_id"])
     op.create_index("idx_company_file_transfers_recipient", "company_file_transfers", ["tenant_id", "recipient_user_id", "status"])
 
     op.create_table(
@@ -114,7 +118,9 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "created_by_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_tasks_creator_membership", ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["tenant_id", "assigned_to_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_tasks_assignee_membership", ondelete="RESTRICT"),
     )
+    op.create_index("idx_company_tasks_workspace", "company_tasks", ["tenant_id", "workspace_id"])
     op.create_index("idx_company_tasks_branch_status", "company_tasks", ["tenant_id", "branch_id", "status"])
+    op.create_index("idx_company_tasks_creator", "company_tasks", ["tenant_id", "created_by_user_id"])
     op.create_index("idx_company_tasks_assignee", "company_tasks", ["tenant_id", "assigned_to_user_id", "status"])
 
     op.create_table(
@@ -130,6 +136,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "actor_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_task_events_actor_membership", ondelete="RESTRICT"),
     )
     op.create_index("idx_company_task_events_task", "company_task_events", ["tenant_id", "task_id", "created_at"])
+    op.create_index("idx_company_task_events_actor", "company_task_events", ["tenant_id", "actor_user_id"])
 
     op.create_table(
         "company_messages",
@@ -147,6 +154,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "sender_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_messages_sender_membership", ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["tenant_id", "recipient_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_messages_recipient_membership", ondelete="RESTRICT"),
     )
+    op.create_index("idx_company_messages_sender", "company_messages", ["tenant_id", "sender_user_id"])
     op.create_index("idx_company_messages_inbox", "company_messages", ["tenant_id", "recipient_user_id", "sent_at"])
 
     op.create_table(
@@ -181,6 +189,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["tenant_id", "actor_user_id"], ["memberships.tenant_id", "memberships.user_id"], name="fk_company_activity_actor_membership", ondelete="RESTRICT"),
     )
     op.create_index("idx_company_activity_timeline", "company_activity", ["tenant_id", "branch_id", "created_at"])
+    op.create_index("idx_company_activity_actor", "company_activity", ["tenant_id", "actor_user_id"])
 
     # Every tenant-owned row must keep its original tenant, even under raw SQL.
     for table in (
