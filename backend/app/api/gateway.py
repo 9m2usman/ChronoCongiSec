@@ -118,81 +118,78 @@ async def _emit_gateway_observations(
     execution_status: str,
     result_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Emit correlated Phase 1 observation events without breaking gateway response contracts.
-    
-    Enforces strict secret and credential scrubbing and avoids idempotency key collisions
-    when callers submit proposals without an explicit idempotency key.
+    """Persist sanitized, idempotent proposal/decision/receipt observations.
+
+    Proposal and decision events are emitted from the gateway's durable decision
+    callback, before any protected adapter is invoked. A missing or failed
+    observation store therefore prevents the protected side effect.
     """
-    try:
-        obs_repo = getattr(request.app.state, "observation_repo", None)
-        if obs_repo is not None:
-            clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
-            prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
-            dec_idemp = f"obs-dec-{body.idempotency_key}" if body.idempotency_key else None
-            exec_idemp = f"obs-exec-{body.idempotency_key}" if body.idempotency_key else None
+    obs_repo = getattr(request.app.state, "observation_repo", None)
+    if obs_repo is None or not callable(getattr(obs_repo, "record_event", None)):
+        raise SecurityDependencyError("Durable gateway observation repository is unavailable.")
 
-            # 1. Tool Action Proposal (Category 6)
-            await obs_repo.record_event({
-                "tenant_id": tenant_id,
-                "event_type": "TOOL_PROPOSAL_SUBMITTED",
-                "event_category": "TOOL_ACTION_PROPOSAL",
-                "agent_id": body.agent_id,
-                "action_id": body.action_id,
-                "trace_id": body.trace_id,
-                "source_component": "GATEWAY",
-                "tool_name": body.tool_name,
-                "outcome": "SUBMITTED",
-                "idempotency_key": prop_idemp,
-                "payload_json": {
-                    "operation": body.operation,
-                    "parameters": clean_params,
-                    "memory_refs": body.memory_refs,
-                },
-            })
+    clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
+    prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
+    dec_idemp = f"obs-dec-{body.idempotency_key}" if body.idempotency_key else None
+    exec_idemp = f"obs-exec-{body.idempotency_key}" if body.idempotency_key else None
 
-            # 2. Policy Decision (Category 7)
-            decision_val = getattr(decision, "decision", None) or getattr(decision, "decision_value", "UNKNOWN")
-            reason_codes = list(getattr(decision, "reason_codes", []))
-            await obs_repo.record_event({
-                "tenant_id": tenant_id,
-                "event_type": "POLICY_DECISION_EVALUATED",
-                "event_category": "POLICY_DECISION",
-                "agent_id": body.agent_id,
-                "action_id": body.action_id,
-                "trace_id": body.trace_id,
-                "source_component": "POLICY_ENGINE",
-                "policy_decision_id": getattr(decision, "decision_id", proposal_id),
-                "tool_name": body.tool_name,
-                "outcome": str(decision_val),
-                "idempotency_key": dec_idemp,
-                "payload_json": {
-                    "decision": str(decision_val),
-                    "reason_codes": reason_codes,
-                    "execution_status": execution_status,
-                },
-            })
+    await obs_repo.record_event({
+        "tenant_id": tenant_id,
+        "event_type": "TOOL_PROPOSAL_SUBMITTED",
+        "event_category": "TOOL_ACTION_PROPOSAL",
+        "agent_id": body.agent_id,
+        "action_id": body.action_id,
+        "trace_id": body.trace_id,
+        "source_component": "GATEWAY",
+        "tool_name": body.tool_name,
+        "outcome": "SUBMITTED",
+        "idempotency_key": prop_idemp,
+        "payload_json": {
+            "operation": body.operation,
+            "parameters": clean_params,
+            "memory_refs": body.memory_refs,
+        },
+    })
 
-            # 3. Tool Execution Receipt (Category 8)
-            if execution_status in ("EXECUTED", "FAILED", "UNKNOWN"):
-                clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
-                await obs_repo.record_event({
-                    "tenant_id": tenant_id,
-                    "event_type": "TOOL_EXECUTION_RECEIPT",
-                    "event_category": "TOOL_EXECUTION_RECEIPT",
-                    "agent_id": body.agent_id,
-                    "action_id": body.action_id,
-                    "trace_id": body.trace_id,
-                    "source_component": "GATEWAY_ADAPTER",
-                    "tool_name": body.tool_name,
-                    "outcome": execution_status,
-                    "idempotency_key": exec_idemp,
-                    "payload_json": {
-                        "execution_status": execution_status,
-                        "result": clean_result,
-                    },
-                })
-    except Exception as exc:
-        logger.warning("Observation telemetry emission non-fatally bypassed: %s", exc)
+    decision_val = getattr(decision, "decision", None) or getattr(decision, "decision_value", "UNKNOWN")
+    reason_codes = list(getattr(decision, "reason_codes", []))
+    await obs_repo.record_event({
+        "tenant_id": tenant_id,
+        "event_type": "POLICY_DECISION_EVALUATED",
+        "event_category": "POLICY_DECISION",
+        "agent_id": body.agent_id,
+        "action_id": body.action_id,
+        "trace_id": body.trace_id,
+        "source_component": "POLICY_ENGINE",
+        "policy_decision_id": getattr(decision, "decision_id", proposal_id),
+        "tool_name": body.tool_name,
+        "outcome": str(decision_val),
+        "idempotency_key": dec_idemp,
+        "payload_json": {
+            "decision": str(decision_val),
+            "reason_codes": reason_codes,
+            "execution_status": execution_status,
+        },
+    })
+
+    if execution_status in ("EXECUTED", "FAILED", "UNKNOWN"):
+        clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
+        await obs_repo.record_event({
+            "tenant_id": tenant_id,
+            "event_type": "TOOL_EXECUTION_RECEIPT",
+            "event_category": "TOOL_EXECUTION_RECEIPT",
+            "agent_id": body.agent_id,
+            "action_id": body.action_id,
+            "trace_id": body.trace_id,
+            "source_component": "GATEWAY_ADAPTER",
+            "tool_name": body.tool_name,
+            "outcome": execution_status,
+            "idempotency_key": exec_idemp,
+            "payload_json": {
+                "execution_status": execution_status,
+                "result": clean_result,
+            },
+        })
 
 
 def _validate_finite_and_depth(val: Any, current_depth: int = 1) -> None:
@@ -1582,10 +1579,16 @@ async def propose_tool_action(
             await gateway_repo.save_proposal_atomic(
                 proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
             )
-        except (HTTPException, AMSCException):
+            # This callback is invoked by the protected execution guard before the
+            # adapter. If observation persistence fails, no protected side effect runs.
+            await _emit_gateway_observations(
+                request, tenant_id, body, proposal_id, _decision,
+                "PENDING_EXECUTION", None,
+            )
+        except (HTTPException, AMSCException, SecurityDependencyError):
             raise
         except Exception as exc:
-            logger.exception("Failed to persist gateway proposal and security decision: %s", exc)
+            logger.exception("Failed to persist gateway proposal, decision, or observation: %s", exc)
             raise
 
     def response(decision_value: str, execution_status: str, reason_codes: List[str],
