@@ -410,6 +410,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await outbox_processor.shutdown(outbox_worker_task)
         app.state.outbox_worker_task = None
 
+    # Release the Redis connection pool created during application startup.
+    redis_client = getattr(app.state, "redis_client", None)
+    if redis_client is not None:
+        try:
+            await redis_client.aclose()
+        except Exception as exc:
+            logger.warning("Redis client shutdown failed: %s", exc)
+        finally:
+            app.state.redis_client = None
+            app.state.rate_limiter = None
+
     from backend.app.core.security import shutdown_auth_executor
     shutdown_auth_executor()
     logger.info(f"Shutting down {settings.APP_NAME}")
