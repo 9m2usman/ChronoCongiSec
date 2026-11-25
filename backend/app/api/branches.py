@@ -1,18 +1,15 @@
 """Branch Management & Scoping API.
 
-Module: backend.app.api.branches
-Owner: M1 — Platform Backend & API Integration Lead
-
-Follows:
-- PRD FR-001, FR-003: Multi-tenant and branch authorization
-- AMSC Phase 1: Canonical Enterprise Branches (HO, LHR, KHI, ISB)
+Branch visibility is derived from the authenticated membership. A caller-supplied
+tenant slug or header is never used to select another tenant's branches.
 """
 
-from typing import List, Optional
-from fastapi import APIRouter, Request, status
+from typing import List
+
+from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
-from backend.app.core.dependencies import AuthRepoDep, SettingsDep
+from backend.app.core.dependencies import AuthRepoDep, TenantContextDep
 
 router = APIRouter(prefix="/branches", tags=["Branches"])
 
@@ -29,28 +26,32 @@ class BranchResponse(BaseModel):
     "",
     response_model=List[BranchResponse],
     status_code=status.HTTP_200_OK,
-    summary="List Active Branches",
-    description="Returns active branches for the enterprise company workspace.",
+    summary="List Authorized Branches",
+    description=(
+        "Returns active branches in the authenticated tenant. Tenant administrators "
+        "can view all branches; other employees can view only their assigned branch."
+    ),
 )
 async def list_branches(
-    request: Request,
     repo: AuthRepoDep,
-    settings: SettingsDep,
-    tenant_slug: Optional[str] = None,
+    context: TenantContextDep,
 ) -> List[BranchResponse]:
-    target_slug = tenant_slug or request.headers.get("X-Tenant-Slug") or "alphacorp"
-    tenant = await repo.get_tenant_by_slug(target_slug)
-    if not tenant or tenant.status != "ACTIVE":
-        return []
+    """List branches without trusting caller-controlled tenant selectors."""
+    if context.role != "TENANT_ADMIN":
+        if not context.branch_id:
+            return []
+        branch = await repo.get_branch_by_id(context.tenant_id, context.branch_id)
+        branches = [branch] if branch and branch.status == "ACTIVE" else []
+    else:
+        branches = await repo.list_branches(context.tenant_id)
 
-    branches = await repo.list_branches(tenant.id)
     return [
         BranchResponse(
-            id=b.id,
-            tenant_id=b.tenant_id,
-            name=b.name,
-            code=b.code,
-            status=b.status,
+            id=branch.id,
+            tenant_id=branch.tenant_id,
+            name=branch.name,
+            code=branch.code,
+            status=branch.status,
         )
-        for b in branches
+        for branch in branches
     ]
