@@ -109,13 +109,22 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
     ) -> Optional[AgentEntity]:
         """Fetch agent strictly asserting tenant isolation."""
         async with self.session_factory() as session:
-            stmt = select(OrmAgent).where(
-                OrmAgent.id == agent_id,
-                OrmAgent.tenant_id == tenant_id,
+            stmt = (
+                select(OrmAgent, OrmAgentSecurityProfile.branch_id)
+                .outerjoin(
+                    OrmAgentSecurityProfile,
+                    (OrmAgentSecurityProfile.agent_id == OrmAgent.id)
+                    & (OrmAgentSecurityProfile.tenant_id == OrmAgent.tenant_id),
+                )
+                .where(
+                    OrmAgent.id == agent_id,
+                    OrmAgent.tenant_id == tenant_id,
+                )
             )
-            row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is None:
+            result = (await session.execute(stmt)).one_or_none()
+            if result is None:
                 return None
+            row, profile_branch_id = result
 
             return AgentEntity(
                 id=row.id,
@@ -126,7 +135,7 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                 status=row.status,
                 config_version=row.config_version,
                 system_prompt=row.system_prompt,
-                branch_id=getattr(row, "branch_id", None),
+                branch_id=profile_branch_id,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
             )
