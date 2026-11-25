@@ -79,6 +79,137 @@ async def get_repository(request: Request) -> MemoryRepository:
 router = APIRouter(prefix="/memory", tags=["memory"])
 
 
+async def _persist_memory_detection_incidents(
+    request: Request,
+    context: TenantContext,
+    record: Any,
+    findings: List[Any],
+    content_checksum: str,
+) -> List[str]:
+    """Idempotently correlate confirmed ingestion findings with the incident ledger."""
+    from hashlib import sha256
+
+    from backend.app.api.incident_management import (
+        AuditEventEntity,
+        IncidentEntity,
+        IncidentEvidenceEntity,
+        IncidentRepositoryProtocol,
+        get_default_incident_repository,
+    )
+
+    qualifying = [
+        finding for finding in findings
+        if getattr(finding.recommended_outcome, "value", finding.recommended_outcome) == "BLOCK"
+        and getattr(finding.classification_type, "value", finding.classification_type)
+        in {"CONFIRMED_SECURITY_INCIDENT", "CONFIRMED_POLICY_VIOLATION"}
+    ]
+    if not qualifying:
+        return []
+
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    incident_repo = getattr(request.app.state, "incident_repo", None)
+    if incident_repo is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Durable incident repository is not configured.")
+        incident_repo = get_default_incident_repository(settings)
+    if not isinstance(incident_repo, IncidentRepositoryProtocol):
+        raise SecurityDependencyError("Incident repository does not satisfy the required contract.")
+
+    category_map = {
+        "PROMPT_INJECTION": "PROMPT_INJECTION",
+        "MEMORY_INTEGRITY": "UNTRUSTED_MEMORY_ACTION",
+        "SEMANTIC_INTEGRITY": "DRIFT_DIVERGENCE",
+        "BEHAVIORAL_DEVIATION": "UNAUTHORIZED_TOOL",
+        "TOOL_THREAT": "UNAUTHORIZED_TOOL",
+    }
+    incident_ids: List[str] = []
+    for finding in qualifying:
+        category = getattr(finding.detection_category, "value", finding.detection_category)
+        classification = getattr(finding.classification_type, "value", finding.classification_type)
+        severity = getattr(finding.severity, "value", finding.severity)
+        reason_code = str((finding.details or {}).get("reason_code") or category)
+        digest = sha256(
+            f"{context.tenant_id}:{record.id}:{category}:{reason_code}".encode("utf-8")
+        ).hexdigest()
+        incident_id = f"inc-{digest[:32]}"
+        evidence_id = f"evi-{sha256(f'{incident_id}:{finding.id}'.encode('utf-8')).hexdigest()[:32]}"
+        metadata = {
+            "detection_id": finding.id,
+            "detection_category": str(category),
+            "classification_type": str(classification),
+            "severity": str(severity),
+            "confidence_score": finding.confidence_score,
+            "uncertainty_state": getattr(
+                finding.uncertainty_state, "value", finding.uncertainty_state
+            ),
+            "reason_code": reason_code,
+            "content_sha256": content_checksum,
+            "branch_id": context.branch_id,
+            "trace_id": finding.trace_id,
+        }
+        evidence = IncidentEvidenceEntity(
+            id=evidence_id,
+            tenant_id=context.tenant_id,
+            incident_id=incident_id,
+            evidence_type="MEMORY_RECORD",
+            resource_id=record.id,
+            metadata_json=metadata,
+        )
+        audit = AuditEventEntity(
+            id=f"audit-{sha256(f'{incident_id}:{finding.id}'.encode('utf-8')).hexdigest()[:32]}",
+            tenant_id=context.tenant_id,
+            actor_id=context.user_id,
+            event_type="MEMORY_SECURITY_INCIDENT_CORRELATED",
+            resource_id=incident_id,
+            action="CORRELATE_DETECTION",
+            outcome="SUCCESS",
+            trace_id=finding.trace_id,
+            details_json={
+                "memory_record_id": record.id,
+                "detection_id": finding.id,
+                "detection_category": str(category),
+                "reason_code": reason_code,
+                "content_sha256": content_checksum,
+            },
+        )
+        existing = await incident_repo.get_incident(context.tenant_id, incident_id)
+        if existing is not None:
+            await incident_repo.attach_evidence_atomic(
+                context.tenant_id, incident_id, [evidence], audit_event=audit
+            )
+        else:
+            incident = IncidentEntity(
+                id=incident_id,
+                tenant_id=context.tenant_id,
+                title=str(finding.title)[:255],
+                classification=category_map.get(str(category), "UNTRUSTED_MEMORY_ACTION"),
+                severity=str(severity),
+                status="OPEN",
+                affected_record_id=record.id,
+                agent_id=finding.agent_id,
+                evidence_json={
+                    "summary": "Automatically correlated high-confidence memory ingestion detection",
+                    "total_count": 1,
+                    "detection_ids": [finding.id],
+                    "content_sha256": content_checksum,
+                },
+            )
+            try:
+                await incident_repo.create_incident_atomic(
+                    incident, [evidence], audit_event=audit
+                )
+            except Exception:
+                # Resolve a concurrent idempotent create; propagate genuine persistence failures.
+                existing = await incident_repo.get_incident(context.tenant_id, incident_id)
+                if existing is None:
+                    raise
+                await incident_repo.attach_evidence_atomic(
+                    context.tenant_id, incident_id, [evidence], audit_event=audit
+                )
+        incident_ids.append(incident_id)
+    return list(dict.fromkeys(incident_ids))
+
+
 @router.post(
     "",
     response_model=MemoryRecordResponse,
@@ -144,6 +275,9 @@ async def api_ingest_memory(
         for finding in findings:
             persisted = await detection_repo.record_detection(finding.to_dict())
             persisted_findings.append(persisted)
+        incident_ids = await _persist_memory_detection_incidents(
+            request, context, record, findings, version.checksum
+        )
 
         observation_repo = getattr(request.app.state, "observation_repo", None)
         if observation_repo is None:
@@ -170,6 +304,7 @@ async def api_ingest_memory(
                 "actor_id": context.user_id,
                 "actor_role": context.role,
                 "detection_ids": [item.get("id") for item in persisted_findings],
+                "incident_ids": incident_ids,
                 "detection_categories": sorted({
                     str(item.get("detection_category")) for item in persisted_findings
                 }),
