@@ -195,6 +195,37 @@ class ContainmentRequest(BaseModel):
 # =============================================================================
 
 
+class AgentRuntimeCancellation(Protocol):
+    """Phase 3 adapter: cancel and durably acknowledge all active/queued work for an agent."""
+
+    async def cancel_agent_work(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        incident_id: Optional[str],
+        trace_id: Optional[str],
+    ) -> Mapping[str, Any]:
+        ...
+
+
+class CompanyResourceIsolationAdapter(Protocol):
+    """Phase 2 adapter: enforce tenant/branch-scoped read/write isolation for a company resource."""
+
+    async def isolate_resource(
+        self,
+        *,
+        tenant_id: str,
+        branch_id: Optional[str],
+        resource_type: str,
+        resource_id: str,
+        actor_id: str,
+        incident_id: Optional[str],
+        reason: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+
 class ContainmentService:
     """Authorized containment operations for incidents."""
 
@@ -206,8 +237,8 @@ class ContainmentService:
         *,
         agent_repository: Any = None,
         audit_sink: Any = None,
-        runtime_cancellation: Any = None,
-        resource_isolation_adapter: Any = None,
+        runtime_cancellation: Optional[AgentRuntimeCancellation] = None,
+        resource_isolation_adapter: Optional[CompanyResourceIsolationAdapter] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._investigation_service = investigation_service
