@@ -152,7 +152,21 @@ class OutboxEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    max_attempts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    next_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    dead_lettered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = created_at_column()
     published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (Index("idx_outbox_pending", "status", "created_at"),)
+    __table_args__ = (
+        Index("idx_outbox_pending", "status", "created_at"),
+        Index("idx_outbox_poll", "status", "next_attempt_at", "created_at"),
+        Index("idx_outbox_locked_until", "status", "locked_until"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_outbox_tenant_idempotency"),
+    )
