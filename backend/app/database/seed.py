@@ -58,28 +58,24 @@ USERS = [
         "email": "sarah.admin@alphacorp.com",
         "full_name": "Sarah Chen",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-alex-02",
         "email": "alex.analyst@alphacorp.com",
         "full_name": "Alex Mercer",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-dev-dave-03",
         "email": "dave.developer@alphacorp.com",
         "full_name": "Dave Miller",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-comp-a",
         "email": "analyst@company-a.com",
         "full_name": "Alice Analyst",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
 ]
 
@@ -229,9 +225,7 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
                 full_name=u_data["full_name"],
                 hashed_password=default_pw_hash,
                 status=u_data["status"],
-                is_superadmin=u_data["is_superadmin"],
                 created_at=now,
-                updated_at=now,
             )
             session.add(user)
             stats["users"] += 1
