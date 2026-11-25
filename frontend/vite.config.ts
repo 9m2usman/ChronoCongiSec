@@ -10,9 +10,38 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     resolve: {
-      alias: {
-        '@': path.resolve(__dirname, './src'),
-      },
+      alias: [
+        { find: '@', replacement: path.resolve(__dirname, './src') },
+        {
+          find: /^three$/,
+          replacement: path.resolve(
+            __dirname,
+            './node_modules/3d-force-graph/node_modules/three/build/three.module.js'
+          ),
+        },
+        {
+          find: /^three\/webgpu$/,
+          replacement: path.resolve(
+            __dirname,
+            './node_modules/3d-force-graph/node_modules/three/build/three.webgpu.js'
+          ),
+        },
+        {
+          find: /^three\/tsl$/,
+          replacement: path.resolve(
+            __dirname,
+            './node_modules/3d-force-graph/node_modules/three/build/three.tsl.js'
+          ),
+        },
+        {
+          find: /^three\/addons\/(.*)$/,
+          replacement: `${path.resolve(
+            __dirname,
+            './node_modules/3d-force-graph/node_modules/three/examples/jsm'
+          )}/$1`,
+        },
+      ],
+      dedupe: ['three'],
     },
     server: {
       port: 5173,

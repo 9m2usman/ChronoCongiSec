@@ -28,3 +28,18 @@ export interface DualTraceData {
   execution_spans: ExecutionSpan[];
   memory_spans: MemorySpan[];
 }
+
+export interface TraceSummary {
+  id: string;
+  agent_id?: string | null;
+  started_at: string;
+  status: string;
+  span_count: number;
+}
+
+export interface TraceListResponse {
+  items: TraceSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}

@@ -1,12 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useQuarantineMutation } from '@/hooks';
-import { X, Copy, ExternalLink, Check, Ban, Loader2 } from 'lucide-react';
+import { StatusBadge } from '@/components/common/StatusBadge';
+import { X, Copy, ExternalLink, Check, Ban, Loader2, AlertTriangle } from 'lucide-react';
 
 export const InspectorDrawer: React.FC = () => {
   const { inspectorOpen, inspectorPayload, closeInspector, openInspector } = useWorkstationStore();
   const [copied, setCopied] = useState(false);
   const quarantineMutation = useQuarantineMutation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!inspectorOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeInspector();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inspectorOpen, closeInspector]);
 
   if (!inspectorOpen || !inspectorPayload) return null;
 
@@ -42,20 +56,26 @@ export const InspectorDrawer: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-96 bg-slate-900 border-l border-slate-700 shadow-2xl flex flex-col font-mono text-xs text-slate-200 animate-slide-in">
+    <div
+      className="fixed inset-y-0 right-0 z-40 w-96 max-w-full bg-surface border-l border-borderc shadow-2xl flex flex-col font-mono text-xs text-ink"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Forensic Inspector Drawer"
+    >
       {/* Drawer Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-slate-950 border-b border-slate-800">
+      <div className="flex items-center justify-between px-4 py-3 bg-elevated border-b border-borderc">
         <div className="flex items-center gap-2">
-          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-950 border border-blue-700 text-blue-300">
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-brand-tint border border-brand/40 text-brand">
             {inspectorPayload.type}
           </span>
-          <span className="font-semibold text-slate-100 truncate max-w-[180px]">
+          <span className="font-semibold text-ink truncate max-w-[180px]">
             {inspectorPayload.title}
           </span>
         </div>
         <button
           onClick={closeInspector}
-          className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-100"
+          className="p-1 rounded hover:bg-canvas text-ink-muted hover:text-ink transition-colors"
+          aria-label="Close Inspector"
         >
           <X className="w-4 h-4" />
         </button>
@@ -64,61 +84,60 @@ export const InspectorDrawer: React.FC = () => {
       {/* Drawer Body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* Identifier & Status */}
-        <div className="p-3 bg-slate-950 rounded border border-slate-800">
-          <div className="text-[10px] text-slate-400 mb-1">Entity ID:</div>
-          <div className="flex items-center justify-between font-bold text-slate-100">
+        <div className="p-3 bg-canvas rounded border border-borderc">
+          <div className="text-[10px] text-ink-muted mb-1">Entity ID:</div>
+          <div className="flex items-center justify-between font-bold text-ink">
             <span className="truncate">{inspectorPayload.id}</span>
             <button
               onClick={() => handleCopy(inspectorPayload.id)}
-              className="p-1 hover:text-blue-400 text-slate-500"
+              className="p-1 hover:text-brand text-ink-muted transition-colors"
               title="Copy ID"
+              aria-label="Copy Entity ID"
             >
-              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? <Check className="w-3.5 h-3.5 text-status-trusted" /> : <Copy className="w-3.5 h-3.5" />}
             </button>
           </div>
           {inspectorPayload.trustState && (
             <div className="mt-2 flex items-center gap-1.5">
-              <span className="text-[10px] text-slate-400">Trust State:</span>
-              <span
-                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                  inspectorPayload.trustState === 'TRUSTED'
-                    ? 'bg-emerald-950/60 border-emerald-500 text-emerald-300'
-                    : inspectorPayload.trustState === 'QUARANTINED'
-                    ? 'bg-red-950/60 border-red-500 text-red-300'
-                    : 'bg-amber-950/60 border-amber-500 text-amber-300'
-                }`}
-              >
-                {inspectorPayload.trustState}
-              </span>
+              <span className="text-[10px] text-ink-muted">Trust State:</span>
+              <StatusBadge status={inspectorPayload.trustState} />
             </div>
           )}
         </div>
 
         {/* Cryptographic SHA-256 Checksum */}
         {inspectorPayload.sha256 && (
-          <div className="p-3 bg-slate-950 rounded border border-slate-800">
-            <div className="text-[10px] text-slate-400 mb-1">Cryptographic Checksum (SHA-256):</div>
-            <div className="text-[10px] text-emerald-400 break-all bg-slate-900 p-2 rounded border border-slate-800/80">
+          <div className="p-3 bg-canvas rounded border border-borderc">
+            <div className="text-[10px] text-ink-muted mb-1">Cryptographic Checksum (SHA-256):</div>
+            <div className="text-[10px] text-status-trusted break-all bg-surface p-2 rounded border border-borderc">
               {inspectorPayload.sha256}
             </div>
           </div>
         )}
 
         {/* Forensic Metadata & Details */}
-        <div className="p-3 bg-slate-950 rounded border border-slate-800">
-          <div className="text-[10px] text-slate-400 mb-1">Raw Forensic Payload:</div>
-          <pre className="text-[10px] text-slate-300 bg-slate-900 p-2 rounded max-h-56 overflow-y-auto border border-slate-800/80">
+        <div className="p-3 bg-canvas rounded border border-borderc">
+          <div className="text-[10px] text-ink-muted mb-1">Raw Forensic Payload:</div>
+          <pre className="text-[10px] text-ink bg-surface p-2 rounded max-h-56 overflow-y-auto border border-borderc">
             {JSON.stringify(inspectorPayload.details, null, 2)}
           </pre>
         </div>
 
+        {/* Quarantine Mutation Error (Fail-Closed Reporting) */}
+        {quarantineMutation.isError && (
+          <div className="p-2.5 bg-status-criticalBg border border-status-critical/40 rounded text-[11px] text-status-critical flex items-start gap-2" role="alert">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{(quarantineMutation.error as Error)?.message || 'Quarantine request rejected by server.'}</span>
+          </div>
+        )}
+
         {/* Forensic Action Triggers */}
-        <div className="space-y-2 pt-2 border-t border-slate-800">
+        <div className="space-y-2 pt-2 border-t border-borderc">
           {inspectorPayload.trustState !== 'QUARANTINED' && (
             <button
               onClick={handleQuarantine}
               disabled={quarantineMutation.isPending}
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-950/80 hover:bg-red-900/80 text-red-300 border border-red-800/80 rounded font-semibold text-xs transition-colors disabled:opacity-50"
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-status-criticalBg hover:opacity-90 text-status-critical border border-status-critical/40 rounded font-semibold text-xs transition-opacity disabled:opacity-50"
             >
               {quarantineMutation.isPending ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -130,8 +149,11 @@ export const InspectorDrawer: React.FC = () => {
           )}
 
           <button
-            onClick={() => alert(`Investigating Lineage for ${inspectorPayload.id}`)}
-            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded font-semibold text-xs transition-colors"
+            onClick={() => {
+              closeInspector();
+              navigate('/chronimem');
+            }}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-elevated hover:bg-brand-tint text-ink border border-borderc rounded font-semibold text-xs transition-colors"
           >
             <ExternalLink className="w-3.5 h-3.5" /> Trace Lineage in ChroniMem
           </button>
