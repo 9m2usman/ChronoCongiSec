@@ -269,6 +269,11 @@ class InMemoryAgentRepository:
         previous_status = agent.status
         agent.status = status
         agent.updated_at = datetime.now(timezone.utc)
+        profiles = getattr(self, "_profiles", {})
+        profile = profiles.get((tenant_id, agent_id))
+        if profile is not None:
+            profile["status"] = status
+            profile["updated_at"] = agent.updated_at.isoformat()
         return previous_status
 
     async def list_agents(
