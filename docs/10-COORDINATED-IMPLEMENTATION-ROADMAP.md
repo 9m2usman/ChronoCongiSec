@@ -542,3 +542,84 @@ Phase 6 is not complete until:
 8. Build/refine the final user-facing experiences in Phase 6 and prove the complete eight-step journey.
 
 The eight-step frontend scenario is a product-level acceptance requirement. It is not optional polish and must influence the data model, APIs, events, permissions, checkpoints and audit records from the earlier phases.
+
+
+---
+
+## 12. Phase 1 source inspection — verified implementation facts
+
+This section records a focused source inspection of the audited candidate branch. It narrows Phase 1 work from general concerns to concrete defects and existing capabilities. Re-check current file contents before editing because another PR may change the branch.
+
+### 12.1 Startup and repository selection
+
+**Files:** `backend/app/main.py`, `backend/app/core/config.py`, `backend/app/core/dependencies.py`, `backend/app/database/session.py`
+
+- FastAPI lifespan creates an async PostgreSQL engine/session factory when `DATABASE_URL` is an `postgresql+asyncpg://` URL and no factory has already been injected.
+- If the database connection check fails outside production, startup logs that it is operating in in-memory development mode and continues. That fallback must be explicit in readiness/runtime mode and must not be confused with a persisted company environment.
+- When a session factory exists, lifespan attaches DB-backed auth, agent, memory, gateway, incident, trace, baseline, observation and drift repositories, and creates an `OutboxProcessor`.
+- `create_app` initializes an in-memory rate limiter in non-production when permitted. It sets the limiter to `None` otherwise. The `RedisRateLimiter` class exists, but the inspected startup path does not create a Redis client or attach a Redis-backed limiter.
+- Production startup validates that a Redis-backed limiter exists and responds to `ping`; that validation is not equivalent to wiring the missing client.
+- The settings defaults include in-memory demo auth/rate-limiter options. Phase 1 must define a safe, explicit local persisted-development configuration for the project demo without removing isolated unit-test support.
+- Existing app factory/lifespan logic has multiple repository initialization paths. Refactor only after mapping all test fixtures and injected app-state overrides; do not replace the factory wholesale.
+
+### 12.2 Branch and employee identity
+
+**Files:** `backend/app/api/branches.py`, `backend/app/api/auth.py`, `backend/app/database/models/identity.py`, `backend/app/database/repositories/auth.py`, `backend/app/database/repositories/memberships.py`
+
+- The branch-list endpoint currently accepts a caller-provided `tenant_slug`, falls back to `X-Tenant-Slug`, then defaults to `alphacorp`; the inspected route has no authenticated membership dependency. It therefore does not derive branch visibility from the logged-in user's tenant/branch authorization.
+- Identity schema already includes `Membership.branch_id`, registration requests, assigned role and assigned branch fields, and composite tenant/branch constraints.
+- Database auth repository already implements persisted registration request creation, retrieval, approval and membership lookup. Do not rebuild employee registration; verify and correct its transaction, authorization and role/branch invariants.
+- Current seed membership rows omit `branch_id`, so seeded employees are not assigned to a branch even though branch records exist.
+- The seed module contains three demo tenants. Product-facing experience must present one company; retain separate tenants only where required by explicit isolation tests/fixtures, not as selectable demo companies.
+
+### 12.3 Agent branch scope and security profiles
+
+**Files:** `backend/app/database/models/agents.py`, `backend/app/database/models/baseline.py`, `backend/app/database/repositories/agents.py`, `backend/app/api/agents.py`, `backend/app/database/seed.py`
+
+- ORM `Agent` has no `branch_id` column.
+- `AgentSecurityProfile` already has a tenant-scoped `branch_id`, approved purpose/goals, data scope and operational restrictions.
+- `SqlAlchemyAgentRepository.list_agents()` checks `hasattr(OrmAgent, "branch_id")` before applying the branch filter. Because the ORM Agent model lacks that column, the branch filter is skipped.
+- `create_agent_atomic()` persists the Agent and initial version but does not create an AgentSecurityProfile.
+- The inspected seed routine creates agent rows and tool grants but does not create agent security profiles; membership seed rows likewise omit branch assignment.
+- Phase 1 should treat the security profile as the authoritative branch/data-scope boundary and ensure every active agent has one. Decide explicitly whether agent branch scope is derived solely from the profile or duplicated in the Agent row; avoid two conflicting sources of truth. If a schema change is justified, add a tenant-safe migration and tests proving the source of truth.
+
+### 12.4 Trust-decision persistence
+
+**Files:** `backend/app/recovery/store.py`, `backend/app/security/trust.py`, `backend/app/database/models/baseline.py`, `backend/alembic/versions/0013_trust_decisions_baseline_and_observation.py`
+
+- The `trust_decisions` table/model and migration already exist. Do not create a duplicate table or migration.
+- `SqlTrustDecisionStore` has async `aappend()` and `alist_for_record()` methods, but its synchronous `append()` schedules persistence with `asyncio.create_task`; persistence errors are logged and swallowed.
+- Its synchronous `list_for_record()` reads only the process-local cache. The asynchronous list method queries PostgreSQL but falls back to cache on query failure.
+- The trust-store protocol and evaluator expose synchronous append/list methods. The current design therefore does not guarantee that a trust decision is committed before the caller proceeds, nor that a restart reconstructs history through the evaluator's normal read path.
+- Phase 1 must reconcile the evaluator/store interface with async persistence and durable reads. A failed database write/read must produce a fail-closed security outcome, not silently fall back to an empty or stale process-local history.
+- Preserve the append-only decision semantics and existing tests; extend the contract tests to cover restart, failed writes and failed reads.
+
+### 12.5 Outbox and worker lifecycle
+
+**Files:** `backend/app/workers/outbox.py`, `backend/app/main.py`, `backend/app/database/models/observability.py`
+
+- `main.py` creates an `OutboxProcessor` when a database session factory exists, but the inspected lifespan does not start `run_loop()` or manage a worker task/shutdown.
+- The processor is constructed without event handlers in the inspected startup path.
+- `process_batch()` marks an event `PUBLISHED` even when no handler is registered.
+- Handler exceptions set the event to `FAILED`; the current implementation does not provide a complete retry/backoff/dead-letter lifecycle.
+- Phase 1 must define the actual event types needed by identity/runtime and register real handlers. Unknown event types must remain visibly unhandled/failed and must never be reported as successfully delivered.
+- Use the existing transactional outbox and PostgreSQL locking design. Do not introduce Celery, RabbitMQ or another broker without a measured requirement and an explicit architecture decision.
+
+### 12.6 Phase 1 implementation order (updated)
+
+1. Add regression tests that reproduce the verified defects above before changing behavior.
+2. Define explicit local persisted-development configuration and readiness reporting; ensure a missing database cannot silently look like a healthy persisted demo.
+3. Fix authenticated tenant/branch resolution and verify registration approval/membership assignment.
+4. Make agent profile creation/seed and branch-scope enforcement consistent; add fail-closed tests for missing/inactive profiles.
+5. Convert trust-store usage to an awaited durable contract and prove read-after-restart and failure behavior.
+6. Wire a real Redis client and lifecycle only if Redis remains a Phase 1 requirement for the chosen local/production modes; ensure startup/readiness semantics are accurate.
+7. Start and stop the outbox worker under application lifespan, register real handlers, and implement safe retry/dead-letter/unhandled-event semantics.
+8. Run migration, PostgreSQL, auth, tenant/branch isolation, agent profile, trust-store, Redis and outbox test suites. Review frontend/runtime labels so memory/test-double mode is never presented as live.
+
+### 12.7 Scope protection
+
+- Do not add company file/task/message tables in Phase 1; those belong to Phase 2 after identity and tenant/branch contracts are stable.
+- Do not implement final incident UI in Phase 1; preserve existing useful security pages and ensure backend records will support them.
+- Do not change the trust-state machine or policy semantics merely to make tests pass.
+- Do not seed extra fake business records or agent profiles without a documented purpose and explicit demo/test labeling.
+- Do not rewrite `main.py`, trust evaluation or the database layer wholesale. Make the smallest coherent changes supported by tests and a reviewed dependency map.
