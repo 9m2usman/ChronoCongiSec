@@ -117,6 +117,7 @@ async def _emit_gateway_observations(
     decision: Any,
     execution_status: str,
     result_payload: Optional[Dict[str, Any]] = None,
+    branch_id: Optional[str] = None,
 ) -> None:
     """Persist sanitized, idempotent proposal/decision/receipt observations.
 
@@ -135,6 +136,7 @@ async def _emit_gateway_observations(
 
     await obs_repo.record_event({
         "tenant_id": tenant_id,
+        "branch_id": branch_id,
         "event_type": "TOOL_PROPOSAL_SUBMITTED",
         "event_category": "TOOL_ACTION_PROPOSAL",
         "agent_id": body.agent_id,
@@ -155,6 +157,7 @@ async def _emit_gateway_observations(
     reason_codes = list(getattr(decision, "reason_codes", []))
     await obs_repo.record_event({
         "tenant_id": tenant_id,
+        "branch_id": branch_id,
         "event_type": "POLICY_DECISION_EVALUATED",
         "event_category": "POLICY_DECISION",
         "agent_id": body.agent_id,
@@ -176,6 +179,7 @@ async def _emit_gateway_observations(
         clean_result = redact_sensitive_dict(result_payload) if result_payload else {}
         await obs_repo.record_event({
             "tenant_id": tenant_id,
+            "branch_id": branch_id,
             "event_type": "TOOL_EXECUTION_RECEIPT",
             "event_category": "TOOL_EXECUTION_RECEIPT",
             "agent_id": body.agent_id,
@@ -1509,17 +1513,20 @@ async def propose_tool_action(
     if record["decision"] == "BLOCK":
         detection_engine.record_blocked_event(tenant_id, body.agent_id)
 
-    # Record detections if repository is present
+    # Detection findings are part of the forensic decision chain. Never dispatch
+    # a protected action if the detection store is absent or cannot persist a finding.
     det_repo = getattr(request.app.state, "detection_repo", None)
-    if det_repo is not None:
-        for finding in detected_findings:
-            finding.policy_decision_id = decision.decision_id
-            try:
-                res = det_repo.record_detection(finding.to_dict())
-                if inspect.isawaitable(res):
-                    await res
-            except Exception as exc:
-                logger.warning("Failed to record detection in gateway: %s", exc)
+    if det_repo is None:
+        raise SecurityDependencyError("Durable detection repository is unavailable.")
+    for finding in detected_findings:
+        finding.policy_decision_id = decision.decision_id
+        try:
+            res = det_repo.record_detection(finding.to_dict())
+            if inspect.isawaitable(res):
+                await res
+        except Exception as exc:
+            logger.error("Failed to persist gateway detection evidence (%s).", type(exc).__name__)
+            raise SecurityDependencyError("Gateway detection evidence could not be persisted.") from exc
 
     proposal_id = str(uuid.uuid4())
     proposal_entity = ToolProposalEntity(
@@ -1583,7 +1590,7 @@ async def propose_tool_action(
             # adapter. If observation persistence fails, no protected side effect runs.
             await _emit_gateway_observations(
                 request, tenant_id, body, proposal_id, _decision,
-                "PENDING_EXECUTION", None,
+                "PENDING_EXECUTION", None, context.branch_id,
             )
         except (HTTPException, AMSCException, SecurityDependencyError):
             raise
@@ -1618,7 +1625,7 @@ async def propose_tool_action(
                 status_code=500,
             ) from exc
         await _emit_gateway_observations(
-            request, tenant_id, body, proposal_id, decision, record["execution_status"], None
+            request, tenant_id, body, proposal_id, decision, record["execution_status"], None, context.branch_id
         )
         return response(record["decision"], record["execution_status"], list(decision.reason_codes))
 
@@ -1728,7 +1735,7 @@ async def propose_tool_action(
         execution=execution_entity, execution_status=execution_status,
     )
     await _emit_gateway_observations(
-        request, tenant_id, body, proposal_id, decision, execution_status, result_payload
+        request, tenant_id, body, proposal_id, decision, execution_status, result_payload, context.branch_id
     )
     return response(record["decision"], execution_status, list(outcome.reason_codes), result_payload)
 
