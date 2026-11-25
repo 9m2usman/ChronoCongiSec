@@ -368,3 +368,30 @@ def test_crewai_settings_does_not_reuse_employee_credentials():
     settings = CrewAISettings(_env_file=None)
     assert settings.CHRONOCONGISEC_AUTH_EMAIL is None
     assert settings.CHRONOCONGISEC_AUTH_PASSWORD is None
+
+
+@pytest.mark.asyncio
+async def test_redis_rate_limiter_never_uses_local_counters_in_production_even_fail_open(monkeypatch):
+    prod_settings = Settings(
+        APP_ENV="production",
+        JWT_SECRET="prod-super-strong-secret-key-at-least-32-chars",
+        AUTH_BACKEND="database",
+        ALLOW_IN_MEMORY_AUTH=False,
+        ALLOW_IN_MEMORY_RATE_LIMITER=False,
+        RATE_LIMITER_BACKEND="redis",
+        DATABASE_URL="postgresql+asyncpg://amsc:strong_prod_pw@db.internal:5432/amsc",
+        REDIS_URL="redis://redis.internal:6379/0",
+    )
+    monkeypatch.setattr("backend.app.core.config.get_settings", lambda: prod_settings)
+
+    limiter = RedisRateLimiter(redis_client=None, failure_policy="fail_open")
+    r1 = await limiter.check_rate_limit("login:ip:1.2.3.4", max_requests=1, window_seconds=60)
+    r2 = await limiter.check_rate_limit("login:ip:1.2.3.4", max_requests=1, window_seconds=60)
+    assert r1.allowed is True
+    assert r2.allowed is True
+    assert limiter._counters == {}
+
+
+def test_sql_trust_decision_store_is_persistent_requires_session_factory():
+    store_without_db = SqlTrustDecisionStore(None)
+    assert store_without_db.is_persistent is False

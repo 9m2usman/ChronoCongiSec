@@ -212,11 +212,13 @@ class SqlTrustDecisionStore:
     writes and reads are awaited and fail closed on persistence errors (never swallowed).
     """
 
-    is_persistent: bool = True
-
     def __init__(self, session_factory: Optional[async_sessionmaker[AsyncSession]] = None) -> None:
         self.session_factory = session_factory
         self._by_record: Dict[Tuple[str, str], List[TrustDecision]] = {}
+
+    @property
+    def is_persistent(self) -> bool:
+        return self.session_factory is not None
 
     @staticmethod
     def _serialize_decision(decision: TrustDecision) -> Dict[str, Any]:

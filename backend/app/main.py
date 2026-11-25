@@ -398,7 +398,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
 
         trust_store = getattr(app.state, "trust_decision_store", None)
-        if trust_store is not None and not getattr(trust_store, "is_persistent", False):
+        if trust_store is None or not getattr(trust_store, "is_persistent", False):
             raise RuntimeError(
                 "Production startup failure: Persistent trust decision store is required in production."
             )
