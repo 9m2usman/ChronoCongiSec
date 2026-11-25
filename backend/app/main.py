@@ -259,6 +259,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
 
+        # Phase 3: agent-mediated company operations are a protected gateway tool. The
+        # adapter exists only when company persistence exists; without it the tool stays
+        # unregistered and M4 blocks every proposal (TOOL_NOT_REGISTERED, fail closed).
+        if getattr(app.state, "tool_registry", None) is None:
+            from backend.app.api.gateway import ToolAdapterRegistry
+            from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+            tool_registry = ToolAdapterRegistry()
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
+            app.state.tool_registry = tool_registry
+
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
             processor = OutboxProcessor(

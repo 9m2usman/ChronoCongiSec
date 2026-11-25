@@ -1638,6 +1638,11 @@ async def propose_tool_action(
                     "proposal_id": proposal_id,
                     "trace_id": body.trace_id,
                     "grant_id": grant_id,
+                    # Phase 3: authenticated principal for server-side scope checks.
+                    # Never taken from the proposal body.
+                    "user_id": context.user_id,
+                    "role": context.role,
+                    "branch_id": getattr(context, "branch_id", None),
                 },
             ),
             timeout=timeout,
