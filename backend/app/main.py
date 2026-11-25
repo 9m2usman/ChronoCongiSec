@@ -855,15 +855,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         runtime_cancellation = getattr(app_instance.state, "agent_runtime_cancellation", None)
         if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
-            deps["agent_runtime_cancellation"] = "unavailable"
-            all_ready = False
+            if cfg.APP_ENV == "production":
+                deps["agent_runtime_cancellation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["agent_runtime_cancellation"] = "not configured (dev/test)"
         else:
             deps["agent_runtime_cancellation"] = "ready"
 
         resource_isolation = getattr(app_instance.state, "company_resource_security_adapter", None)
         if not callable(getattr(resource_isolation, "isolate_resource", None)):
-            deps["company_resource_isolation"] = "unavailable"
-            all_ready = False
+            if cfg.APP_ENV == "production":
+                deps["company_resource_isolation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["company_resource_isolation"] = "not configured (dev/test)"
         else:
             deps["company_resource_isolation"] = "ready"
 
