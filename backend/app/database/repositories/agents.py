@@ -71,6 +71,35 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                 )
                 session.add(orm_version)
 
+                # Every registered agent receives an explicit governed security profile
+                # in the same transaction as its registry row and initial version.
+                registered_by = str(version.config_payload.get("registered_by") or "system")
+                profile = OrmAgentSecurityProfile(
+                    id=f"prof-{uuid.uuid4().hex[:12]}",
+                    tenant_id=agent.tenant_id,
+                    agent_id=agent.id,
+                    owner_department="Enterprise Operations",
+                    approved_purpose=f"Approved business task execution for {agent.name}",
+                    approved_goals_json=[
+                        "Execute approved business operations within assigned tenant and branch scope"
+                    ],
+                    branch_id=agent.branch_id,
+                    data_scope_json=["general:*"],
+                    operational_restrictions_json={
+                        "max_parameter_depth": 5,
+                        "require_complete_mediation": True,
+                    },
+                    approval_requirements_json={
+                        "threshold_exceeded": "REQUIRE_HUMAN_APPROVAL"
+                    },
+                    profile_version=agent.config_version,
+                    status="ACTIVE",
+                    governed_by_user_id=registered_by,
+                    created_at=agent.created_at,
+                    updated_at=agent.updated_at,
+                )
+                session.add(profile)
+
         return deepcopy(agent)
 
     async def get_agent_by_id(
@@ -112,33 +141,42 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
     ) -> Tuple[List[AgentEntity], bool]:
         """Query agents strictly scoped to tenant, returning (items, has_more)."""
         async with self.session_factory() as session:
-            stmt = select(OrmAgent).where(OrmAgent.tenant_id == tenant_id)
+            stmt = (
+                select(OrmAgent, OrmAgentSecurityProfile.branch_id)
+                .outerjoin(
+                    OrmAgentSecurityProfile,
+                    (OrmAgentSecurityProfile.agent_id == OrmAgent.id)
+                    & (OrmAgentSecurityProfile.tenant_id == OrmAgent.tenant_id),
+                )
+                .where(OrmAgent.tenant_id == tenant_id)
+            )
             if status:
                 stmt = stmt.where(OrmAgent.status == status)
-            if branch_id and hasattr(OrmAgent, "branch_id"):
-                stmt = stmt.where(OrmAgent.branch_id == branch_id)
+            if branch_id:
+                # The governed profile is the single source of truth for branch scope.
+                stmt = stmt.where(OrmAgentSecurityProfile.branch_id == branch_id)
 
             stmt = stmt.order_by(OrmAgent.created_at.desc()).limit(limit + 1).offset(offset)
-            rows = list((await session.execute(stmt)).scalars().all())
+            rows = list((await session.execute(stmt)).all())
 
             has_more = len(rows) > limit
             page_rows = rows[:limit]
 
             entities = [
                 AgentEntity(
-                    id=r.id,
-                    tenant_id=r.tenant_id,
-                    name=r.name,
-                    runtime=r.runtime,
-                    model=r.model,
-                    status=r.status,
-                    config_version=r.config_version,
-                    system_prompt=r.system_prompt,
-                    branch_id=getattr(r, "branch_id", None),
-                    created_at=r.created_at,
-                    updated_at=r.updated_at,
+                    id=row.id,
+                    tenant_id=row.tenant_id,
+                    name=row.name,
+                    runtime=row.runtime,
+                    model=row.model,
+                    status=row.status,
+                    config_version=row.config_version,
+                    system_prompt=row.system_prompt,
+                    branch_id=profile_branch_id,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
                 )
-                for r in page_rows
+                for row, profile_branch_id in page_rows
             ]
             return entities, has_more
 
@@ -332,27 +370,9 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                     "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
                 }
 
-            # If no explicit profile row exists yet, check if agent exists and synthesize default profile
-            agent = await self.get_agent_by_id(agent_id, tenant_id)
-            if agent is None:
-                return None
-            return {
-                "id": f"prof-{agent.id}",
-                "tenant_id": agent.tenant_id,
-                "agent_id": agent.id,
-                "owner_department": "Enterprise Operations",
-                "approved_purpose": f"Approved business task execution for {agent.name}",
-                "approved_goals": ["Execute approved business operations within tenant and branch scope"],
-                "branch_id": agent.branch_id,
-                "data_scope": ["general:*"],
-                "operational_restrictions": {"max_parameter_depth": 5, "require_complete_mediation": True},
-                "approval_requirements": {"threshold_exceeded": "REQUIRE_HUMAN_APPROVAL"},
-                "profile_version": agent.config_version,
-                "status": agent.status,
-                "governed_by_user_id": "system",
-                "created_at": agent.created_at.isoformat() if agent.created_at else None,
-                "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
-            }
+            # Missing governed profiles are a security failure, not a reason to
+            # synthesize permissions from agent metadata.
+            return None
 
     async def update_agent_profile(
         self,
