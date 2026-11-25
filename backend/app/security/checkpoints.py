@@ -88,6 +88,7 @@ class InMemoryPreActionCheckpointService:
             # the checkpoint identity, so compare all caller-controlled content
             # while retaining the original proposal correlation.
             retry_snapshot["proposal_id"] = existing["snapshot"]["proposal_id"]
+            retry_snapshot["trace_id"] = existing["snapshot"]["trace_id"]
             canonical = json.dumps(retry_snapshot, sort_keys=True, separators=(",", ":"), default=str)
             integrity_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             if existing["integrity_hash"] != integrity_hash:
