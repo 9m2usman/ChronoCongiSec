@@ -23,7 +23,7 @@ from backend.app.database.models.company import (
     CompanyMessage, CompanyNotification, CompanyTask, CompanyTaskEvent,
     CompanyWorkspace,
 )
-from backend.app.database.models.identity import Membership
+from backend.app.database.models.identity import Branch, Membership
 from backend.app.tenancy.context import TenantContext
 
 router = APIRouter(prefix="/company", tags=["Company Application"])
@@ -166,10 +166,10 @@ async def create_workspace(payload: WorkspaceCreate, request: Request, ctx: Tena
     async with factory() as session:
         async with session.begin():
             await _member(session, ctx)
-            branch = await session.scalar(select(__import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch).where(
-                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.id == target_branch_id,
-                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.tenant_id == ctx.tenant_id,
-                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.status == "ACTIVE"))
+            branch = await session.scalar(select(Branch).where(
+                Branch.id == target_branch_id,
+                Branch.tenant_id == ctx.tenant_id,
+                Branch.status == "ACTIVE"))
             if branch is None:
                 raise HTTPException(404, "Branch not found.")
             row = CompanyWorkspace(id=_id(), tenant_id=ctx.tenant_id, branch_id=target_branch_id,
