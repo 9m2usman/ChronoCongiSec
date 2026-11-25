@@ -118,6 +118,15 @@ class AgentRepositoryProtocol(Protocol):
         """Fetch agent strictly asserting tenant isolation."""
         ...
 
+    async def set_agent_status(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        status: str,
+    ) -> Optional[str]:
+        """Atomically set the tenant-scoped enforcement status; return previous status."""
+        ...
+
     async def list_agents(
         self,
         tenant_id: str,
@@ -244,6 +253,23 @@ class InMemoryAgentRepository:
         if agent.tenant_id != tenant_id:
             return None
         return deepcopy(agent)
+
+    async def set_agent_status(
+        self,
+        agent_id: str,
+        tenant_id: str,
+        status: str,
+    ) -> Optional[str]:
+        """Update the authoritative agent status within its tenant."""
+        if status not in {AgentStatus.ACTIVE.value, AgentStatus.ISOLATED.value, AgentStatus.DEPRECATED.value}:
+            raise ValidationError("Unsupported agent status.")
+        agent = self._agents.get(agent_id)
+        if agent is None or agent.tenant_id != tenant_id:
+            return None
+        previous_status = agent.status
+        agent.status = status
+        agent.updated_at = datetime.now(timezone.utc)
+        return previous_status
 
     async def list_agents(
         self,
