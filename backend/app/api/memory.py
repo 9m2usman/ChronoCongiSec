@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
-from backend.app.core.exceptions import ForbiddenError, SecurityDependencyError
+from backend.app.core.exceptions import ForbiddenError, NotFoundError, SecurityDependencyError
 from backend.app.memory.models import (
     MemoryDetailResponse,
     MemoryIngestRequest,
@@ -237,6 +237,22 @@ async def api_ingest_memory(
     Matches Document 05 Section 5.1 Route Catalog.
     Tenant ID is strictly derived from verified authentication context.
     """
+    # Bind caller-supplied agent references to the authenticated tenant and branch.
+    if payload.agent_id:
+        agent_repo = getattr(request.app.state, "agent_repo", None)
+        if agent_repo is None:
+            if (getattr(request.app.state, "settings", None) or get_settings()).APP_ENV == "production":
+                raise SecurityDependencyError("Tenant-scoped agent registry is unavailable.")
+            from backend.app.api.agents import get_default_agent_repository
+            agent_repo = get_default_agent_repository()
+        agent = await agent_repo.get_agent_by_id(payload.agent_id, tenant_id)
+        if agent is None or agent.tenant_id != tenant_id:
+            raise NotFoundError("Agent not found.")
+        if agent.status != "ACTIVE":
+            raise ForbiddenError("Memory cannot be ingested for an isolated or inactive agent.")
+        if agent.branch_id is not None and agent.branch_id != context.branch_id:
+            raise NotFoundError("Agent not found.")
+
     res = ingest_memory(
         tenant_id=tenant_id,
         content=payload.content,
