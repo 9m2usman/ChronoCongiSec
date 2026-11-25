@@ -1611,8 +1611,78 @@ async def propose_tool_action(
             await gateway_repo.save_proposal_atomic(
                 proposal=proposal_entity, decision=decision_entity, execution=None, audit_event=audit_entity,
             )
+
+            # Capture and commit the pre-mutation snapshot before any protected adapter
+            # is invoked. Production requires a complete, durable resource snapshot.
+            checkpoint_service = getattr(request.app.state, "pre_action_checkpoint_service", None)
+            capture_checkpoint = getattr(checkpoint_service, "capture_pre_action_checkpoint", None)
+            if not callable(capture_checkpoint):
+                raise SecurityDependencyError("Pre-action checkpoint service is unavailable.")
+            checkpoint = await capture_checkpoint(
+                tenant_id=tenant_id,
+                branch_id=context.branch_id,
+                actor_id=context.user_id,
+                agent_id=body.agent_id,
+                proposal_id=proposal_id,
+                action_id=body.action_id,
+                trace_id=body.trace_id,
+                idempotency_key=body.idempotency_key,
+                tool_name=body.tool_name,
+                operation=body.operation,
+                parameters=body.parameters,
+                memory_refs=list(body.memory_refs or []),
+            )
+            checkpoint_id = checkpoint.get("checkpoint_id") if isinstance(checkpoint, Mapping) else None
+            checkpoint_hash = checkpoint.get("integrity_hash") if isinstance(checkpoint, Mapping) else None
+            checkpoint_complete = checkpoint.get("complete") is True if isinstance(checkpoint, Mapping) else False
+            checkpoint_scope = checkpoint.get("scope") if isinstance(checkpoint, Mapping) else None
+            if (
+                not isinstance(checkpoint_id, str)
+                or not SAFE_ID_REGEX.fullmatch(checkpoint_id)
+                or not isinstance(checkpoint_hash, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", checkpoint_hash)
+                or not isinstance(checkpoint, Mapping)
+                or checkpoint.get("committed") is not True
+            ):
+                raise SecurityDependencyError("Pre-action checkpoint was not durably committed.")
+            if settings.APP_ENV == "production" and (
+                checkpoint_complete is not True
+                or checkpoint_scope != "COMPLETE"
+                or getattr(checkpoint_service, "is_in_memory", True)
+                or not getattr(checkpoint_service, "is_persistent", False)
+            ):
+                raise SecurityDependencyError("A complete durable pre-action checkpoint is required.")
+
+            obs_repo = getattr(request.app.state, "observation_repo", None)
+            if obs_repo is None:
+                raise SecurityDependencyError("Pre-action checkpoint observation store is unavailable.")
+            checkpoint_digest = hashlib.sha256(
+                f"{tenant_id}:{body.idempotency_key}".encode("utf-8")
+            ).hexdigest()[:48]
+            await obs_repo.record_event({
+                "tenant_id": tenant_id,
+                "branch_id": context.branch_id,
+                "event_type": "PRE_ACTION_CHECKPOINT_CAPTURED",
+                "event_category": "TOOL_ACTION_PROPOSAL",
+                "agent_id": body.agent_id,
+                "action_id": body.action_id,
+                "trace_id": body.trace_id,
+                "source_component": "PRE_ACTION_CHECKPOINT",
+                "outcome": "COMMITTED" if checkpoint_complete else "METADATA_ONLY",
+                "idempotency_key": f"obs-checkpoint-{checkpoint_digest}",
+                "payload_json": {
+                    "checkpoint_id": checkpoint_id,
+                    "integrity_hash": checkpoint_hash,
+                    "scope": checkpoint_scope,
+                    "complete": checkpoint_complete,
+                    "actor_id": context.user_id,
+                    "actor_role": context.role,
+                    "memory_refs": list(body.memory_refs or []),
+                },
+            })
+
             # This callback is invoked by the protected execution guard before the
-            # adapter. If observation persistence fails, no protected side effect runs.
+            # adapter. If checkpoint or observation persistence fails, no side effect runs.
             await _emit_gateway_observations(
                 request, tenant_id, body, proposal_id, _decision,
                 "PENDING_EXECUTION", None, context.branch_id, context.user_id, context.role,
