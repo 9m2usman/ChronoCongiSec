@@ -31,6 +31,8 @@ async def test_agent_registration_persists_profile_and_branch_scope(session):
     now = datetime.now(timezone.utc)
 
     session.add(Tenant(id=tenant_id, name="Profile Test Co", slug="profile-test-co"))
+    # Ensure the referenced tenant exists before PostgreSQL inserts its branches.
+    await session.flush()
     session.add_all([
         Branch(id=branch_a, tenant_id=tenant_id, name="Branch A", code="A"),
         Branch(id=branch_b, tenant_id=tenant_id, name="Branch B", code="B"),
