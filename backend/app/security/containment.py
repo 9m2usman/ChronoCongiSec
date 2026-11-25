@@ -440,7 +440,18 @@ class ContainmentService:
             raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.TARGET_NOT_FOUND)
 
         agent = await getter(action.target_id, facts["tenant_id"])
-        if agent is None or getattr(agent, "status", None) != "ISOLATED":
+        profile_getter = getattr(repo, "get_agent_profile", None)
+        profile = (
+            await profile_getter(action.target_id, facts["tenant_id"])
+            if callable(profile_getter)
+            else None
+        )
+        if (
+            agent is None
+            or getattr(agent, "status", None) != "ISOLATED"
+            or not isinstance(profile, Mapping)
+            or profile.get("status") != "ISOLATED"
+        ):
             raise _Stop(
                 ContainmentStatus.RECONCILIATION_REQUIRED,
                 ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE,
