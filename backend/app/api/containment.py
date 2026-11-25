@@ -51,7 +51,7 @@ async def apply_containment(
     from backend.app.api.incident_management import get_incident_repository
 
     inc_repo = (
-        get_incident_repository(http_request)
+        await get_incident_repository(http_request)
         if http_request is not None
         else None
     )
