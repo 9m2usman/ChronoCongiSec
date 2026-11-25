@@ -1,8 +1,11 @@
 """Phase 4 regression coverage for memory-ingestion detection and observation."""
 
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 import pytest
 
+from backend.app.api.agents import AgentEntity, AgentVersionEntity, InMemoryAgentRepository
 from backend.app.api.memory import get_repository
 from backend.app.core.config import get_settings
 from backend.app.core.security import create_access_token
@@ -92,3 +95,61 @@ async def test_memory_ingestion_runs_detection_and_persists_correlated_observati
     assert incident.affected_record_id == payload["id"]
     assert evidence
     assert evidence[0].metadata_json["content_sha256"] == payload["checksum"]
+
+
+
+@pytest.mark.asyncio
+async def test_memory_ingestion_rejects_agent_id_from_another_tenant():
+    settings = get_settings()
+    app = create_app(settings)
+    memory_repo = InMemoryMemoryRepository()
+    agent_repo = InMemoryAgentRepository()
+    now = datetime.now(timezone.utc)
+    foreign_agent = AgentEntity(
+        id="agent-from-another-tenant",
+        tenant_id="tenant-b-uuid-002",
+        name="Foreign Agent",
+        runtime="CREWAI",
+        model="test-model",
+        status="ACTIVE",
+        config_version="v1.0.0",
+        system_prompt="not used",
+        branch_id="branch-b",
+        created_at=now,
+        updated_at=now,
+    )
+    version = AgentVersionEntity(
+        id="version-foreign-agent",
+        tenant_id="tenant-b-uuid-002",
+        agent_id=foreign_agent.id,
+        version="v1.0.0",
+        config_payload={},
+        created_at=now,
+    )
+    await agent_repo.create_agent_atomic(foreign_agent, version)
+    app.state.agent_repo = agent_repo
+    app.state.memory_repo = memory_repo
+    app.dependency_overrides[get_repository] = lambda: memory_repo
+
+    token = create_access_token(
+        user_id="user-a-analyst-001",
+        tenant_id="tenant-a-uuid-001",
+        role="SECURITY_ANALYST",
+        settings=settings,
+    )
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/memory",
+        json={
+            "content": "Ordinary knowledge that should not be associated with another tenant's agent.",
+            "record_type": "KNOWLEDGE",
+            "agent_id": foreign_agent.id,
+        },
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Tenant-ID": "tenant-a-uuid-001",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["message"] == "Agent not found."
