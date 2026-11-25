@@ -833,3 +833,73 @@ async def test_22_database_auth_repository_real_database_execution():
         assert hasattr(DatabaseAuthRepository, method_name)
 
     await engine.dispose()
+
+
+# ============================================================================
+# Branch API authorization regression tests
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_branch_list_requires_authenticated_membership(iam_client: httpx.AsyncClient):
+    """Branch discovery must not expose tenant structure to unauthenticated callers."""
+    async with iam_client as client:
+        response = await client.get("/api/v1/branches")
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_lists_only_the_authenticated_tenant_branches(
+    iam_client: httpx.AsyncClient,
+):
+    """A query-string tenant selector must not override the authenticated tenant."""
+    async with iam_client as client:
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "sarah.admin@alphacorp.com",
+                "password": "SecurePassword123!",
+                "tenant_slug": "alphacorp",
+            },
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+
+        response = await client.get(
+            "/api/v1/branches?tenant_slug=company-b",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        branches = response.json()
+        assert {branch["code"] for branch in branches} == {"HO", "LHR", "KHI", "ISB"}
+        assert {branch["tenant_id"] for branch in branches} == {"tenant-a-uuid-001"}
+
+
+@pytest.mark.asyncio
+async def test_employee_branch_list_is_limited_to_membership_branch(
+    iam_client: httpx.AsyncClient,
+):
+    """A non-admin employee cannot enumerate other branches in the same tenant."""
+    async with iam_client as client:
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "alex.analyst@alphacorp.com",
+                "password": "SecurePassword123!",
+                "tenant_slug": "alphacorp",
+            },
+        )
+        assert login.status_code == 200
+        token = login.json()["access_token"]
+
+        response = await client.get(
+            "/api/v1/branches?tenant_slug=company-b",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 200
+        branches = response.json()
+        assert len(branches) == 1
+        assert branches[0]["id"] == "branch-lhr-002"
+        assert branches[0]["code"] == "LHR"
+        assert branches[0]["tenant_id"] == "tenant-a-uuid-001"
