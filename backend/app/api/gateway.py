@@ -126,8 +126,14 @@ async def _emit_gateway_observations(
     observation store therefore prevents the protected side effect.
     """
     obs_repo = getattr(request.app.state, "observation_repo", None)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     if obs_repo is None or not callable(getattr(obs_repo, "record_event", None)):
         raise SecurityDependencyError("Durable gateway observation repository is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(obs_repo, "is_in_memory", True)
+        or not getattr(obs_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production gateway observations must use durable persistence.")
 
     clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
     prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
@@ -1516,8 +1522,14 @@ async def propose_tool_action(
     # Detection findings are part of the forensic decision chain. Never dispatch
     # a protected action if the detection store is absent or cannot persist a finding.
     det_repo = getattr(request.app.state, "detection_repo", None)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     if det_repo is None:
         raise SecurityDependencyError("Durable detection repository is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(det_repo, "is_in_memory", True)
+        or not getattr(det_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production gateway detections must use durable persistence.")
     for finding in detected_findings:
         finding.policy_decision_id = decision.decision_id
         try:
