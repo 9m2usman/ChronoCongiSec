@@ -93,6 +93,7 @@ async def _notify(session: AsyncSession, ctx: TenantContext, user_id: str, event
 
 
 class WorkspaceCreate(BaseModel):
+    branch_id: Optional[str] = None
     name: str = Field(min_length=1, max_length=160)
     description: Optional[str] = Field(default=None, max_length=4000)
     visibility: str = "PRIVATE"
@@ -158,13 +159,20 @@ async def list_workspaces(request: Request, ctx: TenantContext = Depends(get_ten
 async def create_workspace(payload: WorkspaceCreate, request: Request, ctx: TenantContext = Depends(get_tenant_context)):
     if payload.visibility not in {"PRIVATE", "BRANCH"}:
         raise HTTPException(422, "visibility must be PRIVATE or BRANCH")
-    if not ctx.branch_id and not _admin(ctx):
-        raise HTTPException(403, "An assigned branch is required.")
+    target_branch_id = payload.branch_id if _admin(ctx) else ctx.branch_id
+    if not target_branch_id or (payload.branch_id and not _admin(ctx)):
+        raise HTTPException(403, "A valid authorized branch is required.")
     factory = _session_factory(request)
     async with factory() as session:
         async with session.begin():
             await _member(session, ctx)
-            row = CompanyWorkspace(id=_id(), tenant_id=ctx.tenant_id, branch_id=ctx.branch_id,
+            branch = await session.scalar(select(__import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch).where(
+                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.id == target_branch_id,
+                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.tenant_id == ctx.tenant_id,
+                __import__("backend.app.database.models.identity", fromlist=["Branch"]).Branch.status == "ACTIVE"))
+            if branch is None:
+                raise HTTPException(404, "Branch not found.")
+            row = CompanyWorkspace(id=_id(), tenant_id=ctx.tenant_id, branch_id=target_branch_id,
                 owner_user_id=ctx.user_id, name=payload.name.strip(),
                 description=payload.description, visibility=payload.visibility)
             session.add(row)
