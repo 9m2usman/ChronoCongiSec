@@ -24,7 +24,7 @@ from backend.tests.database import helpers
 from backend.tests.database.schema_fingerprint import describe_difference, schema_fingerprint
 from backend.tests.database.seed_fixture import SeedResult, seed_dataset
 
-EXPECTED_TABLES = 50
+EXPECTED_TABLES = 59
 
 
 def _revisions() -> list[str]:
