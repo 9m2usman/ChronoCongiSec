@@ -182,8 +182,26 @@ def upgrade() -> None:
     )
     op.create_index("idx_company_activity_timeline", "company_activity", ["tenant_id", "branch_id", "created_at"])
 
+    # Every tenant-owned row must keep its original tenant, even under raw SQL.
+    for table in (
+        "company_workspaces", "company_files", "company_file_versions",
+        "company_file_transfers", "company_tasks", "company_task_events",
+        "company_messages", "company_notifications", "company_activity",
+    ):
+        op.execute(
+            f"CREATE TRIGGER trg_forbid_tenant_id_change "
+            f"BEFORE UPDATE OF tenant_id ON {table} "
+            "FOR EACH ROW EXECUTE FUNCTION amsc_forbid_tenant_id_change()"
+        )
+
 
 def downgrade() -> None:
+    for table in (
+        "company_workspaces", "company_files", "company_file_versions",
+        "company_file_transfers", "company_tasks", "company_task_events",
+        "company_messages", "company_notifications", "company_activity",
+    ):
+        op.execute(f"DROP TRIGGER trg_forbid_tenant_id_change ON {table}")
     for table in (
         "company_activity", "company_notifications", "company_messages",
         "company_task_events", "company_tasks", "company_file_transfers",
