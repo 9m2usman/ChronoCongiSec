@@ -1419,9 +1419,13 @@ async def propose_tool_action(
                 consumed=False,
             )
 
-    # Phase 2: Run pre-execution Detection Engine threat analysis
+    # Phase 2: Run pre-execution Detection Engine threat analysis.
+    # Production must use the app's configured engine, never a process-local fallback.
     detection_engine = getattr(request.app.state, "detection_engine", None)
+    settings = getattr(request.app.state, "settings", None) or get_settings()
     if detection_engine is None:
+        if settings.APP_ENV == "production":
+            raise SecurityDependencyError("Production detection engine is not configured.")
         detection_engine = get_default_detection_engine()
 
     tool_threats: List[Any] = []
