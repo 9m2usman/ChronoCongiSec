@@ -117,6 +117,11 @@ async def _persist_memory_detection_incidents(
         for method in ("get_incident", "create_incident_atomic", "attach_evidence_atomic")
     ):
         raise SecurityDependencyError("Incident repository does not satisfy the required contract.")
+    if settings.APP_ENV == "production" and (
+        getattr(incident_repo, "is_in_memory", True)
+        or not getattr(incident_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production incident correlation must use durable persistence.")
 
     category_map = {
         "PROMPT_INJECTION": "PROMPT_INJECTION",
@@ -259,6 +264,11 @@ async def api_ingest_memory(
         detection_repo = detection_repo or getattr(detection_engine, "detection_repo", None)
     if detection_engine is None or detection_repo is None:
         raise SecurityDependencyError("Memory detection persistence is unavailable.")
+    if settings.APP_ENV == "production" and (
+        getattr(detection_repo, "is_in_memory", True)
+        or not getattr(detection_repo, "is_persistent", False)
+    ):
+        raise SecurityDependencyError("Production memory detection must use durable persistence.")
 
     try:
         findings = await detection_engine.detect_memory_integrity(
@@ -289,6 +299,11 @@ async def api_ingest_memory(
                 raise SecurityDependencyError("Durable memory observation is not configured.")
             from backend.app.api.observation import get_default_observation_repository
             observation_repo = get_default_observation_repository()
+        if settings.APP_ENV == "production" and (
+            getattr(observation_repo, "is_in_memory", True)
+            or not getattr(observation_repo, "is_persistent", False)
+        ):
+            raise SecurityDependencyError("Production memory observations must use durable persistence.")
         await observation_repo.record_event({
             "tenant_id": tenant_id,
             "branch_id": getattr(context, "branch_id", None),
