@@ -88,6 +88,7 @@ async def _persist_memory_detection_incidents(
 ) -> List[str]:
     """Idempotently correlate confirmed ingestion findings with the incident ledger."""
     from hashlib import sha256
+    from uuid import UUID
 
     from backend.app.api.incident_management import (
         AuditEventEntity,
@@ -157,8 +158,9 @@ async def _persist_memory_detection_incidents(
             resource_id=record.id,
             metadata_json=metadata,
         )
+        audit_digest = sha256(f"{incident_id}:{finding.id}".encode("utf-8")).hexdigest()[:32]
         audit = AuditEventEntity(
-            id=f"audit-{sha256(f'{incident_id}:{finding.id}'.encode('utf-8')).hexdigest()[:32]}",
+            id=str(UUID(audit_digest)),
             tenant_id=context.tenant_id,
             actor_id=context.user_id,
             event_type="MEMORY_SECURITY_INCIDENT_CORRELATED",
