@@ -674,6 +674,9 @@ class SqlAlchemyGatewayRepository:
                     trace_id=proposal.trace_id,
                 )
                 session.add(db_prop)
+                # The ORM does not order these inserts by the composite tenant FKs: insert the
+                # parent proposal first or PostgreSQL rejects the decision (fk_policy_decisions_*).
+                await session.flush()
 
                 db_dec = DbPolicyDecision(
                     id=decision.id,
@@ -687,6 +690,7 @@ class SqlAlchemyGatewayRepository:
                     execution_status=decision.execution_status,
                 )
                 session.add(db_dec)
+                await session.flush()
 
                 if execution:
                     db_exec = DbToolExecution(
