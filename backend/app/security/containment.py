@@ -15,10 +15,11 @@ Design and integration contract: ``docs/security-design/containment-workflow.md`
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol, Tuple
 
 from pydantic import (
     BaseModel,
@@ -85,6 +86,13 @@ class ContainmentReasonCode(str, Enum):
     SUSPICIOUS_PATTERN = "SUSPICIOUS_PATTERN"
     MANUAL_ANALYST_ACTION = "MANUAL_ANALYST_ACTION"
     AUTOMATED_DETECTION = "AUTOMATED_DETECTION"
+    TARGET_NOT_FOUND = "TARGET_NOT_FOUND"
+    ENFORCEMENT_UNAVAILABLE = "ENFORCEMENT_UNAVAILABLE"
+    ACTION_EXECUTION_FAILED = "ACTION_EXECUTION_FAILED"
+    RUNTIME_CANCELLATION_UNAVAILABLE = "RUNTIME_CANCELLATION_UNAVAILABLE"
+    RESOURCE_ISOLATION_UNAVAILABLE = "RESOURCE_ISOLATION_UNAVAILABLE"
+    PARTIAL_CONTAINMENT_FAILURE = "PARTIAL_CONTAINMENT_FAILURE"
+    EVIDENCE_PERSISTENCE_FAILED = "EVIDENCE_PERSISTENCE_FAILED"
 
 
 # =============================================================================
@@ -125,6 +133,7 @@ class ContainmentOutcome:
     timestamp: datetime
     trace_id: Optional[str]
     retries: int = 0
+    action_outcomes: Tuple["ContainmentOutcome", ...] = ()
 
     def to_audit_details(self) -> Dict[str, Any]:
         """``details_json`` for the CONTAINMENT_APPLIED audit event."""
@@ -146,6 +155,19 @@ class ContainmentOutcome:
             "actor_role": self.actor_role,
             "policy_version": self.policy_version,
             "timestamp": self.timestamp.isoformat(),
+            "action_outcomes": [
+                {
+                    "outcome_id": item.outcome_id,
+                    "success": item.success,
+                    "status": item.status.value,
+                    "containment_type": item.containment_type.value if item.containment_type else None,
+                    "target_id": item.target_id,
+                    "previous_state": item.previous_state,
+                    "resulting_state": item.resulting_state,
+                    "reason_codes": list(item.reason_codes),
+                }
+                for item in self.action_outcomes
+            ],
         }
 
 
@@ -173,6 +195,37 @@ class ContainmentRequest(BaseModel):
 # =============================================================================
 
 
+class AgentRuntimeCancellation(Protocol):
+    """Phase 3 adapter: cancel and durably acknowledge all active/queued work for an agent."""
+
+    async def cancel_agent_work(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        incident_id: Optional[str],
+        trace_id: Optional[str],
+    ) -> Mapping[str, Any]:
+        ...
+
+
+class CompanyResourceIsolationAdapter(Protocol):
+    """Phase 2 adapter: enforce tenant/branch-scoped read/write isolation for a company resource."""
+
+    async def isolate_resource(
+        self,
+        *,
+        tenant_id: str,
+        branch_id: Optional[str],
+        resource_type: str,
+        resource_id: str,
+        actor_id: str,
+        incident_id: Optional[str],
+        reason: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+
 class ContainmentService:
     """Authorized containment operations for incidents."""
 
@@ -184,6 +237,8 @@ class ContainmentService:
         *,
         agent_repository: Any = None,
         audit_sink: Any = None,
+        runtime_cancellation: Optional[AgentRuntimeCancellation] = None,
+        resource_isolation_adapter: Optional[CompanyResourceIsolationAdapter] = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._investigation_service = investigation_service
@@ -191,6 +246,8 @@ class ContainmentService:
         self._memory_repository = memory_repository
         self._agent_repository = agent_repository
         self._audit_sink = audit_sink
+        self._runtime_cancellation = runtime_cancellation
+        self._resource_isolation_adapter = resource_isolation_adapter
         self._clock = clock
 
     @staticmethod
@@ -247,19 +304,57 @@ class ContainmentService:
                     ContainmentStatus.DENIED, ContainmentReasonCode.INCIDENT_NOT_OPEN
                 )
 
-            # Process each containment action
+            # Every requested action gets an independent, attributable outcome.
             outcomes = []
             for action in req.containment_actions:
+                action_facts = dict(facts)
+                for key in ("containment_type", "target_id", "previous_state", "resulting_state"):
+                    action_facts.pop(key, None)
                 outcome = await self._apply_containment_action(
-                    context, req, action, facts, persist_evidence
+                    context, req, action, action_facts, persist_evidence
                 )
                 outcomes.append(outcome)
 
-            # Return the first outcome as the overall result
-            return (
-                outcomes[0]
-                if outcomes
-                else self._outcome(req, facts, ContainmentStatus.FAILED, (), context)
+            if not outcomes:
+                return self._outcome(req, facts, ContainmentStatus.FAILED, (), context)
+            if len(outcomes) == 1:
+                return outcomes[0]
+
+            all_succeeded = all(item.success for item in outcomes)
+            any_applied = any(
+                item.status in {ContainmentStatus.APPLIED, ContainmentStatus.ALREADY_APPLIED}
+                for item in outcomes
+            )
+            if all_succeeded:
+                aggregate_status = (
+                    ContainmentStatus.APPLIED
+                    if any(item.status == ContainmentStatus.APPLIED for item in outcomes)
+                    else ContainmentStatus.ALREADY_APPLIED
+                )
+                aggregate_codes = tuple(dict.fromkeys(
+                    code for item in outcomes for code in item.reason_codes
+                ))
+            else:
+                aggregate_status = (
+                    ContainmentStatus.RECONCILIATION_REQUIRED
+                    if any_applied
+                    else ContainmentStatus.FAILED
+                )
+                aggregate_codes = tuple(dict.fromkeys(
+                    [code for item in outcomes for code in item.reason_codes]
+                    + [ContainmentReasonCode.PARTIAL_CONTAINMENT_FAILURE.value]
+                ))
+            return replace(
+                outcomes[0],
+                outcome_id=f"cont-{uuid.uuid4().hex[:16]}-batch",
+                success=all_succeeded,
+                status=aggregate_status,
+                reason_codes=aggregate_codes,
+                containment_type=None,
+                target_id=None,
+                previous_state=None,
+                resulting_state=None,
+                action_outcomes=tuple(outcomes),
             )
         except _Stop as stop:
             facts.update(stop.facts)
@@ -311,7 +406,18 @@ class ContainmentService:
                 )
         except _Stop as stop:
             facts.update(stop.facts)
-            return self._outcome(request, facts, stop.status, stop.codes, context)
+            outcome = self._outcome(request, facts, stop.status, stop.codes, context)
+            return await self._persist_effective_outcome(outcome, persist_evidence)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Containment action failed closed (%s).", type(exc).__name__)
+            outcome = self._outcome(
+                request,
+                facts,
+                ContainmentStatus.FAILED,
+                (ContainmentReasonCode.ACTION_EXECUTION_FAILED,),
+                context,
+            )
+            return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _quarantine_memory(
         self,
@@ -350,65 +456,97 @@ class ContainmentService:
         facts: Dict[str, Any],
         persist_evidence: Callable[[ContainmentOutcome], Awaitable[Any]],
     ) -> ContainmentOutcome:
-        """Suspend an agent as part of containment."""
-        # Implementation for agent suspension
-        facts["containment_type"] = ContainmentType.AGENT_SUSPENSION.value
-        facts["target_id"] = action.target_id
-        facts["previous_state"] = "ACTIVE"
-        facts["resulting_state"] = "SUSPENDED"
+        """Persist agent isolation and stop related runtime work before reporting success."""
+        repo = self._agent_repository
+        setter = getattr(repo, "set_agent_status", None)
+        getter = getattr(repo, "get_agent_by_id", None)
+        if not callable(setter) or not callable(getter):
+            raise _Stop(
+                ContainmentStatus.FAILED,
+                ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE,
+            )
 
-        outcome = ContainmentOutcome(
-            outcome_id=f"cont-{facts.get('outcome_id', '').split('-')[-1]}-agent",
-            success=True,
-            status=ContainmentStatus.APPLIED,
-            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
-            tenant_id=facts.get("tenant_id"),
-            incident_id=request.incident_id,
-            containment_type=ContainmentType.AGENT_SUSPENSION,
-            target_id=action.target_id,
-            previous_state="ACTIVE",
-            resulting_state="SUSPENDED",
-            actor_id=facts.get("actor_id"),
-            actor_role=facts.get("actor_role"),
-            reason_code=ContainmentReasonCode.INCIDENT_RESPONSE.value,
-            reason=request.reason,
-            analyst_notes=request.analyst_notes,
-            evidence_refs=request.evidence_refs,
-            policy_version=CONTAINMENT_POLICY_VERSION,
-            timestamp=self._clock(),
-            trace_id=request.trace_id,
+        previous_state = await setter(action.target_id, facts["tenant_id"], "ISOLATED")
+        if previous_state is None:
+            raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.TARGET_NOT_FOUND)
+
+        agent = await getter(action.target_id, facts["tenant_id"])
+        profile_getter = getattr(repo, "get_agent_profile", None)
+        profile = (
+            await profile_getter(action.target_id, facts["tenant_id"])
+            if callable(profile_getter)
+            else None
         )
+        if (
+            agent is None
+            or getattr(agent, "status", None) != "ISOLATED"
+            or not isinstance(profile, Mapping)
+            or profile.get("status") != "ISOLATED"
+        ):
+            raise _Stop(
+                ContainmentStatus.RECONCILIATION_REQUIRED,
+                ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE,
+            )
+
+        facts.update({
+            "containment_type": ContainmentType.AGENT_SUSPENSION.value,
+            "target_id": action.target_id,
+            "previous_state": previous_state,
+            "resulting_state": "ISOLATED",
+        })
+
+        cancellation = self._runtime_cancellation
+        cancel = getattr(cancellation, "cancel_agent_work", None)
+        if not callable(cancel):
+            outcome = self._outcome(
+                request,
+                facts,
+                ContainmentStatus.RECONCILIATION_REQUIRED,
+                (ContainmentReasonCode.RUNTIME_CANCELLATION_UNAVAILABLE,),
+                context,
+            )
+            return await self._persist_effective_outcome(outcome, persist_evidence)
 
         try:
-            await persist_evidence(outcome)
+            cancellation_result = await cancel(
+                tenant_id=facts["tenant_id"],
+                agent_id=action.target_id,
+                incident_id=request.incident_id,
+                trace_id=request.trace_id,
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Agent suspension evidence persistence failed (%s); containment remains applied.",
-                type(exc).__name__,
+            logger.error("Agent work cancellation failed (%s).", type(exc).__name__)
+            cancellation_result = None
+        if (
+            not isinstance(cancellation_result, Mapping)
+            or cancellation_result.get("complete") is not True
+            or type(cancellation_result.get("active_runs_cancelled")) is not int
+            or type(cancellation_result.get("queued_jobs_cancelled")) is not int
+        ):
+            outcome = self._outcome(
+                request,
+                facts,
+                ContainmentStatus.RECONCILIATION_REQUIRED,
+                (ContainmentReasonCode.RUNTIME_CANCELLATION_UNAVAILABLE,),
+                context,
             )
-            return self._outcome(
-                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
-            )
-        if self._audit_sink is not None:
-            try:
-                await self._audit_sink(
-                    {
-                        "id": outcome.outcome_id,
-                        "tenant_id": outcome.tenant_id,
-                        "actor_id": outcome.actor_id or "system",
-                        "event_type": "CONTAINMENT_APPLIED",
-                        "resource_id": outcome.target_id or "",
-                        "action": "AGENT_SUSPENSION",
-                        "outcome": "SUCCESS",
-                        "trace_id": outcome.trace_id,
-                        "details_json": outcome.to_audit_details(),
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Agent suspension audit emission failed (%s).", type(exc).__name__
-                )
-        return outcome
+            return await self._persist_effective_outcome(outcome, persist_evidence)
+
+        outcome = self._outcome(
+            request,
+            facts,
+            ContainmentStatus.ALREADY_APPLIED
+            if previous_state == "ISOLATED"
+            else ContainmentStatus.APPLIED,
+            (),
+            context,
+        )
+        outcome = replace(
+            outcome,
+            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
+            action_outcomes=(),
+        )
+        return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _block_actions(
         self,
@@ -418,65 +556,94 @@ class ContainmentService:
         facts: Dict[str, Any],
         persist_evidence: Callable[[ContainmentOutcome], Awaitable[Any]],
     ) -> ContainmentOutcome:
-        """Block actions for an agent or resource as part of containment."""
-        # Implementation for action blocking
-        facts["containment_type"] = ContainmentType.ACTION_BLOCKING.value
-        facts["target_id"] = action.target_id
-        facts["previous_state"] = "ALLOWED"
-        facts["resulting_state"] = "BLOCKED"
+        """Revoke a tenant-scoped agent tool grant so the policy engine blocks future use."""
+        repo = self._agent_repository
+        get_permissions = getattr(repo, "get_agent_tool_permissions", None)
+        revoke = getattr(repo, "revoke_tool_permission", None)
+        grant = getattr(repo, "grant_tool_permission", None)
+        if not callable(get_permissions) or not callable(revoke) or not callable(grant):
+            raise _Stop(
+                ContainmentStatus.FAILED,
+                ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE,
+            )
 
-        outcome = ContainmentOutcome(
-            outcome_id=f"cont-{facts.get('outcome_id', '').split('-')[-1]}-action",
-            success=True,
-            status=ContainmentStatus.APPLIED,
-            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
-            tenant_id=facts.get("tenant_id"),
-            incident_id=request.incident_id,
-            containment_type=ContainmentType.ACTION_BLOCKING,
-            target_id=action.target_id,
-            previous_state="ALLOWED",
-            resulting_state="BLOCKED",
-            actor_id=facts.get("actor_id"),
-            actor_role=facts.get("actor_role"),
-            reason_code=ContainmentReasonCode.INCIDENT_RESPONSE.value,
-            reason=request.reason,
-            analyst_notes=request.analyst_notes,
-            evidence_refs=request.evidence_refs,
-            policy_version=CONTAINMENT_POLICY_VERSION,
-            timestamp=self._clock(),
-            trace_id=request.trace_id,
+        tool_ref = action.details.get("tool_id") or action.details.get("tool_name")
+        operation = action.details.get("operation")
+        if not isinstance(tool_ref, str) or not tool_ref.strip():
+            raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
+        tool_ref = tool_ref.strip()
+        if operation is not None and (not isinstance(operation, str) or not operation.strip()):
+            raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
+
+        permissions = await get_permissions(action.target_id, facts["tenant_id"])
+        matched = next(
+            (
+                item for item in permissions or ()
+                if isinstance(item, Mapping)
+                and tool_ref in {item.get("tool_id"), item.get("tool_name")}
+            ),
+            None,
         )
+        if matched is None:
+            previous_state = "BLOCKED"
+            status = ContainmentStatus.ALREADY_APPLIED
+        else:
+            previous_state = "ALLOWED"
+            allowed = matched.get("allowed_operations") or []
+            if isinstance(allowed, str):
+                allowed = [part.strip() for part in allowed.split(",") if part.strip()]
+            if not isinstance(allowed, (list, tuple)):
+                raise _Stop(ContainmentStatus.FAILED, ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE)
 
-        try:
-            await persist_evidence(outcome)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Action blocking evidence persistence failed (%s); containment remains applied.",
-                type(exc).__name__,
+            if operation and operation not in allowed and "*" not in allowed:
+                status = ContainmentStatus.ALREADY_APPLIED
+            elif operation and "*" not in allowed:
+                remaining = [item for item in allowed if item != operation]
+                if remaining:
+                    await grant(
+                        tenant_id=facts["tenant_id"],
+                        agent_id=action.target_id,
+                        tool_id=str(matched.get("tool_id") or tool_ref),
+                        allowed_operations=",".join(remaining),
+                        constraints=matched.get("constraints") or {},
+                    )
+                else:
+                    await revoke(facts["tenant_id"], action.target_id, str(matched.get("tool_id") or tool_ref))
+                status = ContainmentStatus.APPLIED
+            else:
+                # A wildcard grant cannot be narrowed safely without a deny-list contract.
+                # Revoke the entire tool grant rather than pretending one operation is blocked.
+                await revoke(facts["tenant_id"], action.target_id, str(matched.get("tool_id") or tool_ref))
+                status = ContainmentStatus.APPLIED
+
+        remaining_permissions = await get_permissions(action.target_id, facts["tenant_id"])
+        still_allowed = False
+        for item in remaining_permissions or ():
+            if not isinstance(item, Mapping) or tool_ref not in {item.get("tool_id"), item.get("tool_name")}:
+                continue
+            allowed = item.get("allowed_operations") or []
+            if isinstance(allowed, str):
+                allowed = [part.strip() for part in allowed.split(",") if part.strip()]
+            still_allowed = (
+                "*" in allowed or (operation in allowed if operation else bool(allowed))
             )
-            return self._outcome(
-                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
+        if still_allowed:
+            raise _Stop(
+                ContainmentStatus.RECONCILIATION_REQUIRED,
+                ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE,
             )
-        if self._audit_sink is not None:
-            try:
-                await self._audit_sink(
-                    {
-                        "id": outcome.outcome_id,
-                        "tenant_id": outcome.tenant_id,
-                        "actor_id": outcome.actor_id or "system",
-                        "event_type": "CONTAINMENT_APPLIED",
-                        "resource_id": outcome.target_id or "",
-                        "action": "ACTION_BLOCKING",
-                        "outcome": "SUCCESS",
-                        "trace_id": outcome.trace_id,
-                        "details_json": outcome.to_audit_details(),
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Action blocking audit emission failed (%s).", type(exc).__name__
-                )
-        return outcome
+
+        facts.update({
+            "containment_type": ContainmentType.ACTION_BLOCKING.value,
+            "target_id": action.target_id,
+            "previous_state": previous_state,
+            "resulting_state": "BLOCKED",
+        })
+        outcome = replace(
+            self._outcome(request, facts, status, (), context),
+            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
+        )
+        return await self._persist_effective_outcome(outcome, persist_evidence)
 
     async def _isolate_resource(
         self,
@@ -486,66 +653,71 @@ class ContainmentService:
         facts: Dict[str, Any],
         persist_evidence: Callable[[ContainmentOutcome], Awaitable[Any]],
     ) -> ContainmentOutcome:
-        """Isolate a resource as part of containment."""
-        # Implementation for resource isolation
-        facts["containment_type"] = ContainmentType.RESOURCE_ISOLATION.value
-        facts["target_id"] = action.target_id
-        facts["previous_state"] = "ACCESSIBLE"
-        facts["resulting_state"] = "ISOLATED"
+        """Isolate a company resource through the authoritative company service adapter."""
+        adapter = self._resource_isolation_adapter
+        isolate = getattr(adapter, "isolate_resource", None)
+        if not callable(isolate):
+            raise _Stop(
+                ContainmentStatus.FAILED,
+                ContainmentReasonCode.RESOURCE_ISOLATION_UNAVAILABLE,
+            )
 
-        outcome = ContainmentOutcome(
-            outcome_id=f"cont-{facts.get('outcome_id', '').split('-')[-1]}-resource",
-            success=True,
-            status=ContainmentStatus.APPLIED,
-            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
-            tenant_id=facts.get("tenant_id"),
+        resource_type = action.details.get("resource_type")
+        if not isinstance(resource_type, str) or not resource_type.strip():
+            raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
+
+        result = await isolate(
+            tenant_id=facts["tenant_id"],
+            branch_id=getattr(context, "branch_id", None),
+            resource_type=resource_type,
+            resource_id=action.target_id,
+            actor_id=facts["actor_id"],
             incident_id=request.incident_id,
-            containment_type=ContainmentType.RESOURCE_ISOLATION,
-            target_id=action.target_id,
-            previous_state="ACCESSIBLE",
-            resulting_state="ISOLATED",
-            actor_id=facts.get("actor_id"),
-            actor_role=facts.get("actor_role"),
-            reason_code=ContainmentReasonCode.INCIDENT_RESPONSE.value,
             reason=request.reason,
-            analyst_notes=request.analyst_notes,
-            evidence_refs=request.evidence_refs,
-            policy_version=CONTAINMENT_POLICY_VERSION,
-            timestamp=self._clock(),
-            trace_id=request.trace_id,
         )
+        if (
+            not isinstance(result, Mapping)
+            or result.get("success") is not True
+            or result.get("resulting_state") != "ISOLATED"
+        ):
+            raise _Stop(
+                ContainmentStatus.RECONCILIATION_REQUIRED,
+                ContainmentReasonCode.RESOURCE_ISOLATION_UNAVAILABLE,
+            )
 
+        facts.update({
+            "containment_type": ContainmentType.RESOURCE_ISOLATION.value,
+            "target_id": action.target_id,
+            "previous_state": result.get("previous_state"),
+            "resulting_state": "ISOLATED",
+        })
+        outcome = replace(
+            self._outcome(request, facts, ContainmentStatus.APPLIED, (), context),
+            reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
+        )
+        return await self._persist_effective_outcome(outcome, persist_evidence)
+
+    async def _persist_effective_outcome(
+        self,
+        outcome: ContainmentOutcome,
+        persist_evidence: Callable[[ContainmentOutcome], Awaitable[Any]],
+    ) -> ContainmentOutcome:
+        """Persist evidence after enforcement; never call a changed state fully contained without it."""
         try:
-            await persist_evidence(outcome)
+            result = await persist_evidence(outcome)
+            if result is False:
+                raise SecurityDependencyError("Containment evidence sink refused the event.")
+            return outcome
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Resource isolation evidence persistence failed (%s); containment remains applied.",
-                type(exc).__name__,
+            logger.error("Containment evidence persistence failed (%s).", type(exc).__name__)
+            return replace(
+                outcome,
+                success=False,
+                status=ContainmentStatus.RECONCILIATION_REQUIRED,
+                reason_codes=tuple(dict.fromkeys(
+                    outcome.reason_codes + (ContainmentReasonCode.EVIDENCE_PERSISTENCE_FAILED.value,)
+                )),
             )
-            return self._outcome(
-                request, facts, ContainmentStatus.RECONCILIATION_REQUIRED, (), context
-            )
-
-        if self._audit_sink is not None:
-            try:
-                await self._audit_sink(
-                    {
-                        "id": outcome.outcome_id,
-                        "tenant_id": outcome.tenant_id,
-                        "actor_id": outcome.actor_id or "system",
-                        "event_type": "CONTAINMENT_APPLIED",
-                        "resource_id": outcome.target_id or "",
-                        "action": "RESOURCE_ISOLATION",
-                        "outcome": "SUCCESS",
-                        "trace_id": outcome.trace_id,
-                        "details_json": outcome.to_audit_details(),
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Resource isolation audit emission failed (%s).", type(exc).__name__
-                )
-        return outcome
 
     def _coerce(self, request: Any) -> ContainmentRequest:
         """Validate and coerce a containment request."""
@@ -627,7 +799,11 @@ class ContainmentService:
             reason_codes=tuple(c.value for c in codes),
             tenant_id=context.tenant_id if tenant_ok else None,
             incident_id=getattr(req, "incident_id", None) if req is not None else None,
-            containment_type=facts.get("containment_type"),
+            containment_type=(
+                ContainmentType(facts["containment_type"])
+                if facts.get("containment_type") in {item.value for item in ContainmentType}
+                else None
+            ),
             target_id=facts.get("target_id"),
             previous_state=facts.get("previous_state"),
             resulting_state=facts.get("resulting_state"),
