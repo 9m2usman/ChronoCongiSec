@@ -15,6 +15,7 @@ Design and integration contract: ``docs/security-design/containment-workflow.md`
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
