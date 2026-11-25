@@ -239,7 +239,8 @@ async def test_resource_isolation_without_authoritative_adapter_fails_closed():
 
     assert outcome.success is False
     assert outcome.status is ContainmentStatus.FAILED
-    assert not persisted
+    assert len(persisted) == 1
+    assert persisted[0].status is ContainmentStatus.FAILED
 
 
 @pytest.mark.asyncio
