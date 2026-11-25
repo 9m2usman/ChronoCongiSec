@@ -59,28 +59,24 @@ USERS = [
         "email": "sarah.admin@alphacorp.com",
         "full_name": "Sarah Chen",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-alex-02",
         "email": "alex.analyst@alphacorp.com",
         "full_name": "Alex Mercer",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-dev-dave-03",
         "email": "dave.developer@alphacorp.com",
         "full_name": "Dave Miller",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-comp-a",
         "email": "analyst@company-a.com",
         "full_name": "Alice Analyst",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
 ]
 
