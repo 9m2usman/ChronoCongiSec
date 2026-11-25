@@ -410,8 +410,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await outbox_processor.shutdown(outbox_worker_task)
         app.state.outbox_worker_task = None
 
-    # Close the Redis connection pool created during startup. The rate limiter
-    # owns no separate lifecycle; the app owns the client and must release it.
+    # Release the Redis connection pool created during application startup.
     redis_client = getattr(app.state, "redis_client", None)
     if redis_client is not None:
         try:
