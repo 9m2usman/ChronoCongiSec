@@ -13,7 +13,7 @@ import hashlib
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, Tuple
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -479,7 +479,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 # --- Application Factory ---
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    pre_action_checkpoint_service: Optional[Any] = None,
+    agent_runtime_cancellation: Optional[Any] = None,
+    company_resource_security_adapter: Optional[Any] = None,
+) -> FastAPI:
     """Create and configure the FastAPI application instance."""
     if settings is None:
         settings = get_settings()
@@ -505,6 +511,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.agent_runtime_cancellation = agent_runtime_cancellation
+    app.state.company_resource_security_adapter = company_resource_security_adapter
+    app.state.pre_action_checkpoint_service = pre_action_checkpoint_service
 
     # Revocation store initialization (GAP-007)
     if settings.APP_ENV != "production":
@@ -649,13 +658,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Pre-action checkpointing: metadata-only in-memory adapter is allowed only
     # in development/test. Production must inject a durable resource snapshot service.
-    if settings.APP_ENV != "production":
+    if settings.APP_ENV != "production" and app.state.pre_action_checkpoint_service is None:
         from backend.app.security.checkpoints import InMemoryPreActionCheckpointService
         app.state.pre_action_checkpoint_service = InMemoryPreActionCheckpointService()
-    else:
-        app.state.pre_action_checkpoint_service = getattr(
-            app.state, "pre_action_checkpoint_service", None
-        )
 
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
