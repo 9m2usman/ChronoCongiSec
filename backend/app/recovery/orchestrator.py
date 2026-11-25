@@ -398,7 +398,14 @@ class RecoveryService:
             latest = self._memory.get_version(rid, rec.current_version, tenant_id)
             if latest is None or sha256_hex(latest.content) != latest.checksum:
                 raise ValidationError("A record in the blast radius failed integrity verification.")
-            effective = self._trust.effective_state(tenant_id, rid)
+            use_async = (
+                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+            )
+            if use_async and hasattr(self._trust, "aeffective_state"):
+                effective = await self._trust.aeffective_state(tenant_id, rid)
+            else:
+                effective = self._trust.effective_state(tenant_id, rid)
             if effective is None:
                 raise ValidationError("Trust state of a record in the blast radius is unknown.")
             if rid == target_record_id and effective == "REJECTED":
@@ -501,9 +508,22 @@ class RecoveryService:
         for p in restore + intermediaries:
             if p.effective_state in ("QUARANTINED", "REJECTED"):
                 continue
-            decision = self._trust.apply(self._trust_request(p.record_id, TrustOperation.QUARANTINE,
-                                                             "QUARANTINED", plan, p.current_version), user)
-            if not decision.applied and self._trust.effective_state(tenant_id, p.record_id) != "QUARANTINED":
+            use_async = (
+                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+            )
+            req_payload = await self._atrust_request(
+                p.record_id, TrustOperation.QUARANTINE, "QUARANTINED", plan, p.current_version
+            )
+            if use_async and hasattr(self._trust, "aapply"):
+                decision = await self._trust.aapply(req_payload, user)
+            else:
+                decision = self._trust.apply(req_payload, user)
+            if use_async and hasattr(self._trust, "aeffective_state"):
+                cur_state = await self._trust.aeffective_state(tenant_id, p.record_id)
+            else:
+                cur_state = self._trust.effective_state(tenant_id, p.record_id)
+            if not decision.applied and cur_state != "QUARANTINED":
                 return await self._fail(tenant_id, actor, plan, RecoveryReason.CONTAINMENT_FAILED,
                                         snapshot_sha=snapshot_sha)
 
@@ -541,14 +561,24 @@ class RecoveryService:
             if version is None:
                 codes.append(RecoveryReason.TRUST_RESTORE_FAILED.value)
                 continue
-            d = self._trust.apply(self._trust_request(p.record_id, TrustOperation.RECOVERY_RESTORE, "QUARANTINED",
-                                                      plan, version, checkpoint_id=plan.checkpoint_id), user)
+            req_payload = await self._atrust_request(
+                p.record_id, TrustOperation.RECOVERY_RESTORE, "QUARANTINED",
+                plan, version, checkpoint_id=plan.checkpoint_id,
+            )
+            use_async = (
+                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+            )
+            if use_async and hasattr(self._trust, "aapply"):
+                d = await self._trust.aapply(req_payload, user)
+            else:
+                d = self._trust.apply(req_payload, user)
             if not d.applied:
                 codes.append(RecoveryReason.TRUST_RESTORE_FAILED.value)
 
         # 7. Post-conditions: content equals the checkpoint, no restored record is TRUSTED,
         #    intermediaries are QUARANTINED.
-        post = self._postconditions(tenant_id, restore, intermediaries, content, new_versions)
+        post = await self._apostconditions(tenant_id, restore, intermediaries, content, new_versions)
         if not post["ok"]:
             codes.append(RecoveryReason.POSTCONDITION_FAILED.value)
         if not await self._safe_transition(tenant_id, plan_id, PlanStatus(plan.status), PlanStatus.EXECUTED):
@@ -572,6 +602,27 @@ class RecoveryService:
 
     # -- helpers ----------------------------------------------------------------
 
+    async def _atrust_request(self, record_id: str, op: TrustOperation, expected_state: str, plan: RecoveryPlanRecord,
+                              version: int, *, checkpoint_id: Optional[str] = None) -> Dict[str, Any]:
+        evidence: Dict[str, Any] = {"evidence_refs": [f"recovery-plan:{plan.id}"], "recovery_plan_id": plan.id}
+        if plan.incident_id:
+            evidence["incident_id"] = plan.incident_id
+        if checkpoint_id:
+            evidence["checkpoint_id"] = checkpoint_id
+        target = "UNVERIFIED" if op is TrustOperation.RECOVERY_RESTORE else "QUARANTINED"
+        use_async = (
+            getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+            or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+        )
+        if use_async and hasattr(self._trust, "aeffective_state"):
+            eff = await self._trust.aeffective_state(plan.tenant_id, record_id)
+        else:
+            eff = self._trust.effective_state(plan.tenant_id, record_id)
+        return {"record_id": record_id, "operation": op.value, "target_state": target,
+                "expected_state": eff or expected_state,
+                "expected_version": version, "reason": f"Recovery plan {plan.id} ({op.value.lower()})",
+                "evidence": evidence}
+
     def _trust_request(self, record_id: str, op: TrustOperation, expected_state: str, plan: RecoveryPlanRecord,
                        version: int, *, checkpoint_id: Optional[str] = None) -> Dict[str, Any]:
         evidence: Dict[str, Any] = {"recovery_plan_id": plan.id, "evidence_refs": [plan.id]}
@@ -584,6 +635,43 @@ class RecoveryService:
                 "expected_state": self._trust.effective_state(plan.tenant_id, record_id) or expected_state,
                 "expected_version": version, "reason": f"Recovery plan {plan.id} ({op.value.lower()})",
                 "evidence": evidence}
+
+    async def _apostconditions(self, tenant_id, restore, intermediaries, content, new_versions) -> Dict[str, Any]:
+        import inspect
+        failures: List[str] = []
+        for p in restore:
+            rec_res = self._memory.get_record(p.record_id, tenant_id)
+            rec = await rec_res if inspect.isawaitable(rec_res) else rec_res
+            ver_res = self._memory.get_version(p.record_id, getattr(rec, "current_version", 0) or 0, tenant_id)
+            latest = await ver_res if inspect.isawaitable(ver_res) else ver_res
+            stored = _state(getattr(rec, "trust_state", None))
+            use_async = (
+                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+            )
+            if use_async and hasattr(self._trust, "aeffective_state"):
+                effective = await self._trust.aeffective_state(tenant_id, p.record_id)
+            else:
+                effective = self._trust.effective_state(tenant_id, p.record_id)
+            if latest is None or latest.checksum != content[p.record_id].checksum \
+                    or rec.current_version != new_versions.get(p.record_id):
+                failures.append(f"{p.record_id}:CONTENT_NOT_RESTORED")
+            if "TRUSTED" in (stored, effective):
+                failures.append(f"{p.record_id}:TRUSTED_AFTER_RECOVERY")
+            if effective not in ("UNVERIFIED", "QUARANTINED"):
+                failures.append(f"{p.record_id}:UNEXPECTED_STATE")
+        for p in intermediaries:
+            use_async = (
+                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+            )
+            if use_async and hasattr(self._trust, "aeffective_state"):
+                inter_state = await self._trust.aeffective_state(tenant_id, p.record_id)
+            else:
+                inter_state = self._trust.effective_state(tenant_id, p.record_id)
+            if inter_state not in ("QUARANTINED", "REJECTED"):
+                failures.append(f"{p.record_id}:INTERMEDIARY_NOT_QUARANTINED")
+        return {"ok": not failures, "failures": failures}
 
     def _postconditions(self, tenant_id, restore, intermediaries, content, new_versions) -> Dict[str, Any]:
         failures: List[str] = []
