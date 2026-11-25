@@ -57,6 +57,10 @@ from crewai_service.framework import Agent, Crew, Process, Task, tool
 from crewai_service.telemetry.tracer import get_tracer
 from crewai_service.tools.amsc_client import ChronoCogniSecClient
 from crewai_service.tools.escalation_tools import EscalationToolFactory
+from crewai_service.tools.company_tools import (
+    COORDINATOR_COMPANY_OPERATIONS,
+    CompanyWorkspaceToolFactory,
+)
 
 logger = logging.getLogger("amsc.crewai.agent.coordinator")
 
@@ -176,6 +180,10 @@ def build_workflow_coordinator_agent(
         delegate_to_support_specialist,
         delegate_to_finance_specialist,
         esc_tools.create_escalation_tool(agent_id=agent_id, agent_role="Enterprise Workflow Coordinator"),
+        # Phase 3: protected company task coordination and messaging, via the gateway only.
+        *CompanyWorkspaceToolFactory(client=resolved_client, agent_id=agent_id).create_tools(
+            COORDINATOR_COMPANY_OPERATIONS
+        ),
     ]
 
     agent = Agent(
