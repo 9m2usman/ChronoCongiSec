@@ -414,7 +414,8 @@ def test_api_gap_003_ingest_validates_agent_and_source(app_and_client):
         json={"content": "Memo", "agent_id": "ghost-agent-999"},
         headers=headers,
     )
-    assert res_bad_agent.status_code in (400, 422)
+    # Missing and cross-tenant agent IDs are indistinguishable to prevent enumeration.
+    assert res_bad_agent.status_code == 404
 
     # 2. Inactive / ISOLATED agent (agent-inactive-001 was seeded with status ISOLATED)
     res_isolated_agent = client.post(
@@ -422,7 +423,7 @@ def test_api_gap_003_ingest_validates_agent_and_source(app_and_client):
         json={"content": "Memo", "agent_id": "agent-inactive-001"},
         headers=headers,
     )
-    assert res_isolated_agent.status_code in (400, 422)
+    assert res_isolated_agent.status_code == 403
 
     # 3. Nonexistent source
     res_bad_source = client.post(
