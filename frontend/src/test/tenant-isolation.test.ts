@@ -98,4 +98,29 @@ describe('Strict Multi-Tenant Isolation (P1 Finding F & SEC-004)', () => {
     expect(state.activeTraceId).toBeNull();
     expect(state.inspectorOpen).toBe(false);
   });
+
+  it('purges stale tenant-specific entity and inspector state when setAuth switches active_tenant', () => {
+    const store = useWorkstationStore.getState();
+    store.setActiveTenant({ id: 'tenant-alphacorp', name: 'AlphaCorp (Company A)', slug: 'alphacorp' });
+    store.setSelectedEntity({ id: 'agt-alpha-1' });
+    store.setSelectedMemory({ id: 'rec-alpha-1' });
+    store.setActiveTraceId('tr-alpha-1');
+    store.openInspector({ title: 'Alpha', type: 'RECORD', id: 'rec-alpha-1', details: {} });
+
+    store.setAuth('token-beta', {
+      user_id: 'usr-beta-1',
+      email: 'analyst@betashield.internal',
+      full_name: 'Beta Analyst',
+      active_tenant: { id: 'tenant-betashield', name: 'BetaShield', slug: 'betashield' },
+      role: 'SECURITY_ANALYST',
+    });
+
+    const next = useWorkstationStore.getState();
+    expect(next.activeTenant.id).toBe('tenant-betashield');
+    expect(next.selectedEntity).toBeNull();
+    expect(next.selectedMemory).toBeNull();
+    expect(next.activeTraceId).toBeNull();
+    expect(next.inspectorOpen).toBe(false);
+    expect(next.inspectorPayload).toBeNull();
+  });
 });

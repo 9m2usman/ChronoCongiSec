@@ -2,14 +2,12 @@ import React, { useState } from 'react';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
 import { useAgents, useMemories } from '@/hooks';
 import { StateBanner } from '@/components/common/StateBanner';
+import { StatusBadge } from '@/components/common/StatusBadge';
 import { Agent } from '@/types';
 import {
   Bot,
   ArrowUpRight,
   Search,
-  Key,
-  Check,
-  Copy,
   SlidersHorizontal,
 } from 'lucide-react';
 
@@ -20,13 +18,6 @@ export const AgentRegistryPage: React.FC = () => {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [tierFilter, setTierFilter] = useState<'ALL' | 'RESTRICTED' | 'STANDARD' | 'ELEVATED'>('ALL');
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const handleCopy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(id);
-    setTimeout(() => setCopiedKey(null), 2000);
-  };
 
   // Safely extract agent array whether returned as array or paginated envelope { items: [...] }
   const agentList: Agent[] = React.useMemo(() => {
@@ -58,58 +49,47 @@ export const AgentRegistryPage: React.FC = () => {
     return memories.filter((m) => m.agent_id === agentId).length;
   };
 
-  // Blocked tools by trust tier (fail-closed security architecture)
-  const getBlockedToolsForTier = (tier?: string) => {
-    if (tier === 'RESTRICTED') {
-      return ['shell_exec (FAIL_CLOSED)', 'direct_db_write (BLOCKED)', 'export_raw_pii (BLOCKED)'];
-    }
-    if (tier === 'STANDARD') {
-      return ['shell_exec (FAIL_CLOSED)', 'override_policy (BLOCKED)'];
-    }
-    return ['destructive_drop (FAIL_CLOSED)'];
-  };
-
   return (
-    <div className="space-y-6 font-mono text-slate-100">
+    <div className="space-y-6 font-mono text-ink">
       {/* Title & Description */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-borderc gap-3">
         <div>
-          <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-            <Bot className="w-5 h-5 text-blue-400" />
+          <h1 className="text-xl font-bold text-ink flex items-center gap-2">
+            <Bot className="w-5 h-5 text-brand" />
             Agent Registry & Entitlement Matrix
           </h1>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Reco AI-style identity-to-tool entitlement verification, trust boundaries, and scoped credentials for{' '}
-            <span className="text-blue-400 font-bold">{activeTenant.name}</span>
+          <p className="text-xs text-ink-muted mt-0.5">
+            Identity-to-tool entitlement verification, trust boundaries, and scoped credentials for{' '}
+            <span className="text-brand font-bold">{activeTenant.name}</span>
           </p>
         </div>
 
         {/* Search Bar */}
-        <div className="flex items-center px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-300">
-          <Search className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+        <div className="flex items-center px-3 py-1.5 bg-surface border border-borderc rounded text-xs text-ink">
+          <Search className="w-3.5 h-3.5 text-ink-muted mr-2 shrink-0" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search agents, models, or tools..."
-            className="bg-transparent focus:outline-none placeholder-slate-500 w-56 text-xs font-mono"
+            className="bg-transparent focus:outline-none placeholder-ink-muted w-56 text-xs font-mono text-ink"
           />
         </div>
       </div>
 
-      {/* Reco AI-Style Trust Tier Filter Tabs & Stats Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-900 border border-slate-800 rounded-lg">
+      {/* Trust Tier Filter Tabs & Stats Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-surface border border-borderc rounded-lg">
         <div className="flex items-center gap-1.5">
-          <SlidersHorizontal className="w-4 h-4 text-slate-400 mr-1" />
-          <span className="text-[11px] text-slate-400 font-bold uppercase tracking-wider mr-2">Trust Tier:</span>
+          <SlidersHorizontal className="w-4 h-4 text-ink-muted mr-1" />
+          <span className="text-[11px] text-ink-muted font-bold uppercase tracking-wider mr-2">Trust Tier:</span>
           {(['ALL', 'RESTRICTED', 'STANDARD', 'ELEVATED'] as const).map((tier) => (
             <button
               key={tier}
               onClick={() => setTierFilter(tier)}
-              className={`px-3 py-1 rounded text-xs font-semibold transition-all ${
+              className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
                 tierFilter === tier
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  ? 'bg-brand text-white shadow-sm'
+                  : 'text-ink-muted hover:text-ink hover:bg-elevated'
               }`}
             >
               {tier}
@@ -117,19 +97,19 @@ export const AgentRegistryPage: React.FC = () => {
           ))}
         </div>
 
-        <div className="flex items-center gap-3 text-xs text-slate-400">
+        <div className="flex items-center gap-3 text-xs text-ink-muted">
           <span>
-            Total Identities: <strong className="text-slate-200">{agents?.length || 0}</strong>
+            Total Identities: <strong className="text-ink">{agentList.length}</strong>
           </span>
           <span>•</span>
           <span>
-            Active in RAG: <strong className="text-emerald-400">{filteredAgents.length}</strong>
+            Active in RAG: <strong className="text-status-trusted">{filteredAgents.length}</strong>
           </span>
         </div>
       </div>
 
       {/* Entitlement Matrix Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+      <div className="bg-surface border border-borderc rounded-lg overflow-x-auto">
         {isLoading ? (
           <StateBanner type="loading" title="Loading Agent Entitlement Matrix..." message="Verifying runtime identity and tool access boundaries..." />
         ) : error ? (
@@ -138,76 +118,56 @@ export const AgentRegistryPage: React.FC = () => {
           <StateBanner type="empty" title="No Registered Agents Found" message={`No agents registered in ${activeTenant.name} matching filter criteria.`} />
         ) : (
           <table className="w-full text-left text-xs">
-            <thead className="text-[10px] text-slate-400 uppercase tracking-wider border-b border-slate-800 bg-slate-950/50">
+            <thead className="text-[10px] text-ink-muted uppercase tracking-wider border-b border-borderc bg-elevated">
               <tr>
                 <th className="py-3 px-4">Agent Identity</th>
                 <th className="py-3 px-4">Trust Tier</th>
-                <th className="py-3 px-4">Scoped API Key Prefix</th>
+                <th className="py-3 px-4">Branch / Framework</th>
                 <th className="py-3 px-4">Active Memories</th>
                 <th className="py-3 px-4">Allowed Tool Adapters</th>
-                <th className="py-3 px-4">Fail-Closed Blocked Tools</th>
+                <th className="py-3 px-4">Policy Enforcement</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4 text-right">Inspect</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-800/60">
+            <tbody className="divide-y divide-borderc">
               {filteredAgents.map((agent) => {
-                const keyPrefix = `amsc_agt_${agent.id.replace('agt-', '')}_${activeTenant.slug}`;
-                const blockedTools = getBlockedToolsForTier(agent.trust_tier);
                 const memoryCount = getAgentMemoryCount(agent.id);
+                const runtimeLabel = [
+                  (agent as any).branch_id ? `branch:${(agent as any).branch_id}` : null,
+                  (agent as any).framework || null,
+                ]
+                  .filter(Boolean)
+                  .join(' • ');
 
                 return (
-                  <tr key={agent.id} className="hover:bg-slate-800/40 transition-colors">
+                  <tr key={agent.id} className="hover:bg-elevated/60 transition-colors">
                     {/* Identity */}
                     <td className="py-3 px-4">
-                      <div className="font-bold text-slate-100 flex items-center gap-1.5">
-                        <Bot className="w-3.5 h-3.5 text-blue-400" />
+                      <div className="font-bold text-ink flex items-center gap-1.5">
+                        <Bot className="w-3.5 h-3.5 text-brand" />
                         {agent.name}
                       </div>
-                      <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
-                        {agent.id} • <span className="text-slate-400">{agent.model}</span>
+                      <div className="text-[10px] text-ink-muted mt-0.5 font-mono">
+                        {agent.id} • <span>{agent.model}</span>
                       </div>
                     </td>
 
                     {/* Trust Tier */}
                     <td className="py-3 px-4">
-                      <span
-                        className={`px-2.5 py-0.5 rounded text-[10px] font-bold border ${
-                          agent.trust_tier === 'ELEVATED'
-                            ? 'bg-purple-950/40 border-purple-500/50 text-purple-300'
-                            : agent.trust_tier === 'STANDARD'
-                            ? 'bg-blue-950/40 border-blue-500/50 text-blue-300'
-                            : 'bg-amber-950/40 border-amber-500/50 text-amber-300'
-                        }`}
-                      >
-                        {agent.trust_tier}
-                      </span>
+                      <StatusBadge status={agent.trust_tier || 'STANDARD'} />
                     </td>
 
-                    {/* Scoped API Key */}
+                    {/* Branch / Framework */}
                     <td className="py-3 px-4">
-                      <div className="flex items-center gap-1.5 font-mono text-[11px] text-slate-300">
-                        <Key className="w-3 h-3 text-slate-500 shrink-0" />
-                        <span className="truncate max-w-[120px]" title={keyPrefix}>
-                          {keyPrefix}
-                        </span>
-                        <button
-                          onClick={() => handleCopy(keyPrefix, agent.id)}
-                          className="p-1 hover:text-blue-400 text-slate-500 transition-colors"
-                          title="Copy Key Prefix"
-                        >
-                          {copiedKey === agent.id ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                        </button>
-                      </div>
+                      <span className="font-mono text-[11px] text-ink-muted">
+                        {runtimeLabel || 'Not returned by API'}
+                      </span>
                     </td>
 
                     {/* Active Memories */}
                     <td className="py-3 px-4">
-                      <span className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-[11px] font-semibold text-cyan-300">
+                      <span className="px-2 py-0.5 rounded bg-canvas border border-borderc text-[11px] font-semibold text-brand-teal">
                         {memoryCount} records
                       </span>
                     </td>
@@ -215,41 +175,31 @@ export const AgentRegistryPage: React.FC = () => {
                     {/* Allowed Tool Adapters */}
                     <td className="py-3 px-4">
                       <div className="flex flex-wrap gap-1 max-w-[240px]">
-                        {(agent.tools || []).map((t: string) => (
-                          <span
-                            key={t}
-                            className="px-1.5 py-0.5 rounded bg-emerald-950/30 border border-emerald-500/40 text-[10px] text-emerald-300 font-mono"
-                          >
-                            {t}
-                          </span>
-                        ))}
+                        {(agent.tools || []).length > 0 ? (
+                          (agent.tools || []).map((t: string) => (
+                            <span
+                              key={t}
+                              className="px-1.5 py-0.5 rounded bg-status-trustedBg border border-status-trusted/40 text-[10px] text-status-trusted font-mono"
+                            >
+                              {t}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-[10px] text-ink-muted">None declared</span>
+                        )}
                       </div>
                     </td>
 
-                    {/* Fail-Closed Blocked Tools */}
+                    {/* Policy Enforcement */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-wrap gap-1 max-w-[220px]">
-                        {blockedTools.map((b) => (
-                          <span
-                            key={b}
-                            className="px-1.5 py-0.5 rounded bg-red-950/30 border border-red-500/40 text-[10px] text-red-300 font-mono"
-                          >
-                            {b}
-                          </span>
-                        ))}
-                      </div>
+                      <span className="px-2 py-0.5 rounded bg-canvas border border-borderc text-[10px] text-ink-muted font-mono">
+                        Evaluated server-side
+                      </span>
                     </td>
 
                     {/* Status */}
                     <td className="py-3 px-4">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            agent.status === 'ACTIVE' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'
-                          }`}
-                        />
-                        <span className="text-[11px] font-semibold text-slate-300">{agent.status}</span>
-                      </div>
+                      <StatusBadge status={agent.status || 'UNKNOWN'} />
                     </td>
 
                     {/* Inspect */}
@@ -262,13 +212,11 @@ export const AgentRegistryPage: React.FC = () => {
                             id: agent.id,
                             details: {
                               ...agent,
-                              keyPrefix,
                               memoryCount,
-                              blockedTools,
                             },
                           })
                         }
-                        className="p-1 hover:text-blue-400 text-slate-400 transition-colors"
+                        className="p-1 hover:text-brand text-ink-muted transition-colors"
                         title="Inspect Entitlement Policy in Drawer"
                       >
                         <ArrowUpRight className="w-4 h-4" />

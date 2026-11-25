@@ -15,6 +15,7 @@ import { DriftMonitorPage } from '@/pages/DriftMonitorPage';
 import { AgentRewindingPage } from '@/pages/AgentRewindingPage';
 import { AuditCenterPage } from '@/pages/AuditCenterPage';
 import { SettingsPage } from '@/pages/SettingsPage';
+import { EnterpriseConnectivityPage } from '@/pages/EnterpriseConnectivityPage';
 
 export const router = createBrowserRouter([
   {
@@ -50,6 +51,7 @@ export const router = createBrowserRouter([
       { path: 'drift', element: <DriftMonitorPage /> },
       { path: 'rewind', element: <AgentRewindingPage /> },
       { path: 'audit', element: <AuditCenterPage /> },
+      { path: 'enterprise', element: <EnterpriseConnectivityPage /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
   },

@@ -116,22 +116,22 @@ export const AgentRewindingPage: React.FC = () => {
 
   return (
     <ForensicErrorBoundary fallbackTitle="Agent Rewind Engine Fault">
-      <div className="space-y-6 font-mono text-slate-100">
+      <div className="space-y-6 font-mono text-ink">
         {/* Title & Tenant Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-borderc gap-3">
           <div>
-            <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-              <RotateCcw className="w-5 h-5 text-amber-400" />
+            <h1 className="text-xl font-bold text-ink flex items-center gap-2">
+              <RotateCcw className="w-5 h-5 text-status-warning" />
               Agent Rewinding & Blast-Radius Recovery
             </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-ink-muted mt-0.5">
               Surgical state rollback with mandatory SEC-007 pre-recovery snapshots for{' '}
-              <span className="text-blue-400 font-bold">{activeTenant.name}</span>
+              <span className="text-brand font-bold">{activeTenant.name}</span>
             </p>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="px-2.5 py-1 rounded bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center gap-1.5">
+            <span className="px-2.5 py-1 rounded bg-status-trustedBg border border-status-trusted/40 text-status-trusted text-xs font-bold flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5" /> SEC-007 Snapshot Preservation Active
             </span>
           </div>
@@ -152,52 +152,52 @@ export const AgentRewindingPage: React.FC = () => {
               <button
                 key={s.step}
                 onClick={() => setActiveStep(s.step)}
-                className={`p-3 rounded-lg border text-left transition-all ${
+                className={`p-3 rounded-lg border text-left transition-colors ${
                   isActive
-                    ? 'bg-blue-950/40 border-blue-500 shadow-md ring-1 ring-blue-500/30'
+                    ? 'bg-brand-tint border-brand shadow-sm ring-1 ring-brand/30'
                     : isDone
-                    ? 'bg-slate-900/90 border-emerald-500/40 text-slate-300'
-                    : 'bg-slate-950/60 border-slate-800 text-slate-500'
+                    ? 'bg-surface border-status-trusted/40 text-ink'
+                    : 'bg-surface/60 border-borderc text-ink-muted'
                 }`}
               >
                 <div className="flex items-center justify-between">
-                  <span className={`text-xs font-bold ${isActive ? 'text-blue-400' : isDone ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  <span className={`text-xs font-bold ${isActive ? 'text-brand' : isDone ? 'text-status-trusted' : 'text-ink-muted'}`}>
                     {s.title}
                   </span>
                   {isDone ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <CheckCircle2 className="w-3.5 h-3.5 text-status-trusted" />
                   ) : (
-                    <span className="w-2 h-2 rounded-full bg-slate-700"></span>
+                    <span className="w-2 h-2 rounded-full bg-borderc"></span>
                   )}
                 </div>
-                <div className="text-[10px] text-slate-400 mt-1">{s.desc}</div>
+                <div className="text-[10px] text-ink-muted mt-1">{s.desc}</div>
               </button>
             );
           })}
         </div>
 
         {/* Active Wizard Step Panel */}
-        <div className="p-5 bg-slate-900 border border-slate-800 rounded-lg space-y-5 shadow-lg">
+        <div className="p-5 bg-surface border border-borderc rounded-lg space-y-5 shadow-sm">
           {activeStep === 1 && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center justify-between pb-2 border-b border-borderc">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-200">Step 1: Select Tainted Checkpoint / Incident Target</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <h2 className="text-sm font-bold text-ink">Step 1: Select Tainted Checkpoint / Incident Target</h2>
+                  <p className="text-xs text-ink-muted mt-0.5">
                     Choose which security incident or corrupted memory node requires rollback
                   </p>
                 </div>
-                <span className="text-[10px] text-amber-400 font-mono">Development fixture targets</span>
+                <span className="text-[10px] text-status-warning font-mono">Development fixture targets</span>
               </div>
 
               <div className="space-y-3">
                 {INCIDENT_TARGETS.map((inc) => (
                   <label
                     key={inc.id}
-                    className={`block p-4 rounded-lg border cursor-pointer transition-all ${
+                    className={`block p-4 rounded-lg border cursor-pointer transition-colors ${
                       targetIncident === inc.id
-                        ? 'bg-blue-950/30 border-blue-500 ring-1 ring-blue-500/40'
-                        : 'bg-slate-950 border-slate-800 hover:border-slate-700'
+                        ? 'bg-brand-tint border-brand ring-1 ring-brand/40'
+                        : 'bg-canvas border-borderc hover:border-brand/40'
                     }`}
                   >
                     <div className="flex items-start justify-between">
@@ -207,19 +207,19 @@ export const AgentRewindingPage: React.FC = () => {
                           name="targetIncident"
                           checked={targetIncident === inc.id}
                           onChange={() => setTargetIncident(inc.id)}
-                          className="w-4 h-4 text-blue-600 bg-slate-900 border-slate-700"
+                          className="w-4 h-4 accent-brand"
                         />
                         <div>
-                          <div className="font-bold text-xs text-slate-100">{inc.label}</div>
-                          <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-2">
-                            <span>Target Memory: <strong className="text-red-400">{inc.targetMemory}</strong></span>
+                          <div className="font-bold text-xs text-ink">{inc.label}</div>
+                          <div className="text-[11px] text-ink-muted mt-1 flex items-center gap-2 flex-wrap">
+                            <span>Target Memory: <strong className="text-status-critical">{inc.targetMemory}</strong></span>
                             <span>•</span>
                             <span>Tainted At: {inc.taintedTime}</span>
                           </div>
                         </div>
                       </div>
 
-                      <span className="px-2 py-0.5 rounded bg-red-950 text-red-300 text-[10px] font-bold border border-red-500/40">
+                      <span className="px-2 py-0.5 rounded bg-status-criticalBg text-status-critical text-[10px] font-bold border border-status-critical/40">
                         {inc.severity}
                       </span>
                     </div>
@@ -228,7 +228,7 @@ export const AgentRewindingPage: React.FC = () => {
               </div>
 
               {previewError && (
-                <div role="alert" className="p-3 bg-red-950/30 border border-red-500/40 rounded text-xs text-red-300">
+                <div role="alert" className="p-3 bg-status-criticalBg border border-status-critical/40 rounded text-xs text-status-critical">
                   Preview failed: {previewError}. No recovery plan exists, so nothing can be executed.
                 </div>
               )}
@@ -237,7 +237,7 @@ export const AgentRewindingPage: React.FC = () => {
                 <button
                   onClick={handlePreview}
                   disabled={previewMutation.isPending}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-hover text-white rounded text-xs font-bold transition-colors disabled:opacity-50"
                 >
                   {previewMutation.isPending ? (
                     <>
@@ -255,14 +255,14 @@ export const AgentRewindingPage: React.FC = () => {
 
           {activeStep === 2 && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center justify-between pb-2 border-b border-borderc">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-200">Step 2: Downstream Blast Radius Dependency Preview</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <h2 className="text-sm font-bold text-ink">Step 2: Downstream Blast Radius Dependency Preview</h2>
+                  <p className="text-xs text-ink-muted mt-0.5">
                     Analyzing direct and derived state mutations triggered by {currentIncident.targetMemory}
                   </p>
                 </div>
-                <span className="px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-500/40 text-[10px] font-bold">
+                <span className="px-2 py-0.5 rounded bg-status-warningBg text-status-warning border border-status-warning/40 text-[10px] font-bold">
                   {preview ? `${preview.preview.affected_records_count} record(s) · risk ${preview.preview.risk_level}` : 'No preview'}
                 </span>
               </div>
@@ -270,26 +270,26 @@ export const AgentRewindingPage: React.FC = () => {
               {preview ? (
                 <div className="space-y-3">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div className="p-3 bg-slate-950 rounded border border-slate-800">
-                      <div className="text-[10px] text-slate-500 uppercase">Plan</div>
-                      <div className="font-bold text-cyan-400 mt-1 text-xs break-all">{preview.plan_id}</div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">Status: {preview.status}</div>
+                    <div className="p-3 bg-canvas rounded border border-borderc">
+                      <div className="text-[10px] text-ink-muted uppercase">Plan</div>
+                      <div className="font-bold text-brand-teal mt-1 text-xs break-all">{preview.plan_id}</div>
+                      <div className="text-[10px] text-ink-muted mt-0.5">Status: {preview.status}</div>
                     </div>
-                    <div className="p-3 bg-slate-950 rounded border border-slate-800">
-                      <div className="text-[10px] text-slate-500 uppercase">Checkpoint</div>
-                      <div className="font-bold text-emerald-400 mt-1 text-xs break-all">
+                    <div className="p-3 bg-canvas rounded border border-borderc">
+                      <div className="text-[10px] text-ink-muted uppercase">Checkpoint</div>
+                      <div className="font-bold text-status-trusted mt-1 text-xs break-all">
                         {preview.preview.checkpoint_name || preview.preview.checkpoint_id}
                       </div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">Integrity verified by the server</div>
+                      <div className="text-[10px] text-ink-muted mt-0.5">Integrity verified by the server</div>
                     </div>
-                    <div className="p-3 bg-slate-950 rounded border border-slate-800">
-                      <div className="text-[10px] text-slate-500 uppercase">Irreversible External Actions</div>
-                      <div className="font-bold text-red-400 mt-1 text-xs">{preview.preview.irreversible_external_actions}</div>
-                      <div className="text-[10px] text-slate-400 mt-0.5">Recorded; require human compensation</div>
+                    <div className="p-3 bg-canvas rounded border border-borderc">
+                      <div className="text-[10px] text-ink-muted uppercase">Irreversible External Actions</div>
+                      <div className="font-bold text-status-critical mt-1 text-xs">{preview.preview.irreversible_external_actions}</div>
+                      <div className="text-[10px] text-ink-muted mt-0.5">Recorded; require human compensation</div>
                     </div>
                   </div>
-                  <table className="w-full text-[11px] text-left border border-slate-800">
-                    <thead className="bg-slate-950 text-slate-500 uppercase text-[10px]">
+                  <table className="w-full text-[11px] text-left border border-borderc">
+                    <thead className="bg-elevated text-ink-muted uppercase text-[10px]">
                       <tr>
                         <th className="p-2">Record</th>
                         <th className="p-2">Planned action</th>
@@ -299,21 +299,21 @@ export const AgentRewindingPage: React.FC = () => {
                     </thead>
                     <tbody>
                       {preview.preview.affected_records.map((rec) => (
-                        <tr key={rec.record_id} className="border-t border-slate-800">
-                          <td className="p-2 font-mono break-all">{rec.record_id}</td>
-                          <td className="p-2">{rec.action}</td>
-                          <td className="p-2">{rec.checkpoint_version ?? '-'}</td>
-                          <td className="p-2">{rec.current_trust_state ?? '-'}</td>
+                        <tr key={rec.record_id} className="border-t border-borderc">
+                          <td className="p-2 font-mono break-all text-ink">{rec.record_id}</td>
+                          <td className="p-2 text-ink">{rec.action}</td>
+                          <td className="p-2 text-ink-muted">{rec.checkpoint_version ?? '-'}</td>
+                          <td className="p-2 text-ink-muted">{rec.current_trust_state ?? '-'}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                  <p className="text-[11px] text-slate-400">
-                    Restored records become <strong>UNVERIFIED</strong> and must be re-validated before any agent may use them.
+                  <p className="text-[11px] text-ink-muted">
+                    Restored records become <strong className="text-ink">UNVERIFIED</strong> and must be re-validated before any agent may use them.
                   </p>
                 </div>
               ) : (
-                <div className="p-3 bg-slate-950 border border-slate-800 rounded text-xs text-slate-400">
+                <div className="p-3 bg-canvas border border-borderc rounded text-xs text-ink-muted">
                   No server preview yet. Go back and request one.
                 </div>
               )}
@@ -324,17 +324,17 @@ export const AgentRewindingPage: React.FC = () => {
                 subtitle="Illustrative development topology; the table above is the server's actual plan"
               />
 
-              <div className="flex justify-between items-center pt-3 border-t border-slate-800">
+              <div className="flex justify-between items-center pt-3 border-t border-borderc">
                 <button
                   onClick={() => setActiveStep(1)}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition-colors"
+                  className="px-3 py-1.5 bg-elevated hover:bg-brand-tint text-ink rounded text-xs border border-borderc transition-colors"
                 >
                   Back
                 </button>
                 <button
                   onClick={() => setActiveStep(3)}
                   disabled={!preview}
-                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-4 py-2 bg-brand hover:bg-brand-hover text-white rounded text-xs font-bold transition-colors disabled:opacity-50"
                 >
                   Verify Pre-Recovery Snapshot <ArrowRight className="w-3.5 h-3.5" />
                 </button>
@@ -344,59 +344,59 @@ export const AgentRewindingPage: React.FC = () => {
 
           {activeStep === 3 && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center justify-between pb-2 border-b border-borderc">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-200">Step 3: SEC-007 Pre-Recovery Snapshot Guarantee</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <h2 className="text-sm font-bold text-ink">Step 3: SEC-007 Pre-Recovery Snapshot Guarantee</h2>
+                  <p className="text-xs text-ink-muted mt-0.5">
                     Ensures an immutable copy of current corrupted state is preserved for forensic compliance prior to overwrite
                   </p>
                 </div>
-                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 text-[10px] font-bold flex items-center gap-1">
+                <span className="px-2 py-0.5 rounded bg-elevated text-ink border border-borderc text-[10px] font-bold flex items-center gap-1">
                   <Lock className="w-3 h-3" /> Captured server-side on execution
                 </span>
               </div>
 
-              <div className="p-4 bg-slate-950 rounded-lg border border-slate-800 space-y-3">
+              <div className="p-4 bg-canvas rounded-lg border border-borderc space-y-3">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">Recovery Plan:</span>
-                  <span className="font-mono text-cyan-400 font-bold break-all">{preview?.plan_id ?? 'none'}</span>
+                  <span className="text-ink-muted">Recovery Plan:</span>
+                  <span className="font-mono text-brand-teal font-bold break-all">{preview?.plan_id ?? 'none'}</span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">Target Checkpoint:</span>
-                  <span className="font-mono text-emerald-400 font-bold break-all">
+                  <span className="text-ink-muted">Target Checkpoint:</span>
+                  <span className="font-mono text-status-trusted font-bold break-all">
                     {preview?.preview.checkpoint_name || preview?.preview.checkpoint_id || 'none'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-400">Tenant:</span>
-                  <span className="font-mono text-blue-400 font-bold">{activeTenant.id}</span>
+                  <span className="text-ink-muted">Tenant:</span>
+                  <span className="font-mono text-brand font-bold">{activeTenant.id}</span>
                 </div>
-                <div className="text-[11px] text-slate-400">
+                <div className="text-[11px] text-ink-muted">
                   The server commits the pre-recovery snapshot before changing anything; its hash is recorded in the
                   recovery audit event.
                 </div>
               </div>
 
-              <div className="p-3 bg-amber-950/30 border border-amber-500/40 rounded text-xs text-amber-300 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <strong>Fail-Closed Rollback Protocol:</strong> affected records are quarantined first, then restored
+              <div className="p-3 bg-status-warningBg border border-status-warning/40 rounded text-xs text-status-warning flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="text-ink">
+                  <strong className="text-status-warning">Fail-Closed Rollback Protocol:</strong> affected records are quarantined first, then restored
                   to the checkpoint content as a new version. Restored records end UNVERIFIED (never TRUSTED);
                   intermediaries stay QUARANTINED. If any step fails, the server reports it and no success is shown.
                 </div>
               </div>
 
-              <div className="flex justify-between items-center pt-3 border-t border-slate-800">
+              <div className="flex justify-between items-center pt-3 border-t border-borderc">
                 <button
                   onClick={() => setActiveStep(2)}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition-colors"
+                  className="px-3 py-1.5 bg-elevated hover:bg-brand-tint text-ink rounded text-xs border border-borderc transition-colors"
                 >
                   Back
                 </button>
                 <button
                   onClick={handleExecuteRewind}
                   disabled={rewindMutation.isPending || !preview}
-                  className="flex items-center gap-2 px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded text-xs font-bold transition-colors shadow-lg disabled:opacity-50"
+                  className="flex items-center gap-2 px-5 py-2.5 bg-status-critical hover:opacity-90 text-white rounded text-xs font-bold transition-opacity shadow-sm disabled:opacity-50"
                 >
                   {rewindMutation.isPending ? (
                     <>
@@ -416,10 +416,10 @@ export const AgentRewindingPage: React.FC = () => {
 
           {activeStep === 4 && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <div className="flex items-center justify-between pb-2 border-b border-borderc">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-200">Step 4: Atomic Execution & Recovery Verification</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                  <h2 className="text-sm font-bold text-ink">Step 4: Atomic Execution & Recovery Verification</h2>
+                  <p className="text-xs text-ink-muted mt-0.5">
                     Live execution log and post-recovery cryptographic validation
                   </p>
                 </div>
@@ -427,8 +427,8 @@ export const AgentRewindingPage: React.FC = () => {
                   <span
                     className={`px-2.5 py-0.5 rounded text-xs font-bold flex items-center gap-1.5 border ${
                       outcome.success
-                        ? 'bg-emerald-950 text-emerald-300 border-emerald-500/40'
-                        : 'bg-red-950 text-red-300 border-red-500/40'
+                        ? 'bg-status-trustedBg text-status-trusted border-status-trusted/40'
+                        : 'bg-status-criticalBg text-status-critical border-status-critical/40'
                     }`}
                   >
                     {outcome.success ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
@@ -438,9 +438,9 @@ export const AgentRewindingPage: React.FC = () => {
               </div>
 
               {/* Terminal Execution Log */}
-              <div className="p-4 bg-black rounded-lg border border-slate-800 font-mono text-xs text-slate-300 space-y-1.5 max-h-64 overflow-y-auto">
-                <div className="text-slate-500 flex items-center gap-1.5 pb-1 border-b border-slate-900">
-                  <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+              <div className="p-4 bg-canvas rounded-lg border border-borderc font-mono text-xs text-ink space-y-1.5 max-h-64 overflow-y-auto">
+                <div className="text-ink-muted flex items-center gap-1.5 pb-1 border-b border-borderc">
+                  <Terminal className="w-3.5 h-3.5 text-brand-teal" />
                   <span>AMSC Forensic Rewind Execution Engine v1.0.0</span>
                 </div>
                 {rollbackLogs.map((log, idx) => (
@@ -448,12 +448,14 @@ export const AgentRewindingPage: React.FC = () => {
                     key={idx}
                     className={
                       log.includes('SUCCESS')
-                        ? 'text-emerald-400 font-bold'
+                        ? 'text-status-trusted font-bold'
                         : log.includes('SNAPSHOT')
-                        ? 'text-cyan-400'
+                        ? 'text-brand-teal'
                         : log.includes('AUDIT')
-                        ? 'text-purple-400'
-                        : 'text-slate-300'
+                        ? 'text-brand'
+                        : log.includes('ERROR')
+                        ? 'text-status-critical'
+                        : 'text-ink'
                     }
                   >
                     {log}
@@ -462,13 +464,13 @@ export const AgentRewindingPage: React.FC = () => {
               </div>
 
               {rollbackComplete && outcome && (
-                <div className="p-4 bg-emerald-950/20 border border-emerald-500/40 rounded-lg flex items-center justify-between text-xs">
+                <div className="p-4 bg-status-trustedBg border border-status-trusted/40 rounded-lg flex items-center justify-between text-xs gap-3">
                   <div>
-                    <div className="font-bold text-emerald-400 flex items-center gap-1.5">
+                    <div className="font-bold text-status-trusted flex items-center gap-1.5">
                       <ShieldCheck className="w-4 h-4" /> {outcome.restored_records_count} record(s) restored to{' '}
                       {preview?.preview.checkpoint_name || preview?.preview.checkpoint_id}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
+                    <div className="text-[11px] text-ink-muted mt-1">
                       Restored records are UNVERIFIED until re-validated. Audit event: {outcome.audit_event_id ?? 'not returned'}.
                     </div>
                   </div>
@@ -492,14 +494,14 @@ export const AgentRewindingPage: React.FC = () => {
                         },
                       })
                     }
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded text-xs transition-colors"
+                    className="px-3 py-1.5 bg-surface hover:bg-elevated border border-borderc text-ink rounded text-xs transition-colors shrink-0"
                   >
                     Inspect Recovery Audit
                   </button>
                 </div>
               )}
 
-              <div className="flex justify-between items-center pt-3 border-t border-slate-800">
+              <div className="flex justify-between items-center pt-3 border-t border-borderc">
                 <button
                   onClick={() => {
                     setActiveStep(1);
@@ -509,7 +511,7 @@ export const AgentRewindingPage: React.FC = () => {
                     setOutcome(null);
                     setPreviewError(null);
                   }}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs transition-colors"
+                  className="px-3 py-1.5 bg-elevated hover:bg-brand-tint text-ink rounded text-xs border border-borderc transition-colors"
                 >
                   Start New Rewind Workflow
                 </button>

@@ -12,3 +12,4 @@ export * from './audit';
 export * from './baseline';
 export * from './observation';
 export * from './detection';
+export * from './enterprise';

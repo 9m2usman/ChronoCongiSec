@@ -77,21 +77,21 @@ export const RegisterPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen w-screen flex flex-col justify-center items-center bg-[#0B0F19] text-slate-100 font-mono px-4 py-8">
-      <div className="w-full max-w-lg bg-[#111827] border border-slate-800 rounded-lg shadow-2xl p-6 sm:p-8 space-y-6">
+    <div className="min-h-screen w-screen flex flex-col justify-center items-center bg-canvas text-ink font-mono px-4 py-8">
+      <div className="w-full max-w-lg bg-surface border border-borderc rounded-lg shadow-xl p-6 sm:p-8 space-y-6">
         {/* Header */}
         <div className="flex flex-col items-center text-center space-y-2">
-          <div className="w-12 h-12 rounded-lg bg-blue-600/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
+          <div className="w-12 h-12 rounded-lg bg-brand-tint border border-brand/30 flex items-center justify-center text-brand">
             <Shield className="w-6 h-6" />
           </div>
-          <h1 className="text-xl font-bold tracking-wider text-slate-100">EMPLOYEE REGISTRATION</h1>
-          <p className="text-xs text-slate-400">Request Access to AMSC Security Operations Workstation</p>
+          <h1 className="text-xl font-bold tracking-wider text-ink">EMPLOYEE REGISTRATION</h1>
+          <p className="text-xs text-ink-muted">Request Access to AMSC Security Operations Workstation</p>
         </div>
 
         {/* Informational Policy Banner */}
-        <div className="p-3 bg-blue-950/40 border border-blue-500/30 rounded text-xs text-blue-300 leading-relaxed">
-          <p className="font-semibold text-blue-200 mb-1 flex items-center gap-1.5">
-            <Shield className="w-3.5 h-3.5 text-blue-400" /> Administrative Approval Policy
+        <div className="p-3 bg-brand-tint border border-brand/30 rounded text-xs text-ink leading-relaxed">
+          <p className="font-semibold text-brand mb-1 flex items-center gap-1.5">
+            <Shield className="w-3.5 h-3.5" /> Administrative Approval Policy
           </p>
           Employee registration requests are reviewed by an authorized Tenant Administrator. You will be assigned a role
           and authorized branch upon approval.
@@ -100,20 +100,20 @@ export const RegisterPage: React.FC = () => {
         {error && (
           <div
             role="alert"
-            className="p-3 bg-red-950/60 border border-red-500/40 rounded text-xs text-red-300 flex items-start gap-2"
+            className="p-3 bg-status-criticalBg border border-status-critical/40 rounded text-xs text-status-critical flex items-start gap-2"
           >
-            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
             <span className="leading-relaxed">{error}</span>
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
           <div>
-            <label className="block text-slate-400 mb-1 font-semibold" htmlFor="reg-name">
+            <label className="block text-ink-muted mb-1 font-semibold" htmlFor="reg-name">
               Full Name
             </label>
             <div className="relative">
-              <User className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <User className="w-4 h-4 text-ink-muted absolute left-3 top-2.5" />
               <input
                 id="reg-name"
                 type="text"
@@ -121,17 +121,17 @@ export const RegisterPage: React.FC = () => {
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 placeholder="Jane Doe"
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full pl-9 pr-3 py-2 bg-canvas border border-borderc rounded text-ink placeholder-ink-muted focus:outline-none focus:ring-2 focus:ring-brand focus:border-brand"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1 font-semibold" htmlFor="reg-email">
+            <label className="block text-ink-muted mb-1 font-semibold" htmlFor="reg-email">
               Enterprise Work Email
             </label>
             <div className="relative">
-              <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <Mail className="w-4 h-4 text-ink-muted absolute left-3 top-2.5" />
               <input
                 id="reg-email"
                 type="email"
@@ -139,17 +139,17 @@ export const RegisterPage: React.FC = () => {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="jane.doe@company.com"
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full pl-9 pr-3 py-2 bg-canvas border border-borderc rounded text-ink placeholder-ink-muted focus:outline-none focus:ring-2 focus:ring-brand focus:border-brand"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1 font-semibold" htmlFor="reg-password">
+            <label className="block text-ink-muted mb-1 font-semibold" htmlFor="reg-password">
               Password (minimum 8 characters)
             </label>
             <div className="relative">
-              <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <Lock className="w-4 h-4 text-ink-muted absolute left-3 top-2.5" />
               <input
                 id="reg-password"
                 type="password"
@@ -158,23 +158,23 @@ export const RegisterPage: React.FC = () => {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••••••"
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded text-slate-100 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full pl-9 pr-3 py-2 bg-canvas border border-borderc rounded text-ink placeholder-ink-muted focus:outline-none focus:ring-2 focus:ring-brand focus:border-brand"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-slate-400 mb-1 font-semibold" htmlFor="reg-branch">
+            <label className="block text-ink-muted mb-1 font-semibold" htmlFor="reg-branch">
               Requested Branch Assignment
             </label>
             <div className="relative">
-              <Building className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <Building className="w-4 h-4 text-ink-muted absolute left-3 top-2.5" />
               <select
                 id="reg-branch"
                 value={requestedBranchCode}
                 onChange={(e) => setRequestedBranchCode(e.target.value)}
                 disabled={isLoadingBranches}
-                className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                className="w-full pl-9 pr-3 py-2 bg-canvas border border-borderc rounded text-ink focus:outline-none focus:ring-2 focus:ring-brand focus:border-brand"
               >
                 {branches.map((b) => (
                   <option key={b.code} value={b.code}>
@@ -188,7 +188,7 @@ export const RegisterPage: React.FC = () => {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full mt-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded flex items-center justify-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+            className="w-full mt-2 py-2.5 px-4 bg-brand hover:bg-brand-hover text-white font-bold rounded flex items-center justify-center gap-2 transition-colors focus:outline-none focus:ring-2 focus:ring-brand disabled:opacity-50"
           >
             {isSubmitting ? (
               <span>Submitting Request...</span>
@@ -201,15 +201,15 @@ export const RegisterPage: React.FC = () => {
           </button>
         </form>
 
-        <div className="pt-4 border-t border-slate-800 flex flex-col gap-2 text-center text-xs">
-          <p className="text-slate-400">
+        <div className="pt-4 border-t border-borderc flex flex-col gap-2 text-center text-xs">
+          <p className="text-ink-muted">
             Already have an approved account?{' '}
-            <Link to="/login" className="text-blue-400 hover:underline font-bold">
+            <Link to="/login" className="text-brand hover:underline font-bold">
               Sign In
             </Link>
           </p>
-          <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-500 mt-2">
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <div className="flex items-center justify-center gap-1.5 text-[10px] text-ink-muted mt-2">
+            <CheckCircle2 className="w-3.5 h-3.5 text-status-trusted" />
             <span>Server-Enforced Role & Branch Governance</span>
           </div>
         </div>

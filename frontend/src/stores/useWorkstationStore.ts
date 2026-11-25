@@ -1,5 +1,8 @@
 import { create } from 'zustand';
 import { UserProfileResponse } from '@/types';
+import type { WorkstationTheme } from '@/styles/tokens';
+
+export type { WorkstationTheme };
 
 export type TenantId = 'tenant-alphacorp' | 'tenant-betashield' | 'tenant-gammaai' | string;
 
@@ -78,11 +81,34 @@ interface WorkstationState {
   apiMode: ApiMode;
   setApiMode: (mode: ApiMode) => void;
 
+  // Theme
+  theme: WorkstationTheme;
+  setTheme: (theme: WorkstationTheme) => void;
+  toggleTheme: () => void;
+
   // Full State Purge Helper
   purgeTenantState: () => void;
 }
 
 const INITIAL_TOKEN = typeof window !== 'undefined' ? sessionStorage.getItem('amsc_auth_token') : null;
+
+function resolveInitialTheme(): WorkstationTheme {
+  if (typeof window !== 'undefined') {
+    const saved = localStorage.getItem('amsc_theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+  }
+  return 'dark';
+}
+
+function applyThemeToDom(theme: WorkstationTheme): void {
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.dataset.theme = theme;
+  }
+}
+
+const INITIAL_THEME = resolveInitialTheme();
+applyThemeToDom(INITIAL_THEME);
 
 export const useWorkstationStore = create<WorkstationState>((set) => ({
   authToken: INITIAL_TOKEN,
@@ -104,7 +130,28 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
         badge: 'FINANCIAL_AI',
       };
     }
-    set({ authToken: token, currentUser: user, ...tenantUpdates });
+    set((state) => {
+      const tenantChanged = Boolean(
+        user?.active_tenant && user.active_tenant.id !== state.activeTenant.id
+      );
+      return {
+        authToken: token,
+        currentUser: user,
+        ...tenantUpdates,
+        ...(tenantChanged
+          ? {
+              selectedEntity: null,
+              selectedMemory: null,
+              inspectorOpen: false,
+              inspectorPayload: null,
+              activeTraceId: null,
+              activeFilter: null,
+              tableFilters: {},
+              graphFilters: {},
+            }
+          : {}),
+      };
+    });
   },
   logout: () => {
     if (typeof window !== 'undefined') {
@@ -177,6 +224,24 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
 
   apiMode: 'SCHEMA_FALLBACK',
   setApiMode: (mode) => set({ apiMode: mode }),
+
+  theme: INITIAL_THEME,
+  setTheme: (theme) => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('amsc_theme', theme);
+    }
+    applyThemeToDom(theme);
+    set({ theme });
+  },
+  toggleTheme: () =>
+    set((state) => {
+      const next: WorkstationTheme = state.theme === 'dark' ? 'light' : 'dark';
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('amsc_theme', next);
+      }
+      applyThemeToDom(next);
+      return { theme: next };
+    }),
 
   purgeTenantState: () =>
     set({
