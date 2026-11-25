@@ -399,6 +399,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Production startup failure: Security detection engine is not configured."
             )
 
+        checkpoint_service = getattr(app.state, "pre_action_checkpoint_service", None)
+        if (
+            not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None))
+            or getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Durable pre-action checkpoint service is not configured."
+            )
+
         runtime_cancellation = getattr(app.state, "agent_runtime_cancellation", None)
         if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
             raise RuntimeError(
@@ -637,6 +647,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.detection_repo = None
             app.state.detection_engine = None
 
+    # Pre-action checkpointing: metadata-only in-memory adapter is allowed only
+    # in development/test. Production must inject a durable resource snapshot service.
+    if settings.APP_ENV != "production":
+        from backend.app.security.checkpoints import InMemoryPreActionCheckpointService
+        app.state.pre_action_checkpoint_service = InMemoryPreActionCheckpointService()
+    else:
+        app.state.pre_action_checkpoint_service = getattr(
+            app.state, "pre_action_checkpoint_service", None
+        )
+
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
     app.state.quarantine_service = get_default_quarantine_service()
@@ -852,6 +872,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             all_ready = False
         else:
             deps["detection_engine"] = "ready"
+
+        checkpoint_service = getattr(app_instance.state, "pre_action_checkpoint_service", None)
+        if not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None)):
+            if cfg.APP_ENV == "production":
+                deps["pre_action_checkpoint_service"] = "unavailable"
+                all_ready = False
+            else:
+                deps["pre_action_checkpoint_service"] = "not configured (dev/test)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            deps["pre_action_checkpoint_service"] = "rejected (non-durable in production)"
+            all_ready = False
+        else:
+            deps["pre_action_checkpoint_service"] = (
+                "metadata-only (dev/test)"
+                if getattr(checkpoint_service, "is_in_memory", False)
+                else "ready"
+            )
 
         runtime_cancellation = getattr(app_instance.state, "agent_runtime_cancellation", None)
         if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
