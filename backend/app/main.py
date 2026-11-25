@@ -229,6 +229,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
             app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
 
+        if getattr(app.state, "detection_repo", None) is None:
+            from backend.app.database.repositories.detection import SqlAlchemyDetectionRepository
+            app.state.detection_repo = SqlAlchemyDetectionRepository(session_factory)
+
+        if getattr(app.state, "detection_engine", None) is None:
+            from backend.app.security.detection import DetectionEngine
+            app.state.detection_engine = DetectionEngine(
+                detection_repo=app.state.detection_repo,
+                baseline_repo=app.state.baseline_repo,
+                agent_repo=app.state.agent_repo,
+            )
+
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
             app.state.drift_service = DriftReviewService(SqlDriftReviewStore(session_factory))
