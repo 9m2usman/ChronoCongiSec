@@ -36,6 +36,7 @@ from backend.app.workers.outbox import (
     STATUS_PUBLISHED,
     OutboxProcessor,
     publish_outbox_event,
+    run_worker,
 )
 
 
@@ -546,3 +547,56 @@ async def test_lifespan_starts_and_stops_outbox_worker_when_enabled():
         assert processor._running is False
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publish_idempotency_under_autoflush_false_and_expire_on_commit_true():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(OutboxEvent.__table__.create)
+    # Match production create_session_factory (autoflush=False) and also test expire_on_commit=True
+    session_factory = async_sessionmaker(
+        engine, class_=AsyncSession, autoflush=False, expire_on_commit=True
+    )
+    try:
+        async with session_factory() as session:
+            async with session.begin():
+                ev1 = await publish_outbox_event(
+                    session=session,
+                    tenant_id="tenant-af",
+                    event_type="AF_EVENT",
+                    payload={"seq": 1},
+                    idempotency_key="same-tx-key",
+                )
+                ev2 = await publish_outbox_event(
+                    session=session,
+                    tenant_id="tenant-af",
+                    event_type="AF_EVENT",
+                    payload={"seq": 1},
+                    idempotency_key="same-tx-key",
+                )
+                assert ev1 is ev2
+
+        handled: List[str] = []
+        processor = OutboxProcessor(
+            session_factory,
+            {"AF_EVENT": lambda e: handled.append(e.id)},
+            worker_id="worker-expire",
+        )
+        assert await processor.process_batch() == 1
+        assert len(handled) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_run_worker_refuses_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OUTBOX_WORKER_ENABLED", "false")
+    from backend.app.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        exit_code = await run_worker()
+        assert exit_code == 1
+    finally:
+        get_settings.cache_clear()

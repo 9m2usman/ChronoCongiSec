@@ -7,6 +7,7 @@ Spec: AMSC-DOC-002 TRD Section 14 & 16, AMSC-DOC-005 Section 3.5
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import inspect
 import logging
 import os
 import signal
@@ -66,6 +67,14 @@ async def publish_outbox_event(
     tenant returns the existing event rather than creating a duplicate row.
     """
     if idempotency_key is not None:
+        for pending_obj in session.new:
+            if (
+                isinstance(pending_obj, OutboxEvent)
+                and pending_obj.tenant_id == tenant_id
+                and pending_obj.idempotency_key == idempotency_key
+            ):
+                return pending_obj
+
         existing_stmt = select(OutboxEvent).where(
             OutboxEvent.tenant_id == tenant_id,
             OutboxEvent.idempotency_key == idempotency_key,
@@ -333,6 +342,7 @@ class OutboxProcessor:
                     )
                     claim_res = await session.execute(claim_stmt)
                     if (claim_res.rowcount or 0) == 1:
+                        session.expunge(event)
                         event.status = STATUS_PROCESSING
                         event.locked_by = self.worker_id
                         event.locked_at = now
@@ -370,7 +380,7 @@ class OutboxProcessor:
                     continue
 
                 res = handler(event)
-                if asyncio.iscoroutine(res):
+                if inspect.isawaitable(res):
                     await res
 
                 persisted = await self._persist_published(event, datetime.now(timezone.utc))
@@ -551,7 +561,7 @@ async def run_worker() -> int:
         try:
             loop.add_signal_handler(sig, _handle_signal)
         except (NotImplementedError, RuntimeError):
-            signal.signal(sig, lambda _s, _f: _handle_signal())
+            signal.signal(sig, lambda _s, _f: loop.call_soon_threadsafe(_handle_signal))
 
     try:
         await processor.run_loop(poll_interval_sec=settings.OUTBOX_POLL_INTERVAL_SECONDS)
