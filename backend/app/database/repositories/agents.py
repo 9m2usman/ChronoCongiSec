@@ -162,6 +162,19 @@ class SqlAlchemyAgentRepository(AgentRepositoryProtocol):
                 previous_status = agent.status
                 agent.status = status
                 agent.updated_at = datetime.now(timezone.utc)
+                profile_stmt = (
+                    select(OrmAgentSecurityProfile)
+                    .where(
+                        OrmAgentSecurityProfile.agent_id == agent_id,
+                        OrmAgentSecurityProfile.tenant_id == tenant_id,
+                    )
+                    .with_for_update()
+                )
+                profile = (await session.execute(profile_stmt)).scalar_one_or_none()
+                if profile is None:
+                    raise ValidationError("Agent security profile is missing; isolation cannot be verified.")
+                profile.status = status
+                profile.updated_at = agent.updated_at
                 return previous_status
 
     async def list_agents(
