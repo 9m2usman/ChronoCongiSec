@@ -54,7 +54,7 @@ class ChronoCogniSecClient:
         self._app = app
 
     @property
-    def auth_email(self) -> str:
+    def auth_email(self) -> Optional[str]:
         return self.email
 
     def _is_test_double_mode(self) -> bool:

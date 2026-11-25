@@ -517,6 +517,42 @@ class OutboxProcessor:
             pass
 
 
+PHASE1_OUTBOX_EVENT_TYPES = (
+    "IAM_REGISTRATION_SUBMITTED",
+    "IAM_REGISTRATION_APPROVED",
+    "IAM_REGISTRATION_REJECTED",
+    "AGENT_PROFILE_UPDATED",
+    "TRUST_DECISION_RECORDED",
+    "AUDIT_EVENT_EMITTED",
+)
+
+
+def register_default_outbox_handlers(
+    processor: OutboxProcessor,
+    on_event: Optional[Callable[[OutboxEvent], Any]] = None,
+) -> None:
+    """Register handlers for supported Phase 1 outbox event types.
+
+    Unknown event types remain deliberately unregistered so they move to
+    DEAD_LETTER and are never falsely reported as PUBLISHED.
+    """
+    async def _default_handler(event: OutboxEvent) -> None:
+        logger.info(
+            "outbox_handler_dispatched event_id=%s tenant_id=%s event_type=%s",
+            event.id,
+            event.tenant_id,
+            event.event_type,
+        )
+        if on_event is not None:
+            res = on_event(event)
+            if inspect.isawaitable(res):
+                await res
+
+    for event_type in PHASE1_OUTBOX_EVENT_TYPES:
+        if event_type not in processor.handlers:
+            processor.register_handler(event_type, _default_handler)
+
+
 async def run_worker() -> int:
     """Standalone persistent outbox worker entrypoint."""
     from backend.app.core.config import get_settings
@@ -550,6 +586,7 @@ async def run_worker() -> int:
         lease_seconds=settings.OUTBOX_LEASE_SECONDS,
         batch_size=settings.OUTBOX_BATCH_SIZE,
     )
+    register_default_outbox_handlers(processor)
 
     loop = asyncio.get_running_loop()
 
