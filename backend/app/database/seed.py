@@ -121,24 +121,28 @@ BRANCHES = [
         "id": "branch-ho-001",
         "tenant_id": "tenant-a-uuid-001",
         "name": "Head Office - Core Security",
+        "code": "HO",
         "status": "ACTIVE",
     },
     {
         "id": "branch-lhr-002",
         "tenant_id": "tenant-a-uuid-001",
         "name": "Finance & Regional Operations Branch (Lahore)",
+        "code": "LHR",
         "status": "ACTIVE",
     },
     {
         "id": "branch-khi-003",
         "tenant_id": "tenant-a-uuid-001",
         "name": "Maritime & Logistics Operations Branch (Karachi)",
+        "code": "KHI",
         "status": "ACTIVE",
     },
     {
         "id": "branch-isb-004",
         "tenant_id": "tenant-a-uuid-001",
         "name": "Corporate Affairs & HR Branch (Islamabad)",
+        "code": "ISB",
         "status": "ACTIVE",
     },
 ]
@@ -229,9 +233,7 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
                 full_name=u_data["full_name"],
                 hashed_password=default_pw_hash,
                 status=u_data["status"],
-                is_superadmin=u_data["is_superadmin"],
                 created_at=now,
-                updated_at=now,
             )
             session.add(user)
             stats["users"] += 1
@@ -244,6 +246,7 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
                 id=b_data["id"],
                 tenant_id=b_data["tenant_id"],
                 name=b_data["name"],
+                code=b_data["code"],
                 status=b_data["status"],
                 created_at=now,
             )
