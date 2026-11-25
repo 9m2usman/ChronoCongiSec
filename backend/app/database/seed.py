@@ -261,7 +261,8 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
     # 4. Seed Memberships
     for m_data in MEMBERSHIPS:
         res = await session.execute(select(Membership).where(Membership.id == m_data["id"]))
-        if res.scalar_one_or_none() is None:
+        existing_membership = res.scalar_one_or_none()
+        if existing_membership is None:
             mem = Membership(
                 id=m_data["id"],
                 user_id=m_data["user_id"],
@@ -273,6 +274,9 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
             )
             session.add(mem)
             stats["memberships"] += 1
+        elif existing_membership.branch_id is None:
+            # Backfill only missing demo branch assignments; preserve admin changes.
+            existing_membership.branch_id = m_data["branch_id"]
 
     # 5. Seed Genuine CrewAI Agents
     stats["agents"] = 0
