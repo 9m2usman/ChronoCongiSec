@@ -85,7 +85,13 @@ async def apply_containment(
             "id": outcome.outcome_id,
             "tenant_id": outcome.tenant_id,
             "actor_id": outcome.actor_id or "system",
-            "event_type": "CONTAINMENT_APPLIED",
+            "event_type": (
+                "CONTAINMENT_RECONCILIATION_REQUIRED"
+                if outcome.status.value == "RECONCILIATION_REQUIRED"
+                else "CONTAINMENT_APPLIED"
+                if outcome.success
+                else "CONTAINMENT_FAILED"
+            ),
             "resource_id": outcome.target_id or outcome.incident_id or "",
             "action": outcome.containment_type.value if outcome.containment_type else "CONTAINMENT_BATCH",
             "outcome": outcome.status.value,
