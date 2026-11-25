@@ -209,6 +209,52 @@ class Settings(BaseSettings):
         description="Redis connection URL for distributed locking, rate-limiting, and ephemeral state",
     )
 
+    # --- 7. Persistent Outbox Worker Configuration ---
+    OUTBOX_WORKER_ENABLED: bool = Field(
+        default=False,
+        description="Explicit flag enabling the persistent background outbox worker",
+    )
+    OUTBOX_POLL_INTERVAL_SECONDS: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=60.0,
+        description="Polling interval in seconds when no outbox events are pending",
+    )
+    OUTBOX_BATCH_SIZE: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Maximum number of outbox events claimed per poll batch",
+    )
+    OUTBOX_MAX_ATTEMPTS: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Maximum delivery attempts before moving an outbox event to DEAD_LETTER",
+    )
+    OUTBOX_BACKOFF_BASE_SECONDS: float = Field(
+        default=2.0,
+        ge=0.1,
+        le=300.0,
+        description="Base delay in seconds for bounded exponential retry backoff",
+    )
+    OUTBOX_BACKOFF_MAX_SECONDS: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=86400.0,
+        description="Maximum delay in seconds between outbox event retry attempts",
+    )
+    OUTBOX_LEASE_SECONDS: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description="Lease duration in seconds for claimed outbox events before stale-claim recovery",
+    )
+    OUTBOX_WORKER_ID: str = Field(
+        default="",
+        description="Optional explicit worker identifier for outbox event claiming",
+    )
+
     # --- Pydantic Settings Configuration ---
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -420,6 +466,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Security violation: Production RATE_LIMIT_REDIS_FAILURE_POLICY must be 'fail_closed'."
                 )
+
+        if self.OUTBOX_BACKOFF_MAX_SECONDS < self.OUTBOX_BACKOFF_BASE_SECONDS:
+            raise ValueError(
+                "Configuration error: OUTBOX_BACKOFF_MAX_SECONDS must be >= OUTBOX_BACKOFF_BASE_SECONDS."
+            )
 
         return self
 
