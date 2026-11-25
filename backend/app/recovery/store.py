@@ -206,10 +206,10 @@ class SqlExternalActionReader:
 
 
 class SqlTrustDecisionStore:
-    """Persistent TrustDecisionStore implementation for production recovery services.
+    """Persistent TrustDecisionStore implementation for production recovery and gateway services.
 
-    Persists decisions durably to PostgreSQL `trust_decisions` table while caching
-    in memory for synchronous evaluation compatibility.
+    Persists decisions durably to PostgreSQL `trust_decisions` table. All database
+    writes and reads are awaited and fail closed on persistence errors (never swallowed).
     """
 
     is_persistent: bool = True
@@ -218,31 +218,95 @@ class SqlTrustDecisionStore:
         self.session_factory = session_factory
         self._by_record: Dict[Tuple[str, str], List[TrustDecision]] = {}
 
+    @staticmethod
+    def _serialize_decision(decision: TrustDecision) -> Dict[str, Any]:
+        return {
+            "decision_id": decision.decision_id,
+            "allowed": bool(decision.allowed),
+            "applied": bool(decision.applied),
+            "decision": decision.decision,
+            "reason_codes": list(decision.reason_codes),
+            "reason": decision.reason,
+            "transition_id": decision.transition_id,
+            "current_state": decision.current_state,
+            "stored_state": decision.stored_state,
+            "target_state": decision.target_state,
+            "resulting_state": decision.resulting_state,
+            "record_version": decision.record_version,
+            "version_checksum": decision.version_checksum,
+            "actor_type": decision.actor_type,
+            "actor_id": decision.actor_id,
+            "actor_role": decision.actor_role,
+            "incident_id": decision.incident_id,
+            "evidence_summary": dict(decision.evidence_summary or {}),
+            "policy_version": decision.policy_version,
+            "timestamp": decision.timestamp.isoformat(),
+            "history_available": bool(decision.history_available),
+        }
+
+    @staticmethod
+    def _deserialize_decision(row: TrustDecisionModel) -> TrustDecision:
+        payload = dict(row.evidence_json or {})
+        raw_ts = payload.get("timestamp")
+        if isinstance(raw_ts, str):
+            ts = datetime.fromisoformat(raw_ts)
+        else:
+            ts = row.created_at
+        raw_codes = payload.get("reason_codes")
+        reason_codes = tuple(str(c) for c in raw_codes) if isinstance(raw_codes, (list, tuple)) else (row.reason_code,)
+        return TrustDecision(
+            decision_id=str(payload.get("decision_id") or row.id),
+            allowed=bool(payload.get("allowed", False)),
+            applied=bool(payload.get("applied", False)),
+            decision=str(payload.get("decision") or "DENIED"),
+            reason_codes=reason_codes,
+            reason=str(payload.get("reason") or ""),
+            record_id=row.record_id,
+            tenant_id=row.tenant_id,
+            operation=payload.get("operation", row.operation),
+            transition_id=payload.get("transition_id"),
+            current_state=payload.get("current_state", row.from_state),
+            stored_state=payload.get("stored_state", row.from_state),
+            target_state=payload.get("target_state", row.to_state),
+            resulting_state=payload.get("resulting_state", row.to_state),
+            record_version=payload.get("record_version"),
+            version_checksum=payload.get("version_checksum"),
+            actor_type=payload.get("actor_type"),
+            actor_id=payload.get("actor_id", row.actor_id),
+            actor_role=payload.get("actor_role"),
+            incident_id=payload.get("incident_id"),
+            evidence_summary=dict(payload.get("evidence_summary") or {}),
+            policy_version=str(payload.get("policy_version") or "amsc-trust-policy/1.0.0"),
+            timestamp=ts,
+            history_available=bool(payload.get("history_available", True)),
+        )
+
     async def _persist_decision(self, decision: TrustDecision) -> None:
         if self.session_factory is None:
-            return
-        try:
-            now = datetime.now(timezone.utc)
-            async with self.session_factory() as session:
-                async with session.begin():
-                    db_row = TrustDecisionModel(
-                        id=f"td-{uuid.uuid4().hex[:12]}",
-                        tenant_id=decision.tenant_id,
-                        record_id=decision.record_id,
-                        from_state=decision.from_state,
-                        to_state=decision.to_state,
-                        operation=decision.operation,
-                        actor_id=decision.actor_id,
-                        reason_code=decision.reason_code,
-                        evidence_json=decision.evidence or {},
-                        created_at=now,
-                    )
-                    session.add(db_row)
-        except Exception as exc:
-            import logging
-            logging.getLogger("amsc.recovery.store").warning(
-                "Failed to persist trust decision to PostgreSQL: %s", exc
-            )
+            raise RuntimeError("Trust decision store session factory is not configured.")
+        now = decision.timestamp if isinstance(decision.timestamp, datetime) else datetime.now(timezone.utc)
+        from_state = (decision.current_state or decision.stored_state or "UNKNOWN")[:32]
+        to_state = (decision.resulting_state or decision.target_state or decision.current_state or "UNKNOWN")[:32]
+        operation = (decision.operation or "UNKNOWN")[:64]
+        actor_id = (decision.actor_id or decision.actor_type or "SYSTEM")[:128]
+        reason_code = (decision.reason_codes[0] if decision.reason_codes else "UNKNOWN")[:64]
+        row_id = decision.decision_id[:36] if decision.decision_id and len(decision.decision_id) <= 36 else f"td-{uuid.uuid4().hex[:12]}"
+
+        async with self.session_factory() as session:
+            async with session.begin():
+                db_row = TrustDecisionModel(
+                    id=row_id,
+                    tenant_id=decision.tenant_id,
+                    record_id=decision.record_id,
+                    from_state=from_state,
+                    to_state=to_state,
+                    operation=operation,
+                    actor_id=actor_id,
+                    reason_code=reason_code,
+                    evidence_json=self._serialize_decision(decision),
+                    created_at=now,
+                )
+                session.add(db_row)
 
     def _append_in_memory(self, decision: TrustDecision) -> None:
         if not decision.tenant_id:
@@ -250,53 +314,41 @@ class SqlTrustDecisionStore:
         self._by_record.setdefault((decision.tenant_id, decision.record_id), []).append(decision)
 
     def append(self, decision: TrustDecision) -> None:
-        self._append_in_memory(decision)
         if self.session_factory is not None:
-            try:
-                import asyncio
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._persist_decision(decision))
-            except RuntimeError:
-                pass
+            raise RuntimeError(
+                "SqlTrustDecisionStore requires await aappend() when backed by a database session factory."
+            )
+        self._append_in_memory(decision)
 
     async def aappend(self, decision: TrustDecision) -> None:
-        self._append_in_memory(decision)
+        if not decision.tenant_id:
+            raise ValueError("Trust decisions must be tenant-scoped.")
         await self._persist_decision(decision)
+        self._append_in_memory(decision)
 
     def list_for_record(self, tenant_id: str, record_id: str) -> Sequence[TrustDecision]:
+        if self.session_factory is not None:
+            raise RuntimeError(
+                "SqlTrustDecisionStore requires await alist_for_record() when backed by a database session factory."
+            )
         return tuple(self._by_record.get((tenant_id, record_id), ()))
 
     async def alist_for_record(self, tenant_id: str, record_id: str) -> Sequence[TrustDecision]:
-        if self.session_factory is not None:
-            try:
-                async with self.session_factory() as session:
-                    stmt = select(TrustDecisionModel).where(
-                        TrustDecisionModel.tenant_id == tenant_id,
-                        TrustDecisionModel.record_id == record_id,
-                    ).order_by(TrustDecisionModel.created_at.asc())
-                    rows = (await session.execute(stmt)).scalars().all()
-                    if rows:
-                        decisions = [
-                            TrustDecision(
-                                tenant_id=r.tenant_id,
-                                record_id=r.record_id,
-                                from_state=r.from_state,
-                                to_state=r.to_state,
-                                operation=r.operation,
-                                actor_id=r.actor_id,
-                                reason_code=r.reason_code,
-                                evidence=r.evidence_json or {},
-                            )
-                            for r in rows
-                        ]
-                        self._by_record[(tenant_id, record_id)] = decisions
-                        return tuple(decisions)
-            except Exception as exc:
-                import logging
-                logging.getLogger("amsc.recovery.store").warning(
-                    "Failed to query trust decisions from PostgreSQL: %s", exc
+        if self.session_factory is None:
+            raise RuntimeError("Trust decision store session factory is not configured.")
+        async with self.session_factory() as session:
+            stmt = (
+                select(TrustDecisionModel)
+                .where(
+                    TrustDecisionModel.tenant_id == tenant_id,
+                    TrustDecisionModel.record_id == record_id,
                 )
-        return self.list_for_record(tenant_id, record_id)
+                .order_by(TrustDecisionModel.created_at.asc(), TrustDecisionModel.id.asc())
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            decisions = [self._deserialize_decision(r) for r in rows]
+            self._by_record[(tenant_id, record_id)] = decisions
+            return tuple(decisions)
 
 
 def create_recovery_service(
@@ -517,8 +569,9 @@ def create_in_memory_recovery_service(
 
     memory = memory_repo if memory_repo is not None else get_default_repository()
     if trust_evaluator is None:
-        store = SqlTrustDecisionStore()
-        trust = TrustEvaluator(memory, store)
+        from backend.app.security.trust import InMemoryTrustDecisionStore
+        store = InMemoryTrustDecisionStore()
+        trust = TrustEvaluator(memory, store, app_env="development")
     else:
         trust = trust_evaluator
 
