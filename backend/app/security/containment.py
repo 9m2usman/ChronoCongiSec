@@ -274,8 +274,11 @@ class ContainmentService:
             # Every requested action gets an independent, attributable outcome.
             outcomes = []
             for action in req.containment_actions:
+                action_facts = dict(facts)
+                for key in ("containment_type", "target_id", "previous_state", "resulting_state"):
+                    action_facts.pop(key, None)
                 outcome = await self._apply_containment_action(
-                    context, req, action, facts, persist_evidence
+                    context, req, action, action_facts, persist_evidence
                 )
                 outcomes.append(outcome)
 
@@ -459,12 +462,16 @@ class ContainmentService:
             await persist_evidence(outcome)
             return outcome
 
-        cancellation_result = await cancel(
-            tenant_id=facts["tenant_id"],
-            agent_id=action.target_id,
-            incident_id=request.incident_id,
-            trace_id=request.trace_id,
-        )
+        try:
+            cancellation_result = await cancel(
+                tenant_id=facts["tenant_id"],
+                agent_id=action.target_id,
+                incident_id=request.incident_id,
+                trace_id=request.trace_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Agent work cancellation failed (%s).", type(exc).__name__)
+            cancellation_result = None
         if (
             not isinstance(cancellation_result, Mapping)
             or cancellation_result.get("complete") is not True
@@ -478,7 +485,10 @@ class ContainmentService:
                 (ContainmentReasonCode.RUNTIME_CANCELLATION_UNAVAILABLE,),
                 context,
             )
-            await persist_evidence(outcome)
+            try:
+                await persist_evidence(outcome)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Isolation reconciliation evidence failed (%s).", type(exc).__name__)
             return outcome
 
         outcome = self._outcome(
@@ -495,7 +505,16 @@ class ContainmentService:
             reason_codes=(ContainmentReasonCode.INCIDENT_RESPONSE.value,),
             action_outcomes=(),
         )
-        await persist_evidence(outcome)
+        try:
+            await persist_evidence(outcome)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Agent isolation evidence persistence failed (%s).", type(exc).__name__)
+            return replace(
+                outcome,
+                success=False,
+                status=ContainmentStatus.RECONCILIATION_REQUIRED,
+                reason_codes=(ContainmentReasonCode.ENFORCEMENT_UNAVAILABLE.value,),
+            )
         return outcome
 
     async def _block_actions(
@@ -729,7 +748,11 @@ class ContainmentService:
             reason_codes=tuple(c.value for c in codes),
             tenant_id=context.tenant_id if tenant_ok else None,
             incident_id=getattr(req, "incident_id", None) if req is not None else None,
-            containment_type=facts.get("containment_type"),
+            containment_type=(
+                ContainmentType(facts["containment_type"])
+                if facts.get("containment_type") in {item.value for item in ContainmentType}
+                else None
+            ),
             target_id=facts.get("target_id"),
             previous_state=facts.get("previous_state"),
             resulting_state=facts.get("resulting_state"),
