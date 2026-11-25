@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol, Tuple
 
 from pydantic import (
     BaseModel,
