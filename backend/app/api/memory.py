@@ -93,7 +93,6 @@ async def _persist_memory_detection_incidents(
         AuditEventEntity,
         IncidentEntity,
         IncidentEvidenceEntity,
-        IncidentRepositoryProtocol,
         get_default_incident_repository,
     )
 
