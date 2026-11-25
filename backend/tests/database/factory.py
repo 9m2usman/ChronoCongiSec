@@ -166,10 +166,19 @@ class RowFactory:
         uncaptured plan.
         """
         if table == "detection_results":
-            resolved.setdefault("detection_category", "MEMORY_INTEGRITY")
-            resolved.setdefault("classification_type", "OBSERVATION")
-            resolved.setdefault("severity", "LOW")
-            resolved.setdefault("recommended_outcome", "ALERT_ONLY")
+            # These fields are protected by database CHECK constraints. The generic
+            # random-string generator is unsuitable for constrained vocabularies,
+            # so fixture rows use a valid, inert observation. Callers may override
+            # these values to exercise negative cases.
+            for column, value in {
+                "detection_category": "MEMORY_INTEGRITY",
+                "classification_type": "OBSERVATION",
+                "detection_method": "DETERMINISTIC_RULE",
+                "uncertainty_state": "DEFINITIVE",
+                "severity": "INFORMATIONAL",
+                "recommended_outcome": "ALERT_ONLY",
+            }.items():
+                resolved.setdefault(column, value)
             return
         if table != "recovery_plans" or "pre_recovery_snapshot_json" in resolved:
             return
