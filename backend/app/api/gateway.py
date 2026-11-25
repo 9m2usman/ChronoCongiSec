@@ -118,6 +118,8 @@ async def _emit_gateway_observations(
     execution_status: str,
     result_payload: Optional[Dict[str, Any]] = None,
     branch_id: Optional[str] = None,
+    actor_id: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> None:
     """Persist sanitized, idempotent proposal/decision/receipt observations.
 
@@ -136,9 +138,10 @@ async def _emit_gateway_observations(
         raise SecurityDependencyError("Production gateway observations must use durable persistence.")
 
     clean_params = redact_sensitive_dict(body.parameters) if body.parameters else {}
-    prop_idemp = f"obs-prop-{body.idempotency_key}" if body.idempotency_key else None
-    dec_idemp = f"obs-dec-{body.idempotency_key}" if body.idempotency_key else None
-    exec_idemp = f"obs-exec-{body.idempotency_key}" if body.idempotency_key else None
+    idempotency_digest = hashlib.sha256(body.idempotency_key.encode("utf-8")).hexdigest()[:48]
+    prop_idemp = f"obs-prop-{idempotency_digest}"
+    dec_idemp = f"obs-dec-{idempotency_digest}"
+    exec_idemp = f"obs-exec-{idempotency_digest}"
 
     await obs_repo.record_event({
         "tenant_id": tenant_id,
@@ -156,6 +159,8 @@ async def _emit_gateway_observations(
             "operation": body.operation,
             "parameters": clean_params,
             "memory_refs": body.memory_refs,
+            "actor_id": actor_id,
+            "actor_role": actor_role,
         },
     })
 
@@ -178,6 +183,8 @@ async def _emit_gateway_observations(
             "decision": str(decision_val),
             "reason_codes": reason_codes,
             "execution_status": execution_status,
+            "actor_id": actor_id,
+            "actor_role": actor_role,
         },
     })
 
@@ -198,6 +205,8 @@ async def _emit_gateway_observations(
             "payload_json": {
                 "execution_status": execution_status,
                 "result": clean_result,
+                "actor_id": actor_id,
+                "actor_role": actor_role,
             },
         })
 
@@ -1606,7 +1615,7 @@ async def propose_tool_action(
             # adapter. If observation persistence fails, no protected side effect runs.
             await _emit_gateway_observations(
                 request, tenant_id, body, proposal_id, _decision,
-                "PENDING_EXECUTION", None, context.branch_id,
+                "PENDING_EXECUTION", None, context.branch_id, context.user_id, context.role,
             )
         except (HTTPException, AMSCException, SecurityDependencyError):
             raise
@@ -1641,7 +1650,7 @@ async def propose_tool_action(
                 status_code=500,
             ) from exc
         await _emit_gateway_observations(
-            request, tenant_id, body, proposal_id, decision, record["execution_status"], None, context.branch_id
+            request, tenant_id, body, proposal_id, decision, record["execution_status"], None, context.branch_id, context.user_id, context.role
         )
         return response(record["decision"], record["execution_status"], list(decision.reason_codes))
 
@@ -1751,7 +1760,7 @@ async def propose_tool_action(
         execution=execution_entity, execution_status=execution_status,
     )
     await _emit_gateway_observations(
-        request, tenant_id, body, proposal_id, decision, execution_status, result_payload, context.branch_id
+        request, tenant_id, body, proposal_id, decision, execution_status, result_payload, context.branch_id, context.user_id, context.role
     )
     return response(record["decision"], execution_status, list(outcome.reason_codes), result_payload)
 
