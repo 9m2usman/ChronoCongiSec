@@ -20,6 +20,7 @@ from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.integrity import sha256_hex
 from backend.app.memory.repository import InMemoryMemoryRepository
+from backend.app.memory.models import SourceRecord
 
 
 @pytest.fixture
@@ -34,6 +35,17 @@ def app_and_client(repo):
     settings = get_settings()
     app = create_app(settings)
     app.state.memory_repo = repo
+    # Seed an explicitly inactive source for GAP-003 source-state validation.
+    repo.create_source(
+        SourceRecord(
+            id="src-inactive-001",
+            tenant_id="tenant-a-uuid-001",
+            name="Inactive test source",
+            source_type="DOCUMENT_FEED",
+            trust_state="UNVERIFIED",
+            status="INACTIVE",
+        )
+    )
     # Memory ingestion now resolves caller-supplied agent IDs against the
     # authoritative tenant-scoped agent registry (not the memory repository).
     agent_repo = InMemoryAgentRepository()
