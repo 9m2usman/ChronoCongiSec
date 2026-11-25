@@ -35,3 +35,15 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
     def pytest_collectreport(report):
         if report.failed:
             _annotate(report.nodeid or "collection", report.longrepr)
+
+    def pytest_terminal_summary(terminalreporter, exitstatus, config):
+        counts = {}
+        phase3 = {}
+        for key in ("passed", "failed", "error", "skipped"):
+            reports = terminalreporter.stats.get(key, [])
+            counts[key] = len(reports)
+            phase3[key] = sum(1 for r in reports if "phase3" in getattr(r, "nodeid", ""))
+        _sys.__stdout__.write(
+            "\n" + f"::notice title=pytest summary::all={counts} phase3={phase3} exit={int(exitstatus)}\n"
+        )
+        _sys.__stdout__.flush()
