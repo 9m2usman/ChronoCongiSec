@@ -96,7 +96,7 @@ def run_enterprise_demo() -> dict:
         base_dir = Path(tmp)
         db_path, files_dir = _setup_simulated_enterprise(base_dir)
 
-        settings = Settings(APP_ENV="test")
+        settings = Settings(APP_ENV="test", DATABASE_URL="")
         app = create_app(settings)
         auth_repo = get_default_auth_repository()
         tenant_id = "tenant-acme-demo-001"

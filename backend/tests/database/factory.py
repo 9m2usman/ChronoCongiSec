@@ -165,6 +165,12 @@ class RowFactory:
         hash is computed by PostgreSQL. Pass ``pre_recovery_snapshot_json="{}"`` for an
         uncaptured plan.
         """
+        if table == "detection_results":
+            resolved.setdefault("detection_category", "MEMORY_INTEGRITY")
+            resolved.setdefault("classification_type", "OBSERVATION")
+            resolved.setdefault("severity", "LOW")
+            resolved.setdefault("recommended_outcome", "ALERT_ONLY")
+            return
         if table != "recovery_plans" or "pre_recovery_snapshot_json" in resolved:
             return
         if not any(c.name == "pre_recovery_snapshot_sha256" for c in self.schema.columns[table]):

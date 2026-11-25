@@ -72,7 +72,7 @@ def test_enterprise_onboarding_discovery_sync_conflict_and_impact():
         (files_dir / "policy_a.md").write_text("Max_Transfer_Limit: 500 USD\n", encoding="utf-8")
         (files_dir / "policy_b.md").write_text("Max_Transfer_Limit: 1200 USD\n", encoding="utf-8")
 
-        settings = Settings(APP_ENV="test")
+        settings = Settings(APP_ENV="test", DATABASE_URL="")
         app = create_app(settings)
         _, admin_headers = _seed_user("tenant-a-uuid-001", "TENANT_ADMIN", settings)
         _, dev_headers = _seed_user("tenant-a-uuid-001", "AI_DEVELOPER", settings)
@@ -239,7 +239,7 @@ def test_database_connector_least_privilege_empty_allowed_tables():
         conn.commit()
         conn.close()
 
-        settings = Settings(APP_ENV="test")
+        settings = Settings(APP_ENV="test", DATABASE_URL="")
         app = create_app(settings)
         _, admin_headers = _seed_user("tenant-lp-001", "TENANT_ADMIN", settings)
 
