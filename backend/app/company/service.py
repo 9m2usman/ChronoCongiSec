@@ -24,6 +24,7 @@ from backend.app.core.exceptions import (
 )
 from backend.app.database.models.baseline import ObservationEvent
 from backend.app.database.models.company import (
+    CompanyActivity,
     CompanyFile,
     CompanyFileTransfer,
     CompanyFileVersion,
@@ -581,6 +582,17 @@ class CompanyResourceService:
             )
             session.add(file_row)
             session.add(ver_row)
+            session.add(CompanyActivity(
+                id=f"cact-{uuid.uuid4().hex[:24]}",
+                tenant_id=tenant_id,
+                branch_id=ws.branch_id,
+                actor_user_id=user_id,
+                event_type="FILE_CREATED",
+                resource_type="FILE",
+                resource_id=file_id,
+                summary=f"Created file: {name}",
+                details={"workspace_id": workspace_id, "version": 1, "content_sha256": checksum},
+            ))
             await session.commit()
 
         return {
@@ -1078,8 +1090,20 @@ class CompanyResourceService:
                 mandatory=True,
             )
             task.status = new_status
+            previous_assignee = task.assigned_to_user_id
             if assigned_to_user_id is not None:
                 task.assigned_to_user_id = assigned_to_user_id
+                if assigned_to_user_id != previous_assignee and assigned_to_user_id != user_id:
+                    session.add(CompanyNotification(
+                        id=f"cnot-{uuid.uuid4().hex[:24]}",
+                        tenant_id=tenant_id,
+                        user_id=assigned_to_user_id,
+                        event_type="TASK_ASSIGNED",
+                        title="Task assigned to you",
+                        body=f"Task '{task.title}' was assigned to you.",
+                        resource_type="TASK",
+                        resource_id=task_id,
+                    ))
             task.updated_at = datetime.now(timezone.utc)
             session.add(
                 CompanyTaskEvent(
