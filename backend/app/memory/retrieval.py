@@ -89,6 +89,24 @@ def retrieve_memory(
 
     verified_records: List[MemoryRecord] = []
     for record in records:
+        if not for_forensic and hasattr(repo, "get_edges_for_record"):
+            edges_res = repo.get_edges_for_record(record.id, tenant_id)
+            if isinstance(edges_res, (list, tuple)):
+                has_restricted_parent = False
+                for edge in edges_res:
+                    if getattr(edge, "to_record_id", None) == record.id:
+                        parent_res = repo.get_record(edge.from_record_id, tenant_id)
+                        if hasattr(parent_res, "trust_state"):
+                            p_state = (
+                                parent_res.trust_state.value
+                                if hasattr(parent_res.trust_state, "value")
+                                else str(parent_res.trust_state)
+                            )
+                            if p_state in {TrustState.QUARANTINED.value, TrustState.REJECTED.value}:
+                                has_restricted_parent = True
+                                break
+                if has_restricted_parent:
+                    continue
         versions = repo.get_versions(record.id, tenant_id)
         for ver in versions:
             expected_checksum = ver.checksum
@@ -151,6 +169,20 @@ def get_memory_detail(
             )
 
     edges = repo.get_edges_for_record(record_id, tenant_id)
+    if not (for_forensic or allow_quarantined) and isinstance(edges, (list, tuple)):
+        for edge in edges:
+            if getattr(edge, "to_record_id", None) == record_id:
+                parent_res = repo.get_record(edge.from_record_id, tenant_id)
+                if hasattr(parent_res, "trust_state"):
+                    p_state = (
+                        parent_res.trust_state.value
+                        if hasattr(parent_res.trust_state, "value")
+                        else str(parent_res.trust_state)
+                    )
+                    if p_state in {TrustState.QUARANTINED.value, TrustState.REJECTED.value}:
+                        raise MemoryNotFoundError(
+                            f"Memory record '{record_id}' not found for tenant '{tenant_id}'."
+                        )
     return AwaitableTuple((record, versions, edges))
 
 

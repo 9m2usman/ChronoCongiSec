@@ -260,15 +260,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
 
-        # Phase 3: agent-mediated company operations are a protected gateway tool. The
-        # adapter exists only when company persistence exists; without it the tool stays
-        # unregistered and M4 blocks every proposal (TOOL_NOT_REGISTERED, fail closed).
-        if getattr(app.state, "tool_registry", None) is None:
-            from backend.app.api.gateway import ToolAdapterRegistry
-            from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+        if getattr(app.state, "pre_action_checkpoint_service", None) is None:
+            from backend.app.security.checkpoints import SqlPreActionCheckpointService
+            app.state.pre_action_checkpoint_service = SqlPreActionCheckpointService(session_factory)
+
+        if getattr(app.state, "company_resource_security_adapter", None) is None:
+            from backend.app.company.service import SqlCompanyResourceIsolationAdapter
+            app.state.company_resource_security_adapter = SqlCompanyResourceIsolationAdapter(session_factory)
+
+        if getattr(app.state, "company_resource_service", None) is None:
+            from backend.app.company.service import CompanyResourceService
+            app.state.company_resource_service = CompanyResourceService(
+                session_factory,
+                isolation_adapter=app.state.company_resource_security_adapter,
+                observation_repo=app.state.observation_repo,
+                checkpoint_service=app.state.pre_action_checkpoint_service,
+            )
+
+        if getattr(app.state, "agent_runtime_cancellation", None) is None:
+            from backend.app.security.runtime_cancellation import SqlAgentRuntimeCancellationService
+            app.state.agent_runtime_cancellation = SqlAgentRuntimeCancellationService(
+                session_factory,
+                observation_repo=app.state.observation_repo,
+            )
+
+        # Phase 3: keep the protected company tool registered while Phase 4
+        # wires its observation, checkpoint, isolation, and cancellation services.
+        # A custom registry may already contain other adapters; preserve them.
+        from backend.app.api.gateway import ToolAdapterRegistry
+        from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+
+        tool_registry = getattr(app.state, "tool_registry", None)
+        if tool_registry is None:
             tool_registry = ToolAdapterRegistry()
-            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
-            app.state.tool_registry = tool_registry
+        if tool_registry.get_adapter(TOOL_NAME) is None:
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(
+                session_factory,
+                company_service=app.state.company_resource_service,
+            ))
+        app.state.tool_registry = tool_registry
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers

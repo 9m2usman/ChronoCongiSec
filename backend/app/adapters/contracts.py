@@ -168,8 +168,27 @@ class CrewAIAdapterContract(AgentIntegrationContract):
 class LangGraphAdapterContract(AgentIntegrationContract):
     """Specification contract for LangGraph state graph tool execution nodes."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        cancellation_service: Any = None,
+        tenant_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
+    ) -> None:
         super().__init__(runtime_name="LANGGRAPH")
+        self._cancelled = False
+        self._cancellation_service = cancellation_service
+        self._tenant_id = tenant_id
+        self._execution_id = execution_id
+
+    def cancel(self) -> bool:
+        """Signal cancellation for this LangGraph execution node."""
+        self._cancelled = True
+        return True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled
 
     def build_w3c_trace_headers(self, trace_id: Optional[str] = None) -> Dict[str, str]:
         tid = trace_id or uuid.uuid4().hex
@@ -183,6 +202,35 @@ class LangGraphAdapterContract(AgentIntegrationContract):
         client: Any,
     ) -> ActionReceipt:
         """Translates LangGraph tool call into canonical AMSC action proposal."""
+        if self._cancelled:
+            return ActionReceipt(
+                action_id=proposal.action_id,
+                proposal_id="",
+                decision="BLOCK",
+                memory_trust="UNVERIFIED",
+                policy_result="DENIED",
+                reasons=["EXECUTION_CANCELLED"],
+                execution_status="NOT_EXECUTED",
+                result=None,
+            )
+        if (
+            self._cancellation_service is not None
+            and self._tenant_id
+            and await self._cancellation_service.is_execution_cancelled(
+                self._tenant_id, proposal.agent_id, self._execution_id
+            )
+        ):
+            self._cancelled = True
+            return ActionReceipt(
+                action_id=proposal.action_id,
+                proposal_id="",
+                decision="BLOCK",
+                memory_trust="UNVERIFIED",
+                policy_result="DENIED",
+                reasons=["EXECUTION_CANCELLED"],
+                execution_status="NOT_EXECUTED",
+                result=None,
+            )
         res = client.propose_tool_action(
             agent_id=proposal.agent_id,
             tool_name=proposal.tool_name,

@@ -23,6 +23,7 @@ from enum import Enum
 import inspect
 import json
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
 import uuid
 
@@ -777,6 +778,10 @@ class NativeTask:
 # Compatible Crew Definition
 # ============================================================================
 
+class CrewExecutionCancelledError(RuntimeError):
+    """Raised when an active CrewAI execution is cancelled by security containment."""
+
+
 class NativeCrew:
     """Genuine CrewAI Crew coordinating multi-agent task execution."""
 
@@ -800,6 +805,16 @@ class NativeCrew:
         self.verbose = verbose
         self.manager_llm = manager_llm
         self.config = config or {}
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> bool:
+        """Signal cancellation to stop any active or pending task in this crew."""
+        self._cancel_event.set()
+        return True
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     def kickoff(self, inputs: Optional[Dict[str, Any]] = None) -> CrewOutput:
         """Execute all tasks in sequence, interpolating inputs into task descriptions."""
@@ -809,6 +824,8 @@ class NativeCrew:
 
         # Interpolate variables into task descriptions
         for task in self.tasks:
+            if self._cancel_event.is_set():
+                raise CrewExecutionCancelledError("Crew execution cancelled by security containment.")
             desc = task.description
             for k, v in inputs.items():
                 desc = desc.replace(f"{{{k}}}", str(v))
@@ -819,6 +836,8 @@ class NativeCrew:
             task_outputs.append(output)
             cumulative_context += f"\nOutput of task [{task.name}]:\n{output.raw}\n"
 
+        if self._cancel_event.is_set():
+            raise CrewExecutionCancelledError("Crew execution cancelled by security containment.")
         final_output = task_outputs[-1] if task_outputs else None
         return CrewOutput(
             raw=final_output.raw if final_output else "",
