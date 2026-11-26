@@ -50,17 +50,20 @@ export class ForensicErrorBoundary extends Component<Props, State> {
 
   public render() {
     if (this.state.hasError) {
-      const isWebGLError = this.props.is3dView && (!this.state.webGlSupported || this.state.error?.message.toLowerCase().includes('webgl'));
+      const isWebGLError =
+        this.props.is3dView &&
+        (!this.state.webGlSupported || this.state.error?.message.toLowerCase().includes('webgl'));
 
       return (
-        <div className="flex flex-col items-center justify-center p-8 bg-slate-900/80 border border-amber-500/30 rounded-lg text-slate-200">
-          <div className="p-3 bg-amber-500/10 rounded-full border border-amber-500/30 text-amber-400 mb-3">
+        <div className="flex flex-col items-center justify-center p-8 bg-surface border border-status-warning/40 rounded-lg text-ink">
+          <div className="p-3 bg-status-warningBg rounded-full border border-status-warning/40 text-status-warning mb-3">
             <AlertTriangle className="w-8 h-8" />
           </div>
-          <h3 className="text-base font-semibold text-slate-100 mb-1">
-            {this.props.fallbackTitle || (isWebGLError ? '3D WebGL Acceleration Unavailable' : 'Forensic Component Fault')}
+          <h3 className="text-base font-semibold text-ink mb-1">
+            {this.props.fallbackTitle ||
+              (isWebGLError ? '3D WebGL Acceleration Unavailable' : 'Forensic Component Fault')}
           </h3>
-          <p className="text-xs text-slate-400 max-w-md text-center mb-4 font-mono">
+          <p className="text-xs text-ink-muted max-w-md text-center mb-4 font-mono">
             {isWebGLError
               ? 'Your browser or GPU context does not support hardware-accelerated WebGL3D rendering. Automatic fallback to 2D DAG topological view is recommended.'
               : this.state.error?.message || 'An unexpected rendering error occurred inside this visualization.'}
@@ -68,7 +71,7 @@ export class ForensicErrorBoundary extends Component<Props, State> {
           <div className="flex items-center gap-3">
             <button
               onClick={this.handleReset}
-              className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-mono font-medium rounded border border-slate-700 text-slate-200 transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 bg-elevated hover:bg-brand-tint text-xs font-mono font-medium rounded border border-borderc text-ink transition-colors"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Retry Render
             </button>

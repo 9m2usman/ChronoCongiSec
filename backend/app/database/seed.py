@@ -59,28 +59,24 @@ USERS = [
         "email": "sarah.admin@alphacorp.com",
         "full_name": "Sarah Chen",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-alex-02",
         "email": "alex.analyst@alphacorp.com",
         "full_name": "Alex Mercer",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-dev-dave-03",
         "email": "dave.developer@alphacorp.com",
         "full_name": "Dave Miller",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
     {
         "id": "usr-analyst-comp-a",
         "email": "analyst@company-a.com",
         "full_name": "Alice Analyst",
         "status": "ACTIVE",
-        "is_superadmin": False,
     },
 ]
 
@@ -390,6 +386,64 @@ async def seed_database(session: AsyncSession) -> Dict[str, int]:
                 created_at=now,
             )
             session.add(perm)
+
+    # 7b. Phase 3: protected company-operations tool (server-side adapter reached only
+    # through the gateway). Grants follow the seeded agents' approved purposes; the
+    # adapter additionally enforces each agent profile's branch data scope.
+    res_company_tool = await session.execute(
+        select(ToolRegistration).where(
+            ToolRegistration.tenant_id == "tenant-a-uuid-001",
+            ToolRegistration.name == "company_workspace",
+        )
+    )
+    company_tool = res_company_tool.scalar_one_or_none()
+    if company_tool is None:
+        company_tool = ToolRegistration(
+            id="tool-company-workspace",
+            tenant_id="tenant-a-uuid-001",
+            name="company_workspace",
+            adapter_type="INTERNAL",
+            description="Protected company files, tasks, handoffs, messages and file transfers",
+            is_protected=True,
+            schema_definition={
+                "type": "object",
+                "description": "Operation-specific parameters; scope is derived from the authenticated context.",
+            },
+            created_at=now,
+        )
+        session.add(company_tool)
+        await session.flush()
+
+    company_grants = [
+        # Branch Operations Specialist: full branch workspace operations in its own branch.
+        ("agent-crew-branch-004", ",".join([
+            "list_workspaces", "list_files", "read_file", "create_file", "update_file",
+            "transfer_file", "create_task", "update_task_status", "handoff_task",
+            "send_message", "read_inbox",
+        ])),
+        # Enterprise Workflow Coordinator: cross-department task coordination and messaging.
+        ("agent-crew-coord-005", ",".join([
+            "list_workspaces", "list_files", "read_file", "create_task",
+            "update_task_status", "handoff_task", "send_message", "read_inbox",
+        ])),
+    ]
+    for aid, ops in company_grants:
+        res_perm = await session.execute(
+            select(AgentToolPermission).where(
+                AgentToolPermission.agent_id == aid,
+                AgentToolPermission.tool_id == company_tool.id,
+            )
+        )
+        if res_perm.scalar_one_or_none() is None:
+            session.add(AgentToolPermission(
+                id=f"perm-{aid[:16]}-company",
+                tenant_id="tenant-a-uuid-001",
+                agent_id=aid,
+                tool_id=company_tool.id,
+                allowed_operations=ops,
+                constraints_json={},
+                created_at=now,
+            ))
 
     # 7. Seed Canonical Knowledge Sources (Document 05 Table 5)
     stats["sources"] = 0

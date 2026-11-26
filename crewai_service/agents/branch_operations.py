@@ -32,6 +32,10 @@ from crewai_service.telemetry.tracer import get_tracer
 from crewai_service.tools.amsc_client import ChronoCogniSecClient
 from crewai_service.tools.branch_tools import BranchToolFactory
 from crewai_service.tools.escalation_tools import EscalationToolFactory
+from crewai_service.tools.company_tools import (
+    BRANCH_OPERATIONS_COMPANY_OPERATIONS,
+    CompanyWorkspaceToolFactory,
+)
 
 logger = logging.getLogger("amsc.crewai.agent.branch")
 
@@ -76,6 +80,10 @@ def build_branch_operations_agent(
         branch_tools.create_branch_inspection_tool(),
         branch_tools.create_head_office_sync_tool(),
         esc_tools.create_escalation_tool(agent_id=agent_id, agent_role="Branch Operations Specialist"),
+        # Phase 3: protected company workspace operations, executed only via the gateway.
+        *CompanyWorkspaceToolFactory(client=resolved_client, agent_id=agent_id).create_tools(
+            BRANCH_OPERATIONS_COMPANY_OPERATIONS
+        ),
     ]
 
     agent = Agent(
