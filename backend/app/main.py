@@ -28,6 +28,7 @@ from backend.app.api.auth import router as auth_router
 from backend.app.api.baseline import router as baseline_router
 from backend.app.api.branches import router as branches_router
 from backend.app.api.chronimem import router as chronimem_router
+from backend.app.api.company import router as company_router
 from backend.app.api.containment import router as containment_router
 from backend.app.api.detection import router as detection_router
 from backend.app.api.drift import router as drift_router
@@ -258,6 +259,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "trust_decision_store", None) is None:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
+
+        # Phase 3: agent-mediated company operations are a protected gateway tool. The
+        # adapter exists only when company persistence exists; without it the tool stays
+        # unregistered and M4 blocks every proposal (TOOL_NOT_REGISTERED, fail closed).
+        if getattr(app.state, "tool_registry", None) is None:
+            from backend.app.api.gateway import ToolAdapterRegistry
+            from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+            tool_registry = ToolAdapterRegistry()
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
+            app.state.tool_registry = tool_registry
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
@@ -1056,6 +1067,7 @@ def create_app(
     api_router.include_router(recovery_router)
     api_router.include_router(audit_router)
     api_router.include_router(chronimem_router)
+    api_router.include_router(company_router)
     api_router.include_router(containment_router)
     api_router.include_router(knowledge_router)
 

@@ -690,6 +690,9 @@ class SqlAlchemyGatewayRepository:
                     trace_id=proposal.trace_id,
                 )
                 session.add(db_prop)
+                # The ORM does not order these inserts by the composite tenant FKs: insert the
+                # parent proposal first or PostgreSQL rejects the decision (fk_policy_decisions_*).
+                await session.flush()
 
                 db_dec = DbPolicyDecision(
                     id=decision.id,
@@ -703,6 +706,7 @@ class SqlAlchemyGatewayRepository:
                     execution_status=decision.execution_status,
                 )
                 session.add(db_dec)
+                await session.flush()
 
                 if execution:
                     db_exec = DbToolExecution(
@@ -1747,6 +1751,11 @@ async def propose_tool_action(
                     "proposal_id": proposal_id,
                     "trace_id": body.trace_id,
                     "grant_id": grant_id,
+                    # Phase 3: authenticated principal for server-side scope checks.
+                    # Never taken from the proposal body.
+                    "user_id": context.user_id,
+                    "role": context.role,
+                    "branch_id": getattr(context, "branch_id", None),
                 },
             ),
             timeout=timeout,
