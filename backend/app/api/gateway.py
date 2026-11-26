@@ -1504,6 +1504,61 @@ async def propose_tool_action(
     decision = await engine.evaluate(proposal, context, approval=approval_evidence)
     record = decision.to_persistence_record()
 
+    # Enforce active company resource isolation and runtime cancellation in gateway
+    extra_block_codes: List[str] = []
+    extra_block_reasons: List[str] = []
+
+    runtime_cancellation = getattr(request.app.state, "agent_runtime_cancellation", None)
+    if runtime_cancellation is not None and callable(
+        getattr(runtime_cancellation, "is_agent_cancelled", None)
+    ):
+        try:
+            if await runtime_cancellation.is_agent_cancelled(tenant_id, body.agent_id):
+                extra_block_codes.append("AGENT_RUNTIME_CANCELLED")
+                extra_block_reasons.append(
+                    f"Agent '{body.agent_id}' runtime work is cancelled under active containment."
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Gateway runtime cancellation check failed: %s", exc)
+            extra_block_codes.append("AGENT_RUNTIME_CANCELLED")
+            extra_block_reasons.append("Runtime cancellation verification failed (fail closed).")
+
+    resource_iso_adapter = getattr(request.app.state, "company_resource_security_adapter", None)
+    if resource_iso_adapter is not None and callable(
+        getattr(resource_iso_adapter, "is_resource_isolated", None)
+    ):
+        from backend.app.security.checkpoints import _extract_candidate_resource_ids
+        candidate_resources = _extract_candidate_resource_ids(body.parameters)
+        for rtype, rids in candidate_resources.items():
+            for rid in rids:
+                try:
+                    if await resource_iso_adapter.is_resource_isolated(tenant_id, rtype, rid):
+                        extra_block_codes.append("COMPANY_RESOURCE_ISOLATED")
+                        extra_block_reasons.append(
+                            f"Target {rtype} '{rid}' is isolated under active security containment."
+                        )
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Gateway resource isolation check failed: %s", exc)
+                    extra_block_codes.append("COMPANY_RESOURCE_ISOLATED")
+                    extra_block_reasons.append("Resource isolation verification failed (fail closed).")
+                    break
+
+    if extra_block_codes:
+        from dataclasses import replace
+        record["decision"] = "BLOCK"
+        record["execution_status"] = "NOT_EXECUTED"
+        dedup_codes = list(dict.fromkeys(extra_block_codes))
+        existing_reasons = list(record.get("reasons_json") or [])
+        record["reasons_json"] = dedup_codes + [r for r in existing_reasons if r not in dedup_codes] + extra_block_reasons
+        combined_codes = tuple(dedup_codes + [c for c in decision.reason_codes if c not in dedup_codes])
+        decision = replace(
+            decision,
+            outcome=PolicyOutcome.BLOCK,
+            execution_eligible=False,
+            reason_codes=combined_codes,
+        )
+
     # Fail closed: If detection engine found confirmed security incident or policy violation recommending BLOCK
     has_blocking_detection = any(
         d.recommended_outcome == RecommendedOutcome.BLOCK

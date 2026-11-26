@@ -134,21 +134,24 @@ _SENSITIVE_PARAM_KEYS = frozenset({
 })
 
 
-def _sanitize_parameters_for_hash(params: Mapping[str, Any]) -> Dict[str, Any]:
-    sanitized: Dict[str, Any] = {}
-    for k, v in params.items():
-        if str(k).lower() in _SENSITIVE_PARAM_KEYS:
-            sanitized[str(k)] = "[REDACTED]"
-        elif isinstance(v, Mapping):
-            sanitized[str(k)] = _sanitize_parameters_for_hash(v)
-        else:
-            sanitized[str(k)] = v
-    return sanitized
+def _sanitize_parameters_for_hash(params: Any) -> Any:
+    if isinstance(params, Mapping):
+        sanitized: Dict[str, Any] = {}
+        for k, v in params.items():
+            if str(k).lower() in _SENSITIVE_PARAM_KEYS:
+                sanitized[str(k)] = "[REDACTED]"
+            else:
+                sanitized[str(k)] = _sanitize_parameters_for_hash(v)
+        return sanitized
+    if isinstance(params, (list, tuple)):
+        return [_sanitize_parameters_for_hash(item) for item in params]
+    return params
 
 
 def _extract_candidate_resource_ids(parameters: Mapping[str, Any]) -> Dict[str, List[str]]:
     candidates: Dict[str, List[str]] = {
         "FILE": [],
+        "FILE_VERSION": [],
         "FILE_TRANSFER": [],
         "TASK": [],
         "WORKSPACE": [],
@@ -157,6 +160,7 @@ def _extract_candidate_resource_ids(parameters: Mapping[str, Any]) -> Dict[str, 
     }
     key_map = {
         "file_id": "FILE",
+        "file_version_id": "FILE_VERSION",
         "transfer_id": "FILE_TRANSFER",
         "file_transfer_id": "FILE_TRANSFER",
         "task_id": "TASK",
@@ -284,7 +288,26 @@ class SqlPreActionCheckpointService:
                         "name": row.name,
                         "current_version": row.current_version,
                         "status": row.status,
+                        "version_id": ver.id if ver else None,
                         "version_checksum": ver.checksum if ver else None,
+                    })
+
+            for fvid in candidates.get("FILE_VERSION", []):
+                ver_row = (
+                    await session.execute(
+                        select(CompanyFileVersion).where(
+                            CompanyFileVersion.tenant_id == tenant_id,
+                            CompanyFileVersion.id == fvid,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if ver_row is not None:
+                    captured_resources.append({
+                        "resource_type": "FILE_VERSION",
+                        "resource_id": ver_row.id,
+                        "file_id": ver_row.file_id,
+                        "version_number": ver_row.version_number,
+                        "checksum": ver_row.checksum,
                     })
 
             for tr_id in candidates.get("FILE_TRANSFER", []):
@@ -305,6 +328,23 @@ class SqlPreActionCheckpointService:
                         "recipient_user_id": row.recipient_user_id,
                         "status": row.status,
                     })
+                    if row.file_id not in candidates.get("FILE", []):
+                        file_row = (
+                            await session.execute(
+                                select(CompanyFile).where(
+                                    CompanyFile.tenant_id == tenant_id,
+                                    CompanyFile.id == row.file_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if file_row is not None:
+                            captured_resources.append({
+                                "resource_type": "FILE",
+                                "resource_id": file_row.id,
+                                "workspace_id": file_row.workspace_id,
+                                "current_version": file_row.current_version,
+                                "status": file_row.status,
+                            })
 
             for tid in candidates.get("TASK", []):
                 row = (

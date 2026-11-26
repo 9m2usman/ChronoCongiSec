@@ -431,7 +431,7 @@ async def test_runtime_cancellation_stops_crewai_langgraph_queued_and_partial(tm
             )
         async with session_factory() as session:
             outbox_row = (await session.execute(select(OutboxEvent).where(OutboxEvent.id == job_id))).scalar_one()
-            assert outbox_row.status == "FAILED"
+            assert outbox_row.status in {"FAILED", "DEAD_LETTER"}
 
         # Partial cancellation failure is NOT reported as complete
         await cancel_svc.register_execution(

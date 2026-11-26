@@ -378,10 +378,43 @@ class CompanyResourceService:
         *,
         isolation_adapter: Optional[SqlCompanyResourceIsolationAdapter] = None,
         observation_repo: Any = None,
+        checkpoint_service: Any = None,
     ) -> None:
         self._session_factory = session_factory
         self._isolation_adapter = isolation_adapter or SqlCompanyResourceIsolationAdapter(session_factory)
         self._observation_repo = observation_repo
+        self._checkpoint_service = checkpoint_service
+
+    async def _capture_checkpoint_if_configured(
+        self,
+        *,
+        context: TenantContext,
+        operation: str,
+        parameters: Mapping[str, Any],
+        agent_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> None:
+        if self._checkpoint_service is None:
+            return
+        capture = getattr(self._checkpoint_service, "capture_pre_action_checkpoint", None)
+        if not callable(capture):
+            raise SecurityDependencyError("Pre-action checkpoint service is unavailable.")
+        res = await capture(
+            tenant_id=context.tenant_id,
+            branch_id=context.branch_id,
+            actor_id=f"user:{context.user_id}",
+            agent_id=agent_id or "",
+            proposal_id=f"company-prop-{uuid.uuid4().hex[:16]}",
+            action_id=f"company-act-{uuid.uuid4().hex[:16]}",
+            trace_id=trace_id,
+            idempotency_key=f"company-chk-{operation}-{uuid.uuid4().hex[:16]}",
+            tool_name="company_service",
+            operation=operation,
+            parameters=parameters,
+            memory_refs=[],
+        )
+        if not isinstance(res, Mapping) or res.get("committed") is not True:
+            raise SecurityDependencyError("Pre-action checkpoint failed to commit.")
 
     @staticmethod
     def _require_context(context: TenantContext) -> tuple[str, Optional[str], str]:
@@ -605,6 +638,8 @@ class CompanyResourceService:
                     )
                 )
             ).scalar_one_or_none()
+            if ver is not None:
+                await self._require_not_isolated(tenant_id, [("FILE_VERSION", ver.id)])
 
         await self._emit_observation(
             context=context,
@@ -629,6 +664,7 @@ class CompanyResourceService:
             "branch_id": ws.branch_id,
             "name": file_row.name,
             "current_version": file_row.current_version,
+            "current_version_id": ver.id if ver else None,
             "status": file_row.status,
             "content": ver.content if ver else "",
             "checksum": ver.checksum if ver else None,
@@ -671,6 +707,25 @@ class CompanyResourceService:
             )
             if file_row.status != "ACTIVE":
                 raise ForbiddenError("Deleted file cannot be updated.")
+            current_ver = (
+                await session.execute(
+                    select(CompanyFileVersion).where(
+                        CompanyFileVersion.tenant_id == tenant_id,
+                        CompanyFileVersion.file_id == file_id,
+                        CompanyFileVersion.version_number == file_row.current_version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current_ver is not None:
+                await self._require_not_isolated(tenant_id, [("FILE_VERSION", current_ver.id)])
+
+            await self._capture_checkpoint_if_configured(
+                context=context,
+                operation="update_file",
+                parameters={"file_id": file_id, "workspace_id": file_row.workspace_id},
+                agent_id=agent_id,
+                trace_id=trace_id,
+            )
 
             new_version = file_row.current_version + 1
             checksum = _sha256(content)
@@ -754,6 +809,17 @@ class CompanyResourceService:
                 tenant_id,
                 [("FILE", file_id), ("WORKSPACE", file_row.workspace_id)],
             )
+            current_ver = (
+                await session.execute(
+                    select(CompanyFileVersion).where(
+                        CompanyFileVersion.tenant_id == tenant_id,
+                        CompanyFileVersion.file_id == file_id,
+                        CompanyFileVersion.version_number == file_row.current_version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current_ver is not None:
+                await self._require_not_isolated(tenant_id, [("FILE_VERSION", current_ver.id)])
 
             transfer_id = f"ftr-{uuid.uuid4().hex[:24]}"
             await self._emit_observation(
@@ -801,7 +867,7 @@ class CompanyResourceService:
         agent_id: Optional[str] = None,
         trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        tenant_id, _, user_id = self._require_context(context)
+        tenant_id, branch_id, user_id = self._require_context(context)
         async with self._session_factory() as session:
             tr = (
                 await session.execute(
@@ -815,12 +881,53 @@ class CompanyResourceService:
                 raise NotFoundError("File transfer not found.")
             if tr.recipient_user_id != user_id:
                 raise ForbiddenError("Only the designated recipient may accept a file transfer.")
-            await self._require_not_isolated(
-                tenant_id,
-                [("FILE_TRANSFER", transfer_id), ("FILE", tr.file_id)],
-            )
+            file_row = (
+                await session.execute(
+                    select(CompanyFile).where(
+                        CompanyFile.tenant_id == tenant_id,
+                        CompanyFile.id == tr.file_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if file_row is None:
+                raise NotFoundError("Company file not found.")
+            ws = (
+                await session.execute(
+                    select(CompanyWorkspace).where(
+                        CompanyWorkspace.tenant_id == tenant_id,
+                        CompanyWorkspace.id == file_row.workspace_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if ws is None or (branch_id and ws.branch_id != branch_id):
+                raise ForbiddenError("Cross-branch file transfer acceptance is prohibited.")
+            checks = [
+                ("FILE_TRANSFER", transfer_id),
+                ("FILE", tr.file_id),
+                ("WORKSPACE", file_row.workspace_id),
+            ]
+            current_ver = (
+                await session.execute(
+                    select(CompanyFileVersion).where(
+                        CompanyFileVersion.tenant_id == tenant_id,
+                        CompanyFileVersion.file_id == tr.file_id,
+                        CompanyFileVersion.version_number == file_row.current_version,
+                    )
+                )
+            ).scalar_one_or_none()
+            if current_ver is not None:
+                checks.append(("FILE_VERSION", current_ver.id))
+            await self._require_not_isolated(tenant_id, checks)
             if tr.status != "PENDING":
                 raise ForbiddenError(f"File transfer in status '{tr.status}' cannot be accepted.")
+
+            await self._capture_checkpoint_if_configured(
+                context=context,
+                operation="accept_file_transfer",
+                parameters={"transfer_id": transfer_id, "file_id": tr.file_id},
+                agent_id=agent_id,
+                trace_id=trace_id,
+            )
 
             await self._emit_observation(
                 context=context,
@@ -947,6 +1054,14 @@ class CompanyResourceService:
             )
             if task.status == "BLOCKED":
                 raise ForbiddenError("Blocked task cannot be modified.")
+
+            await self._capture_checkpoint_if_configured(
+                context=context,
+                operation="update_task",
+                parameters={"task_id": task_id, "workspace_id": task.workspace_id},
+                agent_id=agent_id,
+                trace_id=trace_id,
+            )
 
             new_status = status or task.status
             event_type = "COMPANY_TASK_COMPLETED" if new_status == "COMPLETED" else "COMPANY_TASK_UPDATED"
@@ -1106,6 +1221,128 @@ class CompanyResourceService:
             )
             await session.commit()
         return {"id": notif_id, "tenant_id": tenant_id, "user_id": user_id}
+
+    async def read_file_version(
+        self,
+        context: TenantContext,
+        *,
+        file_id: str,
+        version_number: int,
+        agent_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        tenant_id, branch_id, _ = self._require_context(context)
+        async with self._session_factory() as session:
+            file_row = (
+                await session.execute(
+                    select(CompanyFile).where(
+                        CompanyFile.tenant_id == tenant_id,
+                        CompanyFile.id == file_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if file_row is None:
+                raise NotFoundError("Company file not found.")
+            ws = (
+                await session.execute(
+                    select(CompanyWorkspace).where(
+                        CompanyWorkspace.tenant_id == tenant_id,
+                        CompanyWorkspace.id == file_row.workspace_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if ws is None or (branch_id and ws.branch_id != branch_id):
+                raise ForbiddenError("Cross-branch file version access is prohibited.")
+            ver = (
+                await session.execute(
+                    select(CompanyFileVersion).where(
+                        CompanyFileVersion.tenant_id == tenant_id,
+                        CompanyFileVersion.file_id == file_id,
+                        CompanyFileVersion.version_number == version_number,
+                    )
+                )
+            ).scalar_one_or_none()
+            if ver is None:
+                raise NotFoundError("Company file version not found.")
+            await self._require_not_isolated(
+                tenant_id,
+                [("FILE_VERSION", ver.id), ("FILE", file_id), ("WORKSPACE", file_row.workspace_id)],
+            )
+        return {
+            "id": ver.id,
+            "tenant_id": ver.tenant_id,
+            "file_id": ver.file_id,
+            "version_number": ver.version_number,
+            "content": ver.content,
+            "checksum": ver.checksum,
+        }
+
+    async def read_task(
+        self,
+        context: TenantContext,
+        *,
+        task_id: str,
+    ) -> Dict[str, Any]:
+        tenant_id, branch_id, _ = self._require_context(context)
+        async with self._session_factory() as session:
+            task = (
+                await session.execute(
+                    select(CompanyTask).where(
+                        CompanyTask.tenant_id == tenant_id,
+                        CompanyTask.id == task_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if task is None:
+                raise NotFoundError("Company task not found.")
+            if branch_id and task.branch_id != branch_id:
+                raise ForbiddenError("Cross-branch task access is prohibited.")
+            await self._require_not_isolated(
+                tenant_id,
+                [("TASK", task_id), ("WORKSPACE", task.workspace_id)],
+            )
+            if task.status == "BLOCKED":
+                raise ForbiddenError("Blocked task cannot be accessed.")
+        return {
+            "id": task.id,
+            "tenant_id": task.tenant_id,
+            "workspace_id": task.workspace_id,
+            "branch_id": task.branch_id,
+            "title": task.title,
+            "description": task.description,
+            "status": task.status,
+            "priority": task.priority,
+        }
+
+    async def read_notification(
+        self,
+        context: TenantContext,
+        *,
+        notification_id: str,
+    ) -> Dict[str, Any]:
+        tenant_id, _, user_id = self._require_context(context)
+        await self._require_not_isolated(tenant_id, [("NOTIFICATION", notification_id)])
+        async with self._session_factory() as session:
+            notif = (
+                await session.execute(
+                    select(CompanyNotification).where(
+                        CompanyNotification.tenant_id == tenant_id,
+                        CompanyNotification.id == notification_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if notif is None:
+                raise NotFoundError("Notification not found.")
+            if notif.user_id != user_id:
+                raise ForbiddenError("Not authorized to read this notification.")
+        return {
+            "id": notif.id,
+            "tenant_id": notif.tenant_id,
+            "user_id": notif.user_id,
+            "event_type": notif.event_type,
+            "title": notif.title,
+            "body": notif.body,
+        }
 
 
 __all__ = [

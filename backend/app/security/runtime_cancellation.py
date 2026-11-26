@@ -21,7 +21,12 @@ from backend.app.core.exceptions import ForbiddenError
 from backend.app.database.models.agents import Agent
 from backend.app.database.models.baseline import ObservationEvent
 from backend.app.database.models.observability import OutboxEvent
-from backend.app.workers.outbox import STATUS_FAILED, STATUS_PENDING, STATUS_PROCESSING
+from backend.app.workers.outbox import (
+    STATUS_DEAD_LETTER,
+    STATUS_FAILED,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+)
 
 logger = logging.getLogger("amsc.security.runtime_cancellation")
 
@@ -279,19 +284,27 @@ class SqlAgentRuntimeCancellationService:
                     cancelled_runtimes.append(str(meta.get("runtime", "UNKNOWN")))
 
         if self._session_factory is not None:
+            now = datetime.now(timezone.utc)
             async with self._session_factory() as session:
                 pending_rows = (
                     await session.execute(
                         select(OutboxEvent).where(
                             OutboxEvent.tenant_id == tenant_id,
-                            OutboxEvent.status.in_([STATUS_PENDING, STATUS_PROCESSING]),
+                            OutboxEvent.status.in_(
+                                [STATUS_PENDING, STATUS_PROCESSING, STATUS_FAILED]
+                            ),
                         )
                     )
                 ).scalars().all()
                 for row in pending_rows:
                     payload = row.payload or {}
                     if payload.get("agent_id") == agent_id:
-                        row.status = STATUS_FAILED
+                        row.status = STATUS_DEAD_LETTER
+                        row.dead_lettered_at = now
+                        row.next_attempt_at = None
+                        row.locked_by = None
+                        row.locked_at = None
+                        row.locked_until = None
                         row.last_error = f"CANCELLED_BY_CONTAINMENT:{incident_id or 'SECURITY'}"
                         outbox_cancelled += 1
                         self._cancelled_executions.add((tenant_id, row.id))
@@ -299,12 +312,14 @@ class SqlAgentRuntimeCancellationService:
                             queued_cancelled += 0 if (tenant_id, row.id) in self._queued_jobs else 1
                 await session.commit()
 
-                # Verify no active/pending outbox jobs remain for this agent
+                # Verify no active/pending/retryable outbox jobs remain for this agent
                 remaining_rows = (
                     await session.execute(
                         select(OutboxEvent).where(
                             OutboxEvent.tenant_id == tenant_id,
-                            OutboxEvent.status.in_([STATUS_PENDING, STATUS_PROCESSING]),
+                            OutboxEvent.status.in_(
+                                [STATUS_PENDING, STATUS_PROCESSING, STATUS_FAILED]
+                            ),
                         )
                     )
                 ).scalars().all()
@@ -383,7 +398,7 @@ class SqlAgentRuntimeCancellationService:
                             id=f"obs-{uuid.uuid4().hex[:24]}",
                             tenant_id=tenant_id,
                             agent_id=agent_id,
-                            runtime=runtime,
+                            agent_runtime=runtime,
                             execution_id=execution_id,
                             trace_id=trace_id,
                             event_type=event_type,

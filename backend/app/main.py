@@ -274,6 +274,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 session_factory,
                 isolation_adapter=app.state.company_resource_security_adapter,
                 observation_repo=app.state.observation_repo,
+                checkpoint_service=app.state.pre_action_checkpoint_service,
             )
 
         if getattr(app.state, "agent_runtime_cancellation", None) is None:

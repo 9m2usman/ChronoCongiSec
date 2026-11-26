@@ -23,10 +23,12 @@ def _get_company_service(request: Request) -> CompanyResourceService:
             raise SecurityDependencyError("Company application persistence is unavailable.")
         obs_repo = getattr(request.app.state, "observation_repo", None)
         iso_adapter = getattr(request.app.state, "company_resource_security_adapter", None)
+        chk_service = getattr(request.app.state, "pre_action_checkpoint_service", None)
         svc = CompanyResourceService(
             session_factory,
             isolation_adapter=iso_adapter,
             observation_repo=obs_repo,
+            checkpoint_service=chk_service,
         )
         request.app.state.company_resource_service = svc
     return svc
@@ -236,6 +238,42 @@ async def read_message(
         message_id=message_id,
         trace_id=getattr(request.state, "trace_id", None),
     )
+
+
+@router.get("/files/{file_id}/versions/{version_number}")
+async def read_file_version(
+    file_id: str,
+    version_number: int,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.read_file_version(
+        context,
+        file_id=file_id,
+        version_number=version_number,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.get("/tasks/{task_id}")
+async def read_task(
+    task_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.read_task(context, task_id=task_id)
+
+
+@router.get("/notifications/{notification_id}")
+async def read_notification(
+    notification_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.read_notification(context, notification_id=notification_id)
 
 
 __all__ = ["router"]
