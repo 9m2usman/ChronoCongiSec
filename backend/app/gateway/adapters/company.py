@@ -28,8 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
-from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple, Type
+from typing import Any, Dict, Iterable, Optional, Tuple, Type
 
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -42,7 +41,7 @@ from backend.app.company.service import CompanyResourceService
 
 from backend.app.database.models.agents import Agent
 from backend.app.database.models.baseline import AgentSecurityProfile
-from backend.app.database.models.company import CompanyFile, CompanyFileVersion, CompanyMessage, CompanyTask, CompanyWorkspace
+from backend.app.database.models.company import CompanyFile, CompanyMessage, CompanyTask, CompanyWorkspace
 from backend.app.database.models.identity import Membership, Tenant
 from backend.app.tenancy.context import TenantContext
 
