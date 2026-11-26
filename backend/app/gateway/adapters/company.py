@@ -37,10 +37,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from backend.app.api import company as company_service
+from backend.app.core.exceptions import AMSCException
+from backend.app.company.service import CompanyResourceService
+
 from backend.app.database.models.agents import Agent
 from backend.app.database.models.baseline import AgentSecurityProfile
-from backend.app.database.models.company import CompanyFile, CompanyTask, CompanyWorkspace
+from backend.app.database.models.company import CompanyFile, CompanyFileVersion, CompanyMessage, CompanyTask, CompanyWorkspace
 from backend.app.database.models.identity import Membership, Tenant
 from backend.app.tenancy.context import TenantContext
 
@@ -161,14 +163,11 @@ class CompanyOperationsAdapter:
     allowed_operations: Tuple[str, ...] = tuple(PARAMETER_SCHEMAS)
     timeout: float = 15.0
 
-    def __init__(self, session_factory: Any) -> None:
+    def __init__(self, session_factory: Any, company_service: Optional[CompanyResourceService] = None) -> None:
         if session_factory is None:
             raise ValueError("CompanyOperationsAdapter requires a database session factory.")
         self._session_factory = session_factory
-        # Phase 2 handlers read the session factory from ``request.app.state``.
-        self._request_shim = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-            db_session_factory=session_factory,
-        )))
+        self._company_service = company_service or CompanyResourceService(session_factory)
 
     # ------------------------------------------------------------------ helpers
 
@@ -287,30 +286,83 @@ class CompanyOperationsAdapter:
             Membership.tenant_id == tenant_id, Membership.user_id == user_id, Membership.status == "ACTIVE"))
         return [branch] if branch else []
 
-    def _dispatch(self, ctx: TenantContext, operation: str, p: _Params) -> Callable[[], Awaitable[Any]]:
-        svc, req = company_service, self._request_shim
-        table: Dict[str, Callable[[], Awaitable[Any]]] = {
-            "list_workspaces": lambda: svc.list_workspaces(req, ctx),
-            "list_files": lambda: svc.list_files(p.workspace_id, req, ctx),
-            "read_file": lambda: svc.read_file(p.file_id, req, ctx),
-            "create_file": lambda: svc.create_file(
-                p.workspace_id,
-                svc.FileCreate(name=p.name, content=p.content, content_type=p.content_type), req, ctx),
-            "update_file": lambda: svc.update_file(
-                p.file_id, svc.FileUpdate(name=p.name, content=p.content), req, ctx),
-            "transfer_file": lambda: svc.create_transfer(
-                p.file_id, svc.TransferCreate(recipient_user_id=p.recipient_user_id, message=p.message), req, ctx),
-            "create_task": lambda: svc.create_task(svc.TaskCreate(
-                workspace_id=p.workspace_id, title=p.title, description=p.description,
-                assigned_to_user_id=p.assigned_to_user_id, priority=p.priority), req, ctx),
-            "update_task_status": lambda: svc.update_task(p.task_id, svc.TaskUpdate(status=p.status), req, ctx),
-            "handoff_task": lambda: svc.update_task(
-                p.task_id, svc.TaskUpdate(assigned_to_user_id=p.assigned_to_user_id), req, ctx),
-            "send_message": lambda: svc.send_message(svc.MessageCreate(
-                recipient_user_id=p.recipient_user_id, subject=p.subject, body=p.body), req, ctx),
-            "read_inbox": lambda: svc.inbox(req, ctx),
-        }
-        return table[operation]
+    async def _dispatch(self, ctx: TenantContext, operation: str, p: _Params, context: Dict[str, Any]) -> Any:
+        """Execute through the authoritative Phase 2 service with gateway provenance."""
+        svc = self._company_service
+        agent_id, trace_id = context["agent_id"], context["trace_id"]
+
+        if operation == "list_workspaces":
+            async with self._session_factory() as session:
+                rows = (await session.execute(select(CompanyWorkspace).where(
+                    CompanyWorkspace.tenant_id == ctx.tenant_id,
+                    CompanyWorkspace.branch_id == ctx.branch_id,
+                ))).scalars().all()
+            return [{"id": w.id, "tenant_id": w.tenant_id, "branch_id": w.branch_id,
+                     "owner_user_id": w.owner_user_id, "name": w.name,
+                     "visibility": w.visibility} for w in rows
+                    if not await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "WORKSPACE", w.id)]
+
+        if operation == "list_files":
+            async with self._session_factory() as session:
+                rows = (await session.execute(
+                    select(CompanyFile, CompanyWorkspace.branch_id)
+                    .join(CompanyWorkspace, (CompanyWorkspace.id == CompanyFile.workspace_id)
+                          & (CompanyWorkspace.tenant_id == CompanyFile.tenant_id))
+                    .where(CompanyFile.tenant_id == ctx.tenant_id,
+                           CompanyFile.workspace_id == p.workspace_id,
+                           CompanyWorkspace.branch_id == ctx.branch_id,
+                           CompanyFile.status == "ACTIVE")
+                )).all()
+            result = []
+            for file_row, branch_id in rows:
+                if await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "FILE", file_row.id):
+                    continue
+                result.append({"id": file_row.id, "tenant_id": file_row.tenant_id,
+                               "workspace_id": file_row.workspace_id, "branch_id": branch_id,
+                               "owner_user_id": file_row.owner_user_id, "name": file_row.name,
+                               "current_version": file_row.current_version, "status": file_row.status})
+            return result
+
+        if operation == "read_file":
+            result = await svc.read_file(ctx, file_id=p.file_id, agent_id=agent_id, trace_id=trace_id)
+            result["version"] = result.get("current_version")
+            return result
+        if operation == "create_file":
+            return await svc.create_file(ctx, workspace_id=p.workspace_id, name=p.name,
+                content=p.content, content_type=p.content_type, agent_id=agent_id, trace_id=trace_id)
+        if operation == "update_file":
+            return await svc.update_file(ctx, file_id=p.file_id, content=p.content,
+                agent_id=agent_id, trace_id=trace_id)
+        if operation == "transfer_file":
+            return await svc.create_file_transfer(ctx, file_id=p.file_id,
+                recipient_user_id=p.recipient_user_id, message=p.message,
+                agent_id=agent_id, trace_id=trace_id)
+        if operation == "create_task":
+            return await svc.create_task(ctx, workspace_id=p.workspace_id, title=p.title,
+                description=p.description, priority=p.priority, assigned_to_user_id=p.assigned_to_user_id,
+                agent_id=agent_id, trace_id=trace_id)
+        if operation in {"update_task_status", "handoff_task"}:
+            result = await svc.update_task(ctx, task_id=p.task_id,
+                status=p.status if operation == "update_task_status" else None,
+                assigned_to_user_id=p.assigned_to_user_id if operation == "handoff_task" else None,
+                agent_id=agent_id, trace_id=trace_id)
+            result["assigned_to_user_id"] = p.assigned_to_user_id if operation == "handoff_task" else None
+            return result
+        if operation == "send_message":
+            return await svc.send_message(ctx, recipient_user_id=p.recipient_user_id,
+                subject=p.subject, body=p.body, agent_id=agent_id, trace_id=trace_id)
+        if operation == "read_inbox":
+            async with self._session_factory() as session:
+                rows = (await session.execute(select(CompanyMessage).where(
+                    CompanyMessage.tenant_id == ctx.tenant_id,
+                    CompanyMessage.recipient_user_id == ctx.user_id,
+                    CompanyMessage.status == "SENT",
+                ).order_by(CompanyMessage.created_at.desc()))).scalars().all()
+            return [{"id": m.id, "tenant_id": m.tenant_id, "sender_user_id": m.sender_user_id,
+                     "recipient_user_id": m.recipient_user_id, "subject": m.subject,
+                     "body": m.body, "status": m.status} for m in rows
+                    if not await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "MESSAGE", m.id)]
+        raise _Denied(400, f"Unsupported operation '{operation}'.", "OPERATION_UNSUPPORTED")
 
     # ---------------------------------------------------------------- contract
 
@@ -334,10 +386,12 @@ class CompanyOperationsAdapter:
                 if not _scope_covers(governance["data_scope"], branch):
                     raise _Denied(403, "Target resource is outside the agent's authorized branch scope.",
                                   "AGENT_RESOURCE_SCOPE_DENIED")
-            raw = await self._dispatch(ctx, operation, params)()
+            raw = await self._dispatch(ctx, operation, params, context)
         except _Denied as denied:
             return self._failure(denied.status_code, denied.message, denied.code, started, operation)
-        except HTTPException as exc:  # Phase 2 business authorization / validation outcome
+        except AMSCException as exc:
+            return self._failure(exc.status_code, exc.message, exc.code, started, operation)
+        except HTTPException as exc:
             return self._failure(exc.status_code, str(exc.detail), "COMPANY_SERVICE_REJECTED", started, operation)
         except SQLAlchemyError:
             logger.exception("Company persistence failure for %s", operation)
