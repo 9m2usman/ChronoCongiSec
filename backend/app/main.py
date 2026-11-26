@@ -294,7 +294,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if tool_registry is None:
             tool_registry = ToolAdapterRegistry()
         if tool_registry.get_adapter(TOOL_NAME) is None:
-            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(
+                session_factory,
+                company_service=app.state.company_resource_service,
+            ))
         app.state.tool_registry = tool_registry
 
         if getattr(app.state, "outbox_processor", None) is None:
