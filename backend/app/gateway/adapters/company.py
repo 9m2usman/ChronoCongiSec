@@ -358,7 +358,7 @@ class CompanyOperationsAdapter:
                     CompanyMessage.tenant_id == ctx.tenant_id,
                     CompanyMessage.recipient_user_id == ctx.user_id,
                     CompanyMessage.status == "SENT",
-                ).order_by(CompanyMessage.created_at.desc()))).scalars().all()
+                ).order_by(CompanyMessage.sent_at.desc()))).scalars().all()
             return [{"id": m.id, "tenant_id": m.tenant_id, "sender_user_id": m.sender_user_id,
                      "recipient_user_id": m.recipient_user_id, "subject": m.subject,
                      "body": m.body, "status": m.status} for m in rows
