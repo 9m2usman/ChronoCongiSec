@@ -293,4 +293,105 @@ describe('Backend contract alignment (incidents envelope, forensic memory detail
     expect(url).toBe('/api/v1/detection/results/det-001/review');
     expect(init.method).toBe('POST');
   });
+
+  it('fetches knowledge graph via GET /knowledge/graph with clamped max_depth', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        nodes: [{ id: 'rec-1', record_type: 'KNOWLEDGE', trust_state: 'TRUSTED', current_version: 1 }],
+        edges: [],
+        complete: true,
+        truncated_reason: null,
+      }),
+    });
+    global.fetch = fetchMock;
+    const graph = await apiClient.getKnowledgeGraph(4, 'tenant-a-uuid-001');
+    expect(graph.nodes).toHaveLength(1);
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/v1/knowledge/graph?max_depth=4');
+  });
+
+  it('lists recent traces via GET /traces and posts drift review via POST /drift/observations/{id}/review', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: [{ id: 'tr-1', agent_id: 'agt-1', started_at: '2026-11-25T00:00:00Z', status: 'COMPLETED', span_count: 3 }],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          outcome: 'APPLIED',
+          previous_status: 'PENDING',
+          audit_event_id: 'aud-1',
+          follow_up: 'NO_TRUST_CHANGE',
+        }),
+      });
+    global.fetch = fetchMock;
+
+    const traces = await apiClient.listTraces('tenant-a-uuid-001');
+    expect(traces.items).toHaveLength(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/traces');
+
+    const review = await apiClient.reviewDriftObservation('drift-01', 'APPROVED', 'tenant-a-uuid-001');
+    expect(review.outcome).toBe('APPLIED');
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/drift/observations/drift-01/review');
+    expect(fetchMock.mock.calls[1][1].method).toBe('POST');
+  });
+
+  it('normalizes backend AuditEventResponse fields and surfaces 403/503 without fixture fallback', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: 'aud-backend-1',
+          tenant_id: 'tenant-a-uuid-001',
+          actor_id: 'secops:alice',
+          event_type: 'MEMORY_QUARANTINE',
+          resource_id: 'rec-9001',
+          action: 'MEMORY_RECORD_QUARANTINED',
+          outcome: 'SUCCESS',
+          details: { checksum: 'abc123sha256' },
+          occurred_at: '2026-11-25T05:00:00Z',
+        },
+      ],
+    });
+    const events = await apiClient.listAuditEvents('tenant-a-uuid-001');
+    expect(events).toHaveLength(1);
+    expect(events[0].actor).toBe('secops:alice');
+    expect(events[0].target).toBe('rec-9001');
+    expect(events[0].timestamp).toBe('2026-11-25T05:00:00Z');
+    expect(events[0].evidence_sha256).toBe('abc123sha256');
+
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}) });
+    await expect(apiClient.listAuditEvents('tenant-a-uuid-001')).rejects.toThrow(AuthorizationError);
+
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+    await expect(apiClient.listAuditEvents('tenant-a-uuid-001')).rejects.toThrow(ApiError);
+  });
+
+  it('surfaces 403 AuthorizationError and 500 ApiError from listMemories without masking with fixtures', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({}) });
+    await expect(apiClient.listMemories('tenant-a-uuid-001', 'SUSPICIOUS')).rejects.toThrow(AuthorizationError);
+
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+    await expect(apiClient.listMemories('tenant-a-uuid-001', 'TRUSTED')).rejects.toThrow(ApiError);
+  });
+
+  it('surfaces 503 ApiError from listDriftObservations and 404 ApiError from getDualTrace without fixture masking', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
+    await expect(apiClient.listDriftObservations('tenant-a-uuid-001')).rejects.toThrow(ApiError);
+
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}) });
+    await expect(apiClient.getDualTrace('missing-trace', 'tenant-a-uuid-001')).rejects.toThrow(ApiError);
+  });
 });

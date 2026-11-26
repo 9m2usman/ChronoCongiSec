@@ -18,12 +18,14 @@ import {
   MemoryIngestRequest,
   QuarantineRequest,
   QuarantineResponse,
+  KnowledgeGraphResponse,
   Agent,
   PolicyDecision,
   SecurityIncident,
   IncidentSummary,
   SecurityAlertsSummary,
   DualTraceData,
+  TraceListResponse,
   ChroniMemRecordTimeline,
   DriftObservation,
   RecoveryPlanPreviewResponse,
@@ -473,13 +475,12 @@ class ApiClient {
         this.setApiStatus(true);
         return await res.json();
       }
-      // If server returned 403 because quarantined records are restricted from standard agent query
-      if (res.status === 403 && trustState === 'QUARANTINED') {
-        throw new AuthorizationError('Quarantined records are restricted from regular agent queries. Forensic access required.', 403);
+      if (res.status === 403) {
+        throw new AuthorizationError('Quarantined or restricted memory records require forensic access clearance.', 403);
       }
       throw new ApiError(`GET /memory returned ${res.status}`, res.status);
     } catch (err: any) {
-      if (err instanceof AuthorizationError) throw err;
+      if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       if (trustState) {
@@ -715,6 +716,18 @@ class ApiClient {
   }
 
   // --- 8. Dual Trace Scrubber Endpoints ---
+  async listTraces(tenantId?: string): Promise<TraceListResponse> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/traces`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /traces returned ${res.status}`, res.status);
+  }
+
   async getDualTrace(traceId = 'trace-default', tenantId?: string): Promise<DualTraceData> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
     try {
@@ -725,8 +738,12 @@ class ApiClient {
         this.setApiStatus(true);
         return await res.json();
       }
+      if (res.status === 403) {
+        throw new AuthorizationError(`GET /traces/${traceId}/dual-trace forbidden`, res.status);
+      }
       throw new ApiError(`GET /traces/${traceId}/dual-trace returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       const trace = fixtures.traces[traceId] || Object.values(fixtures.traces)[0];
@@ -775,6 +792,19 @@ class ApiClient {
     }
   }
 
+  async getKnowledgeGraph(maxDepth = 3, tenantId?: string): Promise<KnowledgeGraphResponse> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const clampedDepth = Math.min(5, Math.max(1, Math.round(maxDepth)));
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/knowledge/graph?max_depth=${clampedDepth}`, {
+      headers: this.getHeaders(effectiveTenant),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    throw new ApiError(`GET /knowledge/graph returned ${res.status}`, res.status);
+  }
+
   // --- 10. Drift Monitor Endpoints ---
   async listDriftObservations(tenantId?: string): Promise<DriftObservation[]> {
     const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
@@ -786,12 +816,35 @@ class ApiClient {
         this.setApiStatus(true);
         return await res.json();
       }
+      if (res.status === 403) {
+        throw new AuthorizationError('GET /drift/observations forbidden', res.status);
+      }
       throw new ApiError(`GET /drift/observations returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       return fixtures.drift;
     }
+  }
+
+  async reviewDriftObservation(
+    observationId: string,
+    status: 'APPROVED' | 'REJECTED',
+    tenantId?: string
+  ): Promise<{ outcome: string; previous_status: string; audit_event_id?: string | null; follow_up: string }> {
+    const effectiveTenant = tenantId || useWorkstationStore.getState().activeTenant.id;
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/drift/observations/${encodeURIComponent(observationId)}/review`, {
+      method: 'POST',
+      headers: this.getHeaders(effectiveTenant),
+      body: JSON.stringify({ status }),
+    });
+    if (res.ok) {
+      this.setApiStatus(true);
+      return await res.json();
+    }
+    const detail = await res.json().catch(() => ({}));
+    throw new ApiError(detail?.detail || `POST /drift/observations/${observationId}/review returned ${res.status}`, res.status);
   }
 
   // --- 11. Rewind & Atomic Recovery Endpoints ---
@@ -880,10 +933,28 @@ class ApiClient {
       });
       if (res.ok) {
         this.setApiStatus(true);
-        return await res.json();
+        const rows: any[] = await res.json();
+        return rows.map((row) => ({
+          id: row.id,
+          tenant_id: row.tenant_id,
+          timestamp: row.timestamp || row.occurred_at || '',
+          actor: row.actor || row.actor_id || 'system',
+          action: row.action || row.event_type || 'UNKNOWN',
+          target: row.target || row.resource_id || '',
+          evidence_sha256:
+            row.evidence_sha256 ||
+            row.details?.checksum ||
+            row.details?.evidence_sha256 ||
+            'N/A',
+          metadata: row.metadata || row.details || {},
+        }));
+      }
+      if (res.status === 403) {
+        throw new AuthorizationError('Audit ledger access requires AUDITOR, SECURITY_ANALYST, or TENANT_ADMIN role.', 403);
       }
       throw new ApiError(`GET /audit/events returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
       const fixtures = getTenantFixtures(effectiveTenant);
       return fixtures.auditLogs;

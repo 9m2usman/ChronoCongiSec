@@ -49,13 +49,13 @@ export const AuthGuard: React.FC<AuthGuardProps> = ({ children }) => {
   if (isValidating) {
     return (
       <div
-        className="flex h-screen w-screen items-center justify-center bg-[#0B0F19] text-slate-100 font-mono"
+        className="flex h-screen w-screen items-center justify-center bg-canvas text-ink font-mono"
         role="status"
         aria-live="polite"
       >
         <div className="flex flex-col items-center gap-3">
-          <Shield className="w-8 h-8 text-blue-500 animate-pulse" />
-          <span className="text-xs text-slate-400">Verifying security credentials & session state...</span>
+          <Shield className="w-8 h-8 text-brand" />
+          <span className="text-xs text-ink-muted">Verifying security credentials & session state...</span>
         </div>
       </div>
     );

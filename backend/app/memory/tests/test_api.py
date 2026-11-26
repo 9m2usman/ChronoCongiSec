@@ -14,11 +14,13 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from backend.app.api.memory import get_repository
+from backend.app.api.agents import AgentEntity, InMemoryAgentRepository
 from backend.app.core.config import get_settings
 from backend.app.core.security import create_access_token
 from backend.app.main import create_app
 from backend.app.memory.integrity import sha256_hex
 from backend.app.memory.repository import InMemoryMemoryRepository
+from backend.app.memory.models import SourceRecord
 
 
 @pytest.fixture
@@ -33,6 +35,31 @@ def app_and_client(repo):
     settings = get_settings()
     app = create_app(settings)
     app.state.memory_repo = repo
+    # Seed an explicitly inactive source for GAP-003 source-state validation.
+    repo.create_source(
+        SourceRecord(
+            id="src-inactive-001",
+            tenant_id="tenant-a-uuid-001",
+            name="Inactive test source",
+            source_type="DOCUMENT_FEED",
+            trust_state="UNVERIFIED",
+            status="INACTIVE",
+        )
+    )
+    # Memory ingestion now resolves caller-supplied agent IDs against the
+    # authoritative tenant-scoped agent registry (not the memory repository).
+    agent_repo = InMemoryAgentRepository()
+    agent_repo._agents["agent-inactive-001"] = AgentEntity(
+        id="agent-inactive-001",
+        tenant_id="tenant-a-uuid-001",
+        name="Inactive test agent",
+        runtime="CREWAI",
+        model="test-model",
+        status="ISOLATED",
+        config_version="v1.0.0",
+        system_prompt="Test-only inactive agent.",
+    )
+    app.state.agent_repo = agent_repo
     app.dependency_overrides[get_repository] = lambda: repo
     client = TestClient(app)
     return app, client, repo
@@ -414,7 +441,8 @@ def test_api_gap_003_ingest_validates_agent_and_source(app_and_client):
         json={"content": "Memo", "agent_id": "ghost-agent-999"},
         headers=headers,
     )
-    assert res_bad_agent.status_code in (400, 422)
+    # Missing and cross-tenant agent IDs are indistinguishable to prevent enumeration.
+    assert res_bad_agent.status_code == 404
 
     # 2. Inactive / ISOLATED agent (agent-inactive-001 was seeded with status ISOLATED)
     res_isolated_agent = client.post(
@@ -422,7 +450,7 @@ def test_api_gap_003_ingest_validates_agent_and_source(app_and_client):
         json={"content": "Memo", "agent_id": "agent-inactive-001"},
         headers=headers,
     )
-    assert res_isolated_agent.status_code in (400, 422)
+    assert res_isolated_agent.status_code == 403
 
     # 3. Nonexistent source
     res_bad_source = client.post(

@@ -3,46 +3,91 @@
 @tailwind utilities;
 
 :root {
-  --bg-deep: #0B0F19;
-  --bg-surface: #111827;
-  --bg-muted: #1F2937;
-  --border-subtle: #374151;
-  --border-strong: #4B5563;
-  --accent-blue: #3B82F6;
-  --accent-cyan: #06B6D4;
-  --accent-purple: #8B5CF6;
-  --status-trusted: #10B981;
-  --status-warning: #F59E0B;
-  --status-danger: #EF4444;
-  --status-unverified: #6B7280;
-  --status-superseded: #8B5CF6;
+  /* Brand Tokens */
+  --brand-primary: #635BFF;
+  --brand-hover: #5148E5;
+  --signal-teal: #14B8A6;
+
+  /* Light Theme (High-Contrast Alternative) */
+  --bg-canvas: #F4F7FB;
+  --bg-surface: #FFFFFF;
+  --bg-elevated: #EDF2F8;
+  --border-color: #D7E0EC;
+  --text-primary: #182235;
+  --text-muted: #53627A;
+
+  /* Security Status Colours (Light) */
+  --status-trusted: #166534;
+  --status-warning: #92400E;
+  --status-critical: #991B1B;
+  --status-info: #075985;
+  --status-unknown: #475569;
+
+  /* Subtle Semantic Fills (Light) */
+  --status-trusted-bg: rgba(22, 101, 52, 0.10);
+  --status-warning-bg: rgba(146, 64, 14, 0.10);
+  --status-critical-bg: rgba(153, 27, 27, 0.10);
+  --status-info-bg: rgba(7, 89, 133, 0.10);
+  --status-unknown-bg: rgba(71, 85, 105, 0.10);
+  --brand-primary-bg: rgba(99, 91, 255, 0.10);
+  --signal-teal-bg: rgba(20, 184, 166, 0.10);
+
+  color-scheme: light;
+}
+
+:root.dark {
+  /* Dark Theme (Default) */
+  --bg-canvas: #0D1321;
+  --bg-surface: #131C2E;
+  --bg-elevated: #1A2740;
+  --border-color: #2A3850;
+  --text-primary: #E6EDF7;
+  --text-muted: #A0AEC0;
+
+  /* Security Status Colours (Dark) */
+  --status-trusted: #4ADE80;
+  --status-warning: #FBBF24;
+  --status-critical: #F87171;
+  --status-info: #38BDF8;
+  --status-unknown: #CBD5E1;
+
+  /* Subtle Semantic Fills (Dark) */
+  --status-trusted-bg: rgba(74, 222, 128, 0.12);
+  --status-warning-bg: rgba(251, 191, 36, 0.12);
+  --status-critical-bg: rgba(248, 113, 113, 0.12);
+  --status-info-bg: rgba(56, 189, 248, 0.12);
+  --status-unknown-bg: rgba(203, 213, 225, 0.12);
+  --brand-primary-bg: rgba(99, 91, 255, 0.16);
+  --signal-teal-bg: rgba(20, 184, 166, 0.14);
+
+  color-scheme: dark;
 }
 
 body {
-  background-color: #0B0F19;
-  color: #E2E8F0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   margin: 0;
   padding: 0;
 }
 
-/* Custom technical dark scrollbar */
+/* Theme-aware technical scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0B0F19;
+  background: var(--bg-canvas);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1F2937;
+  background: var(--border-color);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #374151;
+  background: var(--text-muted);
 }
 
 code, kbd, samp, pre {

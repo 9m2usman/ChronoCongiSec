@@ -47,11 +47,19 @@ export function useAgents() {
 }
 
 // 4. Memory & Provenance
-export function useMemories() {
+export function useMemories(trustState?: string) {
   const active = useTenantContext();
   return useQuery({
-    queryKey: ['memories', active.id],
-    queryFn: () => apiClient.listMemories(active.id),
+    queryKey: ['memories', active.id, trustState || 'ALL'],
+    queryFn: () => apiClient.listMemories(active.id, trustState),
+  });
+}
+
+export function useKnowledgeGraph(maxDepth = 3) {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['knowledge-graph', active.id, maxDepth],
+    queryFn: () => apiClient.getKnowledgeGraph(maxDepth, active.id),
   });
 }
 
@@ -120,11 +128,20 @@ export function useSecurityAlerts() {
 }
 
 // 7. Dual Trace Scrubber
-export function useDualTrace(traceId = 'trace-default') {
+export function useTraces() {
   const active = useTenantContext();
   return useQuery({
-    queryKey: ['dual-trace', active.id, traceId],
-    queryFn: () => apiClient.getDualTrace(traceId, active.id),
+    queryKey: ['traces', active.id],
+    queryFn: () => apiClient.listTraces(active.id),
+  });
+}
+
+export function useDualTrace(traceId?: string) {
+  const active = useTenantContext();
+  return useQuery({
+    queryKey: ['dual-trace', active.id, traceId || ''],
+    queryFn: () => apiClient.getDualTrace(traceId!, active.id),
+    enabled: Boolean(traceId),
   });
 }
 
@@ -143,6 +160,19 @@ export function useDriftObservations() {
   return useQuery({
     queryKey: ['drift', active.id],
     queryFn: () => apiClient.listDriftObservations(active.id),
+  });
+}
+
+export function useReviewDriftMutation() {
+  const active = useTenantContext();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ observationId, status }: { observationId: string; status: 'APPROVED' | 'REJECTED' }) =>
+      apiClient.reviewDriftObservation(observationId, status, active.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['drift', active.id] });
+      queryClient.invalidateQueries({ queryKey: ['audit', active.id] });
+    },
   });
 }
 

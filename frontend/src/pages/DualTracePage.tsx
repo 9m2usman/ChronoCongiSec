@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { useDualTrace } from '@/hooks';
+import { useDualTrace, useTraces } from '@/hooks';
 import { ForensicErrorBoundary } from '@/components/common/ForensicErrorBoundary';
+import { StateBanner } from '@/components/common/StateBanner';
+import { getThemeTokens } from '@/styles/tokens';
 import {
   Activity,
   Play,
@@ -14,8 +17,13 @@ import {
 } from 'lucide-react';
 
 export const DualTracePage: React.FC = () => {
-  const { activeTenant, openInspector } = useWorkstationStore();
-  const { data: traceData, isLoading } = useDualTrace();
+  const navigate = useNavigate();
+  const { activeTenant, activeTraceId, setActiveTraceId, openInspector, theme } = useWorkstationStore();
+  const tokens = React.useMemo(() => getThemeTokens(theme), [theme]);
+  const { data: traceList, isLoading: tracesLoading, error: tracesError } = useTraces();
+  const availableTraces = traceList?.items || [];
+  const effectiveTraceId = activeTraceId || availableTraces[0]?.id || '';
+  const { data: traceData, isLoading, error } = useDualTrace(effectiveTraceId || undefined);
 
   // Playhead Slider State (0ms to 1200ms)
   const [playheadMs, setPlayheadMs] = useState<number>(680);
@@ -108,8 +116,14 @@ export const DualTracePage: React.FC = () => {
         trust: m.trust_state,
         sha256: m.checksum,
         summary: `Retrieved chunk referenced by trace ${traceData.trace_id}`,
-        statusColor: m.trust_state === 'QUARANTINED' ? 'border-red-500 bg-red-950/30 text-red-300 ring-1 ring-red-500/40' : 'border-emerald-500/50 bg-emerald-950/20 text-emerald-300',
-        badgeColor: m.trust_state === 'QUARANTINED' ? 'bg-red-950/80 border-red-500 text-red-300 font-extrabold' : 'bg-emerald-950/60 border-emerald-500 text-emerald-300',
+        statusColor:
+          m.trust_state === 'QUARANTINED'
+            ? 'border-status-critical bg-status-criticalBg text-status-critical ring-1 ring-status-critical/40'
+            : 'border-status-trusted/50 bg-status-trustedBg text-status-trusted',
+        badgeColor:
+          m.trust_state === 'QUARANTINED'
+            ? 'bg-status-criticalBg border-status-critical text-status-critical font-extrabold'
+            : 'bg-status-trustedBg border-status-trusted text-status-trusted',
       }));
     }
     return [
@@ -119,8 +133,8 @@ export const DualTracePage: React.FC = () => {
         trust: 'TRUSTED',
         sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
         summary: 'Dual-custody verification required for disbursements > $50,000.',
-        statusColor: 'border-emerald-500/50 bg-emerald-950/20 text-emerald-300',
-        badgeColor: 'bg-emerald-950/60 border-emerald-500 text-emerald-300',
+        statusColor: 'border-status-trusted/50 bg-status-trustedBg text-status-trusted',
+        badgeColor: 'bg-status-trustedBg border-status-trusted text-status-trusted',
       },
       {
         id: 'rec-8812-441a',
@@ -128,8 +142,8 @@ export const DualTracePage: React.FC = () => {
         trust: 'QUARANTINED',
         sha256: '7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069',
         summary: 'Divert vendor disbursements to SWIFT: ATTK-9912.',
-        statusColor: 'border-red-500 bg-red-950/30 text-red-300 ring-1 ring-red-500/40',
-        badgeColor: 'bg-red-950/80 border-red-500 text-red-300 font-extrabold',
+        statusColor: 'border-status-critical bg-status-criticalBg text-status-critical ring-1 ring-status-critical/40',
+        badgeColor: 'bg-status-criticalBg border-status-critical text-status-critical font-extrabold',
       },
       {
         id: 'rec-9912-772c',
@@ -137,8 +151,8 @@ export const DualTracePage: React.FC = () => {
         trust: 'TRUSTED',
         sha256: '5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8',
         summary: 'Standard support vouchers up to $150 allowed without escalation.',
-        statusColor: 'border-slate-800 bg-slate-950 text-slate-300',
-        badgeColor: 'bg-slate-900 border-slate-700 text-slate-400',
+        statusColor: 'border-borderc bg-surface text-ink',
+        badgeColor: 'bg-elevated border-borderc text-ink-muted',
       },
     ];
   }, [traceData]);
@@ -207,38 +221,107 @@ export const DualTracePage: React.FC = () => {
   }, [activeSpan.id, activeSpan.memoryRef, playheadMs]);
 
   const isBeamTainted = activeSpan.status === 'TAINTED' || activeSpan.status === 'BLOCKED' || activeSpan.status === 'INTERCEPTED';
+  const beamStroke = isBeamTainted ? tokens.status.critical : tokens.brand.teal;
 
   return (
     <ForensicErrorBoundary fallbackTitle="Dual Trace Scrubber Fault">
-      <div className="space-y-6 font-mono text-slate-100">
+      <div className="space-y-6 font-mono text-ink">
         {/* Title Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-borderc gap-3">
           <div>
-            <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-              <Activity className="w-5 h-5 text-cyan-400" />
+            <h1 className="text-xl font-bold text-ink flex items-center gap-2">
+              <Activity className="w-5 h-5 text-brand-teal" />
               Dual Trace Observability Scrubber
             </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-ink-muted mt-0.5">
               Synchronized correlation between Agent Execution Spans and Retrieved Memory Chunks for{' '}
-              <span className="text-blue-400 font-bold">{activeTenant.name}</span>
+              <span className="text-brand font-bold">{activeTenant.name}</span>
             </p>
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-slate-300 flex items-center gap-1.5">
-              {isLoading && <Loader2 className="w-3 h-3 animate-spin text-cyan-400" />}
-              W3C Trace ID: <span className="text-cyan-400 font-bold">{traceData?.trace_id || 'tr-4bf92f3577b34da6'}</span>
-            </span>
+            <label htmlFor="dual-trace-select" className="text-[11px] text-ink-muted">
+              Trace:
+            </label>
+            <select
+              id="dual-trace-select"
+              aria-label="Select Trace ID"
+              value={effectiveTraceId}
+              onChange={(e) => setActiveTraceId(e.target.value)}
+              disabled={availableTraces.length === 0}
+              className="px-2.5 py-1 rounded bg-surface border border-borderc text-ink text-xs font-mono focus:outline-none focus:border-brand disabled:opacity-60"
+            >
+              {availableTraces.length > 0 ? (
+                availableTraces.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.id} ({t.status} • {t.span_count} spans)
+                  </option>
+                ))
+              ) : (
+                <option value="">{traceData?.trace_id || 'No traces available'}</option>
+              )}
+            </select>
+            {isLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-teal" />}
+          </div>
+        </div>
+
+        {(error || tracesError) && (
+          <StateBanner
+            type="error"
+            title="Failed to Load Dual Trace"
+            statusCode={((error || tracesError) as any)?.status}
+            message={((error || tracesError) as Error).message || 'Unable to retrieve correlated trace spans.'}
+          />
+        )}
+
+        {!tracesLoading && !tracesError && !effectiveTraceId && (
+          <StateBanner
+            type="empty"
+            title="No Traces Recorded"
+            message={`No execution traces have been recorded for ${activeTenant.name} yet.`}
+          />
+        )}
+
+        {effectiveTraceId && traceData && (
+          <>
+            {/* Trace Duration & Span Summary Strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="p-3 bg-surface border border-borderc rounded-lg">
+            <div className="text-[10px] text-ink-muted uppercase">Trace Duration</div>
+            <div className="font-bold text-ink mt-0.5">
+              {EXECUTION_SPANS.length > 0 ? `${EXECUTION_SPANS[EXECUTION_SPANS.length - 1].endMs}ms` : '0ms'}
+            </div>
+          </div>
+          <div className="p-3 bg-surface border border-borderc rounded-lg">
+            <div className="text-[10px] text-ink-muted uppercase">Execution Spans</div>
+            <div className="font-bold text-brand-teal mt-0.5">{EXECUTION_SPANS.length} spans</div>
+          </div>
+          <div className="p-3 bg-surface border border-borderc rounded-lg">
+            <div className="text-[10px] text-ink-muted uppercase">Memory Chunks</div>
+            <div className="font-bold text-ink mt-0.5">{MEMORY_CHUNKS.length} chunks</div>
+          </div>
+          <div className="p-3 bg-surface border border-borderc rounded-lg flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[10px] text-ink-muted uppercase">Cited Record</div>
+              <div className="font-bold text-brand truncate mt-0.5">{activeSpan.memoryRef}</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => navigate(`/chronimem?recordId=${encodeURIComponent(activeSpan.memoryRef)}`)}
+              className="px-2 py-1 rounded bg-canvas border border-borderc hover:border-brand text-[10px] text-ink shrink-0"
+            >
+              ChroniMem →
+            </button>
           </div>
         </div>
 
         {/* Master Playhead Control Bar */}
-        <div className="p-4 bg-slate-900 border border-slate-800 rounded-lg space-y-3 shadow-md">
+        <div className="p-4 bg-surface border border-borderc rounded-lg space-y-3 shadow-sm">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-brand hover:bg-brand-hover text-white rounded text-xs font-bold transition-colors"
               >
                 {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                 <span>{isPlaying ? 'Pause' : 'Play Timeline'}</span>
@@ -249,19 +332,19 @@ export const DualTracePage: React.FC = () => {
                   setPlayheadMs(0);
                   setIsPlaying(false);
                 }}
-                className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition-colors"
+                className="p-1.5 bg-elevated hover:bg-brand-tint text-ink rounded border border-borderc transition-colors"
                 title="Reset to 0ms"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
 
-              <div className="text-xs font-bold text-cyan-400">
-                Playhead: <span className="text-white text-sm">{playheadMs}ms</span> / 1200ms
+              <div className="text-xs font-bold text-brand-teal">
+                Playhead: <span className="text-ink text-sm">{playheadMs}ms</span> / 1200ms
               </div>
             </div>
 
-            <div className="text-[11px] text-slate-400 hidden sm:block">
-              Active Phase: <strong className="text-slate-200">{activeSpan.label}</strong> ({activeSpan.timeRange})
+            <div className="text-[11px] text-ink-muted hidden sm:block">
+              Active Phase: <strong className="text-ink">{activeSpan.label}</strong> ({activeSpan.timeRange})
             </div>
           </div>
 
@@ -277,10 +360,10 @@ export const DualTracePage: React.FC = () => {
                 setPlayheadMs(Number(e.target.value));
                 setIsPlaying(false);
               }}
-              className="w-full h-2 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-cyan-400 border border-slate-800"
+              className="w-full h-2 bg-canvas rounded-lg appearance-none cursor-pointer accent-brand-teal border border-borderc"
             />
             {/* Tick Markers */}
-            <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
+            <div className="flex justify-between text-[10px] text-ink-muted mt-1 font-mono">
               <span>0ms (Ingress)</span>
               <span>180ms (RAG Query)</span>
               <span>480ms (Tool Proposal)</span>
@@ -291,7 +374,7 @@ export const DualTracePage: React.FC = () => {
         </div>
 
         {/* Dual-Track Visualizer with SVG Correlation Beams */}
-        <div ref={containerRef} className="relative p-6 bg-[#070A10] border border-slate-800 rounded-lg space-y-20 overflow-hidden shadow-2xl">
+        <div ref={containerRef} className="relative p-6 bg-canvas border border-borderc rounded-lg space-y-20 overflow-hidden shadow-sm">
           {/* SVG Correlation Beams Overlay */}
           {beamCoordinates && (
             <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
@@ -304,26 +387,25 @@ export const DualTracePage: React.FC = () => {
               <path
                 d={`M ${beamCoordinates.x1} ${beamCoordinates.y1} C ${beamCoordinates.x1} ${(beamCoordinates.y1 + beamCoordinates.y2) / 2}, ${beamCoordinates.x2} ${(beamCoordinates.y1 + beamCoordinates.y2) / 2}, ${beamCoordinates.x2} ${beamCoordinates.y2}`}
                 fill="none"
-                stroke={isBeamTainted ? '#EF4444' : '#06B6D4'}
+                stroke={beamStroke}
                 strokeWidth={3}
                 strokeDasharray="6 4"
-                className="animate-pulse"
                 filter="url(#glow)"
               />
               {/* Origin Circle */}
-              <circle cx={beamCoordinates.x1} cy={beamCoordinates.y1} r={4} fill={isBeamTainted ? '#EF4444' : '#06B6D4'} />
+              <circle cx={beamCoordinates.x1} cy={beamCoordinates.y1} r={4} fill={beamStroke} />
               {/* Destination Circle */}
-              <circle cx={beamCoordinates.x2} cy={beamCoordinates.y2} r={5} fill={isBeamTainted ? '#EF4444' : '#06B6D4'} />
+              <circle cx={beamCoordinates.x2} cy={beamCoordinates.y2} r={5} fill={beamStroke} />
             </svg>
           )}
 
           {/* Track A: Upper Execution Spans */}
           <div className="space-y-2 relative z-20">
-            <div className="flex items-center justify-between pb-1 border-b border-slate-800/80">
-              <span className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+            <div className="flex items-center justify-between pb-1 border-b border-borderc">
+              <span className="text-xs font-bold uppercase tracking-wider text-brand-teal flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5" /> Track A: Agent Execution Spans (W3C Distributed Tracing)
               </span>
-              <span className="text-[10px] text-slate-500 font-mono">Click span to scrub correlation</span>
+              <span className="text-[10px] text-ink-muted font-mono">Click span to scrub correlation</span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -342,40 +424,40 @@ export const DualTracePage: React.FC = () => {
                       setPlayheadMs(span.startMs + span.latency / 2);
                       setIsPlaying(false);
                     }}
-                    className={`p-3 rounded-lg border transition-all cursor-pointer relative ${
+                    className={`p-3 rounded-lg border transition-colors cursor-pointer relative ${
                       isSelected
-                        ? 'bg-slate-900 border-cyan-400 shadow-lg ring-1 ring-cyan-500/50'
-                        : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                        ? 'bg-surface border-brand-teal shadow-md ring-1 ring-brand-teal/40'
+                        : 'bg-surface/80 border-borderc hover:border-brand/40'
                     }`}
                   >
                     {isCurrentPlayhead && (
-                      <span className="absolute -top-2 left-3 px-1.5 py-0.2 bg-cyan-500 text-slate-950 rounded text-[9px] font-extrabold uppercase">
+                      <span className="absolute -top-2 left-3 px-1.5 py-0.5 bg-brand-teal text-white rounded text-[9px] font-extrabold uppercase">
                         Active Span
                       </span>
                     )}
 
                     <div className="flex items-center justify-between text-[10px] mb-1">
-                      <span className="text-slate-400 font-bold">{span.timeRange}</span>
+                      <span className="text-ink-muted font-bold">{span.timeRange}</span>
                       <span
-                        className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
                           span.status === 'OK'
-                            ? 'text-emerald-400 bg-emerald-950/40 border border-emerald-500/30'
+                            ? 'text-status-trusted bg-status-trustedBg border-status-trusted/30'
                             : span.status === 'TAINTED'
-                            ? 'text-amber-400 bg-amber-950/40 border border-amber-500/30'
-                            : 'text-red-400 bg-red-950/40 border border-red-500/40 font-extrabold'
+                            ? 'text-status-warning bg-status-warningBg border-status-warning/30'
+                            : 'text-status-critical bg-status-criticalBg border-status-critical/40 font-extrabold'
                         }`}
                       >
                         {span.status}
                       </span>
                     </div>
 
-                    <div className="text-xs font-bold text-slate-100">{span.label}</div>
-                    <div className="text-[10px] text-slate-400 mt-1 truncate">{span.action}</div>
+                    <div className="text-xs font-bold text-ink">{span.label}</div>
+                    <div className="text-[10px] text-ink-muted mt-1 truncate">{span.action}</div>
 
                     {/* Latency bar indicator */}
-                    <div className="mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-500">
+                    <div className="mt-2 pt-2 border-t border-borderc flex items-center justify-between text-[10px] text-ink-muted">
                       <span className="truncate max-w-[120px] font-mono text-[9px]">{span.w3cSpan}</span>
-                      <span className="font-bold text-slate-400">{span.latency}ms</span>
+                      <span className="font-bold text-ink">{span.latency}ms</span>
                     </div>
                   </div>
                 );
@@ -385,11 +467,11 @@ export const DualTracePage: React.FC = () => {
 
           {/* Track B: Lower Retrieved Memory Chunks */}
           <div className="space-y-2 relative z-20">
-            <div className="flex items-center justify-between pb-1 border-b border-slate-800/80">
-              <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+            <div className="flex items-center justify-between pb-1 border-b border-borderc">
+              <span className="text-xs font-bold uppercase tracking-wider text-status-trusted flex items-center gap-1.5">
                 <GitCommit className="w-3.5 h-3.5" /> Track B: Retrieved Memory Chunks & Cryptographic Checksums
               </span>
-              <span className="text-[10px] text-slate-500 font-mono">Click node to inspect cryptographic lineage</span>
+              <span className="text-[10px] text-ink-muted font-mono">Click node to inspect cryptographic lineage</span>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -416,18 +498,18 @@ export const DualTracePage: React.FC = () => {
                         },
                       })
                     }
-                    className={`p-4 rounded-lg border transition-all cursor-pointer relative ${
+                    className={`p-4 rounded-lg border transition-colors cursor-pointer relative ${
                       isCited
-                        ? `${mem.statusColor} shadow-xl scale-[1.02]`
-                        : 'bg-slate-950/60 border-slate-800 opacity-60 hover:opacity-100'
+                        ? `${mem.statusColor} shadow-md`
+                        : 'bg-surface border-borderc opacity-75 hover:opacity-100'
                     }`}
                   >
                     {isCited && (
                       <span
                         className={`absolute -top-2.5 right-3 px-2 py-0.5 rounded text-[9px] font-extrabold uppercase border ${
                           mem.trust === 'QUARANTINED'
-                            ? 'bg-red-600 text-white border-red-400'
-                            : 'bg-cyan-600 text-white border-cyan-400'
+                            ? 'bg-status-critical text-white border-status-critical'
+                            : 'bg-brand-teal text-white border-brand-teal'
                         }`}
                       >
                         Target Correlation Link
@@ -435,20 +517,20 @@ export const DualTracePage: React.FC = () => {
                     )}
 
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-bold text-slate-100">{mem.id}</span>
+                      <span className="text-xs font-bold text-ink">{mem.id}</span>
                       <span className={`px-2 py-0.5 rounded text-[10px] border font-bold ${mem.badgeColor}`}>
                         {mem.trust}
                       </span>
                     </div>
 
-                    <div className="text-xs text-slate-200 font-semibold mb-1">{mem.label}</div>
-                    <p className="text-[11px] text-slate-400 mb-2 leading-relaxed">{mem.summary}</p>
+                    <div className="text-xs text-ink font-semibold mb-1">{mem.label}</div>
+                    <p className="text-[11px] text-ink-muted mb-2 leading-relaxed">{mem.summary}</p>
 
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/80 text-[10px]">
-                      <span className="font-mono text-cyan-300 truncate max-w-[160px]">
+                    <div className="flex items-center justify-between pt-2 border-t border-borderc text-[10px]">
+                      <span className="font-mono text-brand-teal truncate max-w-[160px]">
                         sha256:{mem.sha256.slice(0, 16)}...
                       </span>
-                      <span className="text-blue-400 hover:underline flex items-center gap-0.5">
+                      <span className="text-brand hover:underline flex items-center gap-0.5">
                         Inspect <ArrowUpRight className="w-3 h-3" />
                       </span>
                     </div>
@@ -458,6 +540,8 @@ export const DualTracePage: React.FC = () => {
             </div>
           </div>
         </div>
+          </>
+        )}
       </div>
     </ForensicErrorBoundary>
   );

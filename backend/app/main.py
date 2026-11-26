@@ -13,7 +13,7 @@ import hashlib
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Dict, Tuple
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -240,16 +240,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.database.repositories.observation import SqlAlchemyObservationRepository
             app.state.observation_repo = SqlAlchemyObservationRepository(session_factory)
 
-        if _needs_db_wiring("detection_repo"):
+        if getattr(app.state, "detection_repo", None) is None:
             from backend.app.database.repositories.detection import SqlAlchemyDetectionRepository
-            from backend.app.security.detection import DetectionEngine
             app.state.detection_repo = SqlAlchemyDetectionRepository(session_factory)
-            if _needs_db_wiring("detection_engine"):
-                app.state.detection_engine = DetectionEngine(
-                    detection_repo=app.state.detection_repo,
-                    baseline_repo=app.state.baseline_repo,
-                    agent_repo=app.state.agent_repo,
-                )
+
+        if getattr(app.state, "detection_engine", None) is None:
+            from backend.app.security.detection import DetectionEngine
+            app.state.detection_engine = DetectionEngine(
+                detection_repo=app.state.detection_repo,
+                baseline_repo=app.state.baseline_repo,
+                agent_repo=app.state.agent_repo,
+            )
 
         if getattr(app.state, "drift_service", None) is None:
             from backend.app.security.drift import DriftReviewService, SqlDriftReviewStore
@@ -258,6 +259,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if getattr(app.state, "trust_decision_store", None) is None:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
+
+        # Phase 3: agent-mediated company operations are a protected gateway tool. The
+        # adapter exists only when company persistence exists; without it the tool stays
+        # unregistered and M4 blocks every proposal (TOOL_NOT_REGISTERED, fail closed).
+        if getattr(app.state, "tool_registry", None) is None:
+            from backend.app.api.gateway import ToolAdapterRegistry
+            from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+            tool_registry = ToolAdapterRegistry()
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
+            app.state.tool_registry = tool_registry
 
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
@@ -398,10 +409,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "In-memory trace repository is strictly forbidden in production."
             )
 
-        trust_store = getattr(app.state, "trust_decision_store", None)
-        if trust_store is None or not getattr(trust_store, "is_persistent", False):
+        for repository_name in ("observation_repo", "detection_repo"):
+            repository = getattr(app.state, repository_name, None)
+            if (
+                repository is None
+                or getattr(repository, "is_in_memory", True)
+                or not getattr(repository, "is_persistent", False)
+            ):
+                raise RuntimeError(
+                    f"Production startup failure: Persistent {repository_name} is not configured. "
+                    "In-memory security evidence stores are strictly forbidden in production."
+                )
+
+        if getattr(app.state, "detection_engine", None) is None:
             raise RuntimeError(
-                "Production startup failure: Persistent trust decision store is required in production."
+                "Production startup failure: Security detection engine is not configured."
+            )
+
+        checkpoint_service = getattr(app.state, "pre_action_checkpoint_service", None)
+        if (
+            not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None))
+            or getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            raise RuntimeError(
+                "Production startup failure: Durable pre-action checkpoint service is not configured."
+            )
+
+        runtime_cancellation = getattr(app.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 3 active/queued agent cancellation adapter is not configured."
+            )
+
+        resource_isolation = getattr(app.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            raise RuntimeError(
+                "Production startup failure: Phase 2 company resource isolation adapter is not configured."
             )
 
     # Construct services that depend on validated production repositories only after
@@ -470,7 +514,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 # --- Application Factory ---
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    pre_action_checkpoint_service: Optional[Any] = None,
+    agent_runtime_cancellation: Optional[Any] = None,
+    company_resource_security_adapter: Optional[Any] = None,
+) -> FastAPI:
     """Create and configure the FastAPI application instance."""
     if settings is None:
         settings = get_settings()
@@ -496,7 +546,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    # Track factory-provided in-memory adapters so lifespan startup can replace
+    # them with persistent database-backed implementations when configured.
     app.state._default_in_memory_instances = {}
+    app.state.agent_runtime_cancellation = agent_runtime_cancellation
+    app.state.company_resource_security_adapter = company_resource_security_adapter
+    app.state.pre_action_checkpoint_service = pre_action_checkpoint_service
 
     # Revocation store initialization (GAP-007)
     if settings.APP_ENV != "production":
@@ -648,6 +703,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             app.state.detection_repo = None
             app.state.detection_engine = None
+
+    # Pre-action checkpointing: metadata-only in-memory adapter is allowed only
+    # in development/test. Production must inject a durable resource snapshot service.
+    if settings.APP_ENV != "production" and app.state.pre_action_checkpoint_service is None:
+        from backend.app.security.checkpoints import InMemoryPreActionCheckpointService
+        app.state.pre_action_checkpoint_service = InMemoryPreActionCheckpointService()
 
     # Quarantine service initialization
     from backend.app.security.quarantine import get_default_quarantine_service
@@ -847,10 +908,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["observation_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(obs_repo, "is_in_memory", True)
+            or not getattr(obs_repo, "is_persistent", False)
+        ):
+            deps["observation_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["observation_repo"] = "ready"
 
-        # Detection Repo Check (Phase 2)
+        # Detection Repo Check (Phase 2 / Phase 4)
         det_repo = getattr(app_instance.state, "detection_repo", None)
         if det_repo is None:
             if cfg.APP_ENV == "production":
@@ -858,8 +925,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 all_ready = False
             else:
                 deps["detection_repo"] = "ready (dev/test in-memory)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(det_repo, "is_in_memory", True)
+            or not getattr(det_repo, "is_persistent", False)
+        ):
+            deps["detection_repo"] = "rejected (non-durable in production)"
+            all_ready = False
         else:
             deps["detection_repo"] = "ready"
+
+        detection_engine = getattr(app_instance.state, "detection_engine", None)
+        if detection_engine is None:
+            deps["detection_engine"] = "unavailable"
+            all_ready = False
+        else:
+            deps["detection_engine"] = "ready"
+
+        checkpoint_service = getattr(app_instance.state, "pre_action_checkpoint_service", None)
+        if not callable(getattr(checkpoint_service, "capture_pre_action_checkpoint", None)):
+            if cfg.APP_ENV == "production":
+                deps["pre_action_checkpoint_service"] = "unavailable"
+                all_ready = False
+            else:
+                deps["pre_action_checkpoint_service"] = "not configured (dev/test)"
+        elif cfg.APP_ENV == "production" and (
+            getattr(checkpoint_service, "is_in_memory", True)
+            or not getattr(checkpoint_service, "is_persistent", False)
+        ):
+            deps["pre_action_checkpoint_service"] = "rejected (non-durable in production)"
+            all_ready = False
+        else:
+            deps["pre_action_checkpoint_service"] = (
+                "metadata-only (dev/test)"
+                if getattr(checkpoint_service, "is_in_memory", False)
+                else "ready"
+            )
+
+        runtime_cancellation = getattr(app_instance.state, "agent_runtime_cancellation", None)
+        if not callable(getattr(runtime_cancellation, "cancel_agent_work", None)):
+            if cfg.APP_ENV == "production":
+                deps["agent_runtime_cancellation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["agent_runtime_cancellation"] = "not configured (dev/test)"
+        else:
+            deps["agent_runtime_cancellation"] = "ready"
+
+        resource_isolation = getattr(app_instance.state, "company_resource_security_adapter", None)
+        if not callable(getattr(resource_isolation, "isolate_resource", None)):
+            if cfg.APP_ENV == "production":
+                deps["company_resource_isolation"] = "unavailable"
+                all_ready = False
+            else:
+                deps["company_resource_isolation"] = "not configured (dev/test)"
+        else:
+            deps["company_resource_isolation"] = "ready"
 
         return all_ready, deps
 

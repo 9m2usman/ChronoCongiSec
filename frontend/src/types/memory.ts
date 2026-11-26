@@ -83,3 +83,25 @@ export interface QuarantineResponse {
   trust_state: string;
   message: string;
 }
+
+export interface KnowledgeGraphNode {
+  id: string;
+  record_type: string;
+  trust_state: string;
+  current_version: number;
+  agent_id?: string | null;
+}
+
+export interface KnowledgeGraphEdge {
+  id: string;
+  from_record_id: string;
+  to_record_id: string;
+  relation_type: string;
+}
+
+export interface KnowledgeGraphResponse {
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+  complete: boolean;
+  truncated_reason?: string | null;
+}

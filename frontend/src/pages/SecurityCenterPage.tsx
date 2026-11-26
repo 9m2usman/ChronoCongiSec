@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { useSecurityIncidents, useQuarantineMutation } from '@/hooks';
+import { useSecurityIncidents, useQuarantineMutation, useTraces, useKnowledgeGraph } from '@/hooks';
 import { ForensicErrorBoundary } from '@/components/common/ForensicErrorBoundary';
 import { StateBanner } from '@/components/common/StateBanner';
 import {
@@ -22,10 +22,13 @@ export const SecurityCenterPage: React.FC = () => {
   const navigate = useNavigate();
   const { activeTenant, openInspector } = useWorkstationStore();
   const { data: incidents, isLoading, error } = useSecurityIncidents();
+  const { data: traceList } = useTraces();
+  const { data: graphData } = useKnowledgeGraph(2);
   const quarantineMutation = useQuarantineMutation();
 
   const [quarantinedIds, setQuarantinedIds] = useState<Record<string, boolean>>({});
   const [quarantineError, setQuarantineError] = useState<string | null>(null);
+  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
 
   // 4 Kill-Chain Stages
   const KILL_CHAIN_STAGES = [
@@ -34,102 +37,36 @@ export const SecurityCenterPage: React.FC = () => {
       title: '1. Ingest Poisoning',
       subtitle: 'External untrusted input ingestion',
       icon: FileText,
-      accentColor: 'text-amber-400',
-      borderColor: 'border-amber-500/30',
-      bgHeader: 'bg-amber-950/20',
+      accentColor: 'text-status-warning',
+      borderColor: 'border-status-warning/40',
+      bgHeader: 'bg-status-warningBg',
     },
     {
       id: 'DRIFT_SPIKE',
       title: '2. Semantic Drift Spike',
       subtitle: 'Vector divergence from policy',
       icon: TrendingDown,
-      accentColor: 'text-purple-400',
-      borderColor: 'border-purple-500/30',
-      bgHeader: 'bg-purple-950/20',
+      accentColor: 'text-brand',
+      borderColor: 'border-brand/40',
+      bgHeader: 'bg-brand-tint',
     },
     {
       id: 'INJECTION_DETECTED',
       title: '3. Prompt Injection',
       subtitle: 'Autonomous agent hijack directive',
       icon: Zap,
-      accentColor: 'text-orange-400',
-      borderColor: 'border-orange-500/30',
-      bgHeader: 'bg-orange-950/20',
+      accentColor: 'text-status-warning',
+      borderColor: 'border-status-warning/40',
+      bgHeader: 'bg-status-warningBg',
     },
     {
       id: 'GATEWAY_BLOCKED',
       title: '4. Fail-Closed Gate',
       subtitle: 'Server-side SEC-004 interception',
       icon: ShieldCheck,
-      accentColor: 'text-red-400',
-      borderColor: 'border-red-500/30',
-      bgHeader: 'bg-red-950/20',
-    },
-  ];
-
-  // Default campaign incidents for active tenant
-  const defaultIncidents = activeTenant.id === 'tenant-betashield' ? [
-    {
-      id: 'INC-BETA-001',
-      stage: 'INGEST_POISONING',
-      threat_type: 'Distributed Port 22 SSH Brute Force Ingress',
-      severity: 'HIGH',
-      target_agent_name: 'CyberDefenseAnalyst-01',
-      tainted_chunk_id: 'rec-beta-101',
-      evidence_summary: 'Brute-force attempts against host gateway evaluated against intrusion response playbook.',
-      created_at: '10m ago',
-    },
-  ] : activeTenant.id === 'tenant-gammaai' ? [
-    {
-      id: 'INC-GAMMA-001',
-      stage: 'DRIFT_SPIKE',
-      threat_type: 'High Replica Spike Threshold Anomaly',
-      severity: 'MEDIUM',
-      target_agent_name: 'CloudInfrastructureBot-01',
-      tainted_chunk_id: 'rec-gamma-201',
-      evidence_summary: 'Cluster autoscaling request evaluating pod memory constraints.',
-      created_at: '45m ago',
-    },
-  ] : [
-    {
-      id: 'INC-2026-0812-A',
-      stage: 'INGEST_POISONING',
-      threat_type: 'Vendor Invoice PDF Malformed Directive',
-      severity: 'HIGH',
-      target_agent_name: 'FinancialOperationsAgent-01',
-      tainted_chunk_id: 'rec-8812-441a',
-      evidence_summary: 'Ingested document "vendor_invoice_9912.pdf" contains hidden prompt override instructions.',
-      created_at: '22m ago',
-    },
-    {
-      id: 'INC-2026-0812-B',
-      stage: 'DRIFT_SPIKE',
-      threat_type: 'Cosine Divergence Anomaly (0.42 Δ)',
-      severity: 'MEDIUM',
-      target_agent_name: 'FinancialOperationsAgent-01',
-      tainted_chunk_id: 'rec-8812-441a',
-      evidence_summary: 'Drift monitor observed vector distance spike exceeding 0.35 threshold from corporate accounting policy.',
-      created_at: '18m ago',
-    },
-    {
-      id: 'INC-2026-0812-C',
-      stage: 'INJECTION_DETECTED',
-      threat_type: 'Direct System Prompt Hijack Attempt',
-      severity: 'CRITICAL',
-      target_agent_name: 'FinancialOperationsAgent-01',
-      tainted_chunk_id: 'rec-8812-441a',
-      evidence_summary: 'Adversary directive instructs agent to bypass standard Accounts Payable dual-custody verification.',
-      created_at: '15m ago',
-    },
-    {
-      id: 'INC-2026-0812-D',
-      stage: 'GATEWAY_BLOCKED',
-      threat_type: 'Fail-Closed Gateway Interception',
-      severity: 'CRITICAL',
-      target_agent_name: 'FinancialOperationsAgent-01',
-      tainted_chunk_id: 'rec-8812-441a',
-      evidence_summary: 'Gateway evaluated proposal tool:execute_wire_transfer($240k). Blocked with 403 Forbidden under SEC-004.',
-      created_at: '12m ago',
+      accentColor: 'text-status-critical',
+      borderColor: 'border-status-critical/40',
+      bgHeader: 'bg-status-criticalBg',
     },
   ];
 
@@ -160,37 +97,51 @@ export const SecurityCenterPage: React.FC = () => {
 
   return (
     <ForensicErrorBoundary fallbackTitle="Security Center Fault">
-      <div className="space-y-6 font-mono text-slate-100">
+      <div className="space-y-6 font-mono text-ink">
         {/* Title Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-borderc gap-3">
           <div>
-            <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-              <ShieldAlert className="w-5 h-5 text-red-400" />
+            <h1 className="text-xl font-bold text-ink flex items-center gap-2">
+              <ShieldAlert className="w-5 h-5 text-status-critical" />
               Security Center & Kill-Chain Triage
             </h1>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs text-ink-muted mt-0.5">
               Multi-stage kill-chain incident triage, one-click quarantine, and rapid rollback escalation for{' '}
-              <span className="text-blue-400 font-bold">{activeTenant.name}</span>
+              <span className="text-brand font-bold">{activeTenant.name}</span>
             </p>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="px-2.5 py-1 rounded bg-red-950/60 border border-red-500/40 text-red-300 text-xs font-bold flex items-center gap-1.5">
-              <AlertTriangle className="w-3.5 h-3.5" /> 1 Multi-Stage Campaign Active
-            </span>
+            {isLoading ? (
+              <span className="px-2.5 py-1 rounded bg-surface border border-borderc text-ink-muted text-xs font-bold">
+                Evaluating Incidents...
+              </span>
+            ) : error ? (
+              <span className="px-2.5 py-1 rounded bg-status-criticalBg border border-status-critical/40 text-status-critical text-xs font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5" /> Incident Stream Error
+              </span>
+            ) : !incidents || incidents.length === 0 ? (
+              <span className="px-2.5 py-1 rounded bg-status-trustedBg border border-status-trusted/40 text-status-trusted text-xs font-bold flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" /> 0 Active Incidents
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded bg-status-criticalBg border border-status-critical/40 text-status-critical text-xs font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5" /> {incidents.length} Active Incident{incidents.length === 1 ? '' : 's'}
+              </span>
+            )}
           </div>
         </div>
 
         {/* Quarantine Error Alert */}
         {quarantineError && (
-          <div className="p-3 bg-red-950/80 border border-red-500 rounded-lg text-xs text-red-200 flex items-center justify-between">
+          <div className="p-3 bg-status-criticalBg border border-status-critical rounded-lg text-xs text-status-critical flex items-center justify-between" role="alert">
             <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{quarantineError}</span>
             </div>
             <button
               onClick={() => setQuarantineError(null)}
-              className="px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-[10px] text-red-200"
+              className="px-2 py-0.5 rounded bg-surface hover:bg-elevated text-[10px] text-status-critical border border-status-critical/40"
             >
               Dismiss
             </button>
@@ -201,43 +152,43 @@ export const SecurityCenterPage: React.FC = () => {
         {isLoading ? (
           <StateBanner type="loading" title="Loading Kill-Chain Threat Telemetry..." message="Evaluating multi-stage poisoning and injection campaigns..." />
         ) : error ? (
-          <StateBanner type="unavailable" title="Live Security Incidents Stream Offline" message="GET /security/incidents route is pending backend deployment. Loaded campaign baseline." />
+          <StateBanner type="error" title="Failed to Load Security Incidents" statusCode={(error as any)?.status} message={(error as Error).message || 'Unable to query /security/incidents.'} />
+        ) : !incidents || incidents.length === 0 ? (
+          <StateBanner type="empty" title="No Security Incidents Reported" message={`No active kill-chain incidents have been recorded for ${activeTenant.name}.`} />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {KILL_CHAIN_STAGES.map((stage) => {
               const StageIcon = stage.icon;
-              const incidentsList = (incidents && incidents.length > 0)
-                ? incidents.map((inc, idx) => ({
-                    id: inc.id,
-                    stage: inc.classification || KILL_CHAIN_STAGES[idx % KILL_CHAIN_STAGES.length].id,
-                    threat_type: inc.threat_type || inc.title,
-                    severity: inc.severity,
-                    target_agent_name: inc.target_agent_name || 'FinancialOperationsAgent-01',
-                    tainted_chunk_id: inc.tainted_chunk_id || 'rec-8812-441a',
-                    evidence_summary: inc.evidence_summary,
-                    created_at: inc.created_at || 'Just now',
-                  }))
-                : defaultIncidents;
+              const incidentsList = incidents.map((inc, idx) => ({
+                id: inc.id,
+                stage: inc.classification || KILL_CHAIN_STAGES[idx % KILL_CHAIN_STAGES.length].id,
+                threat_type: inc.threat_type || inc.title,
+                severity: inc.severity,
+                target_agent_name: inc.target_agent_name || 'Unassigned Agent',
+                tainted_chunk_id: inc.tainted_chunk_id || '',
+                evidence_summary: inc.evidence_summary,
+                created_at: inc.created_at || 'Just now',
+              }));
 
               const stageIncidents = incidentsList.filter((i) => i.stage === stage.id);
 
               return (
                 <div
                   key={stage.id}
-                  className={`flex flex-col bg-slate-900 border ${stage.borderColor} rounded-lg overflow-hidden shadow-sm`}
+                  className={`flex flex-col bg-surface border ${stage.borderColor} rounded-lg overflow-hidden shadow-sm`}
                 >
                   {/* Column Header */}
-                  <div className={`p-3 border-b border-slate-800 ${stage.bgHeader}`}>
+                  <div className={`p-3 border-b border-borderc ${stage.bgHeader}`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
                         <StageIcon className={`w-4 h-4 ${stage.accentColor}`} />
-                        <span className="text-xs font-bold text-slate-200">{stage.title}</span>
+                        <span className="text-xs font-bold text-ink">{stage.title}</span>
                       </div>
-                      <span className="px-1.5 py-0.2 rounded bg-slate-950 text-[10px] font-bold text-slate-400">
+                      <span className="px-1.5 py-0.5 rounded bg-surface border border-borderc text-[10px] font-bold text-ink-muted">
                         {stageIncidents.length}
                       </span>
                     </div>
-                    <p className="text-[10px] text-slate-400 mt-1">{stage.subtitle}</p>
+                    <p className="text-[10px] text-ink-muted mt-1">{stage.subtitle}</p>
                   </div>
 
                   {/* Incident Cards */}
@@ -249,35 +200,35 @@ export const SecurityCenterPage: React.FC = () => {
                       return (
                         <div
                           key={inc.id}
-                          className="p-3 bg-slate-950 rounded border border-slate-800 hover:border-slate-700 transition-all space-y-2.5"
+                          className="p-3 bg-canvas rounded border border-borderc hover:border-brand/40 transition-colors space-y-2.5"
                         >
                           <div className="flex items-center justify-between text-[10px]">
-                            <span className="font-bold text-slate-200">{inc.id}</span>
+                            <span className="font-bold text-ink">{inc.id}</span>
                             <span
-                              className={`px-1.5 py-0.2 rounded font-bold ${
+                              className={`px-1.5 py-0.5 rounded font-bold border ${
                                 inc.severity === 'CRITICAL'
-                                  ? 'bg-red-950 border border-red-800 text-red-300'
-                                  : 'bg-amber-950 border border-amber-800 text-amber-300'
+                                  ? 'bg-status-criticalBg border-status-critical/40 text-status-critical'
+                                  : 'bg-status-warningBg border-status-warning/40 text-status-warning'
                               }`}
                             >
                               {inc.severity}
                             </span>
                           </div>
 
-                          <div className="text-xs font-semibold text-slate-300 leading-tight">
+                          <div className="text-xs font-semibold text-ink leading-tight">
                             {inc.threat_type}
                           </div>
 
-                          <p className="text-[11px] text-slate-400 leading-relaxed font-sans">
+                          <p className="text-[11px] text-ink-muted leading-relaxed font-sans">
                             {inc.evidence_summary}
                           </p>
 
-                          <div className="p-2 bg-slate-900/80 rounded border border-slate-800 text-[10px] space-y-1">
-                            <div className="text-slate-400 flex items-center justify-between">
+                          <div className="p-2 bg-surface rounded border border-borderc text-[10px] space-y-1">
+                            <div className="text-ink-muted flex items-center justify-between">
                               <span>Target Agent:</span>
-                              <strong className="text-slate-200">{inc.target_agent_name}</strong>
+                              <strong className="text-ink">{inc.target_agent_name}</strong>
                             </div>
-                            <div className="text-slate-400 flex items-center justify-between">
+                            <div className="text-ink-muted flex items-center justify-between">
                               <span>Cited Memory:</span>
                               <button
                                 onClick={() =>
@@ -290,7 +241,7 @@ export const SecurityCenterPage: React.FC = () => {
                                     details: inc,
                                   })
                                 }
-                                className="text-cyan-400 hover:underline font-mono"
+                                className="text-brand-teal hover:underline font-mono"
                               >
                                 {inc.tainted_chunk_id}
                               </button>
@@ -298,26 +249,26 @@ export const SecurityCenterPage: React.FC = () => {
                           </div>
 
                           {/* Action Triggers */}
-                          <div className="flex flex-col gap-1.5 pt-1 border-t border-slate-800/80">
+                          <div className="flex flex-col gap-1.5 pt-1 border-t border-borderc">
                             <div className="flex items-center gap-1.5">
                               {/* One-click Quarantine */}
                               <button
                                 onClick={() => handleQuarantine(inc.tainted_chunk_id)}
                                 disabled={isQuarantined || quarantineMutation.isPending}
-                                className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[10px] font-bold transition-all ${
+                                className={`flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[10px] font-bold transition-colors ${
                                   isQuarantined
-                                    ? 'bg-red-950/40 text-red-400 border border-red-800/40 cursor-default'
-                                    : 'bg-red-950 hover:bg-red-900 text-red-200 border border-red-700'
+                                    ? 'bg-status-criticalBg text-status-critical border border-status-critical/30 cursor-default'
+                                    : 'bg-status-criticalBg hover:opacity-90 text-status-critical border border-status-critical/50'
                                 }`}
                                 title="Enforce immediate quarantine exclusion under SEC-004"
                               >
                                 {isQuarantined ? (
                                   <>
-                                    <CheckCircle2 className="w-3 h-3 text-red-400" /> Quarantined
+                                    <CheckCircle2 className="w-3 h-3" /> Quarantined
                                   </>
                                 ) : (
                                   <>
-                                    <Ban className="w-3 h-3 text-red-400" /> Quarantine
+                                    <Ban className="w-3 h-3" /> Quarantine
                                   </>
                                 )}
                               </button>
@@ -325,29 +276,37 @@ export const SecurityCenterPage: React.FC = () => {
                               {/* Escalate to Rewind */}
                               <button
                                 onClick={() => handleEscalateToRewind(inc.id, inc.tainted_chunk_id)}
-                                className="flex-1 flex items-center justify-center gap-1 px-2 py-1 bg-amber-950 hover:bg-amber-900 text-amber-200 border border-amber-700 rounded text-[10px] font-bold transition-all"
+                                className="flex-1 flex items-center justify-center gap-1 px-2 py-1 bg-status-warningBg hover:opacity-90 text-status-warning border border-status-warning/50 rounded text-[10px] font-bold transition-opacity"
                                 title="Escalate to Screen 09 for atomic blast-radius rollback"
                               >
-                                <RotateCcw className="w-3 h-3 text-amber-400" /> Rewind →
+                                <RotateCcw className="w-3 h-3" /> Rewind →
                               </button>
                             </div>
 
-                            {/* Deep Inspect in Drawer */}
-                            <button
-                              onClick={() =>
-                                openInspector({
-                                  title: `Incident Case: ${inc.id}`,
-                                  type: 'INCIDENT',
-                                  id: inc.id,
-                                  trustState: isQuarantined ? 'QUARANTINED' : 'SUSPICIOUS',
-                                  details: inc,
-                                })
-                              }
-                              className="w-full flex items-center justify-center gap-1 py-1 text-[10px] text-slate-400 hover:text-slate-200 hover:bg-slate-900 rounded transition-colors"
-                            >
-                              <span>Open Forensic Dossier</span>
-                              <ArrowUpRight className="w-3 h-3" />
-                            </button>
+                            {/* Deep Inspect in Drawer & Relationship View */}
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => setSelectedIncidentId(inc.id === selectedIncidentId ? null : inc.id)}
+                                className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-brand-teal hover:bg-elevated rounded transition-colors border border-borderc"
+                              >
+                                <span>Relationships</span>
+                              </button>
+                              <button
+                                onClick={() =>
+                                  openInspector({
+                                    title: `Incident Case: ${inc.id}`,
+                                    type: 'INCIDENT',
+                                    id: inc.id,
+                                    trustState: isQuarantined ? 'QUARANTINED' : 'SUSPICIOUS',
+                                    details: inc,
+                                  })
+                                }
+                                className="flex-1 flex items-center justify-center gap-1 py-1 text-[10px] text-ink-muted hover:text-ink hover:bg-elevated rounded transition-colors"
+                              >
+                                <span>Dossier</span>
+                                <ArrowUpRight className="w-3 h-3" />
+                              </button>
+                            </div>
                           </div>
                         </div>
                       );
@@ -358,6 +317,57 @@ export const SecurityCenterPage: React.FC = () => {
             })}
           </div>
         )}
+
+        {/* Investigation Relationship View for Selected Incident */}
+        {(() => {
+          const activeInc = (incidents || []).find((i) => i.id === selectedIncidentId) || (incidents || [])[0];
+          if (!activeInc) return null;
+          const relatedTraces = (traceList?.items || []).filter(
+            (t) => activeInc.target_agent_id && t.agent_id === activeInc.target_agent_id
+          );
+          const provenanceEdges = (graphData?.edges || []).filter(
+            (e) =>
+              activeInc.tainted_chunk_id &&
+              (e.from_record_id === activeInc.tainted_chunk_id || e.to_record_id === activeInc.tainted_chunk_id)
+          );
+          return (
+            <div className="p-4 bg-surface border border-borderc rounded-lg space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2 border-b border-borderc gap-2">
+                <div className="text-xs font-bold text-ink">
+                  Incident Investigation Relationship Map — <span className="text-brand">{activeInc.id}</span>
+                </div>
+                <span className="text-[10px] text-ink-muted">
+                  Confirmed backend links vs. unavailable fields labeled explicitly
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <div className="p-3 bg-canvas border border-borderc rounded">
+                  <div className="text-[10px] text-ink-muted uppercase">Confirmed Incident</div>
+                  <div className="font-bold text-ink mt-0.5 truncate">{activeInc.title}</div>
+                  <div className="text-[10px] text-status-critical mt-0.5">{activeInc.severity} • {activeInc.status}</div>
+                </div>
+                <div className="p-3 bg-canvas border border-borderc rounded">
+                  <div className="text-[10px] text-ink-muted uppercase">Affected Agent</div>
+                  <div className="font-bold text-ink mt-0.5 truncate">
+                    {activeInc.target_agent_name || activeInc.target_agent_id || 'Not linked in incident payload'}
+                  </div>
+                </div>
+                <div className="p-3 bg-canvas border border-borderc rounded">
+                  <div className="text-[10px] text-ink-muted uppercase">Affected Memory</div>
+                  <div className="font-bold text-brand-teal mt-0.5 truncate">
+                    {activeInc.tainted_chunk_id || 'Not linked in incident payload'}
+                  </div>
+                </div>
+                <div className="p-3 bg-canvas border border-borderc rounded">
+                  <div className="text-[10px] text-ink-muted uppercase">Traces &amp; Provenance</div>
+                  <div className="text-[11px] text-ink mt-0.5">
+                    {relatedTraces.length} trace(s) • {provenanceEdges.length} graph edge(s)
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </ForensicErrorBoundary>
   );
