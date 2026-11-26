@@ -284,6 +284,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 observation_repo=app.state.observation_repo,
             )
 
+        # Phase 3: keep the protected company tool registered while Phase 4
+        # wires its observation, checkpoint, isolation, and cancellation services.
+        # A custom registry may already contain other adapters; preserve them.
+        from backend.app.api.gateway import ToolAdapterRegistry
+        from backend.app.gateway.adapters.company import TOOL_NAME, CompanyOperationsAdapter
+
+        tool_registry = getattr(app.state, "tool_registry", None)
+        if tool_registry is None:
+            tool_registry = ToolAdapterRegistry()
+        if tool_registry.get_adapter(TOOL_NAME) is None:
+            tool_registry.register(TOOL_NAME, CompanyOperationsAdapter(session_factory))
+        app.state.tool_registry = tool_registry
+
         if getattr(app.state, "outbox_processor", None) is None:
             from backend.app.workers.outbox import OutboxProcessor, register_default_outbox_handlers
             processor = OutboxProcessor(
