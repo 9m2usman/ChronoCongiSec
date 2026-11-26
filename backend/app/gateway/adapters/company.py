@@ -331,8 +331,10 @@ class CompanyOperationsAdapter:
             return await svc.create_file(ctx, workspace_id=p.workspace_id, name=p.name,
                 content=p.content, content_type=p.content_type, agent_id=agent_id, trace_id=trace_id)
         if operation == "update_file":
-            return await svc.update_file(ctx, file_id=p.file_id, content=p.content,
+            result = await svc.update_file(ctx, file_id=p.file_id, content=p.content,
                 agent_id=agent_id, trace_id=trace_id)
+            result["version"] = result.get("current_version")
+            return result
         if operation == "transfer_file":
             return await svc.create_file_transfer(ctx, file_id=p.file_id,
                 recipient_user_id=p.recipient_user_id, message=p.message,
