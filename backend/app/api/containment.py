@@ -115,6 +115,12 @@ async def apply_containment(
             request,
             persist_evidence=persist_containment_evidence,
         )
+        if not outcome.success:
+            logger.warning(
+                "Containment outcome not successful: status=%s codes=%s",
+                outcome.status.value,
+                outcome.reason_codes,
+            )
         raise_for_containment_outcome(outcome)
         return outcome
     except (

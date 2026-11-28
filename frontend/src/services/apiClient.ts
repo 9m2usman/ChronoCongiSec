@@ -100,6 +100,20 @@ interface FetchOptions extends RequestInit {
 }
 
 class ApiClient {
+  private isDemoMode(): boolean {
+    const store = useWorkstationStore.getState();
+    const envDemo = typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_DEMO_MODE === 'true';
+    return Boolean(store.demoMode || envDemo);
+  }
+
+  private demoFallback<T>(err: unknown, fn: () => T): T {
+    if (!this.isDemoMode()) {
+      if (err instanceof Error) throw err;
+      throw new ApiError('Backend service unavailable', 503);
+    }
+    return fn();
+  }
+
   private getHeaders(tenantId?: string): HeadersInit {
     const store = useWorkstationStore.getState();
     const effectiveTenantId = tenantId || store.currentUser?.active_tenant?.id || store.activeTenant.id;
@@ -415,11 +429,13 @@ class ApiClient {
         return data;
       }
       throw new ApiError(`GET /tenants returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const store = useWorkstationStore.getState();
-      const fixtures = getTenantFixtures(store.activeTenant.id);
-      return fixtures.tenants;
+      return this.demoFallback(err, () => {
+        const store = useWorkstationStore.getState();
+        const fixtures = getTenantFixtures(store.activeTenant.id);
+        return fixtures.tenants;
+      });
     }
   }
 
@@ -433,12 +449,14 @@ class ApiClient {
         return await res.json();
       }
       throw new ApiError(`GET /tenants/${tenantId} returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(tenantId);
-      const match = fixtures.tenants.find((t) => t.id === tenantId);
-      if (!match) throw new ApiError(`Tenant workspace '${tenantId}' not found`, 404);
-      return match;
+      return this.demoFallback(err, () => {
+        const fixtures = getTenantFixtures(tenantId);
+        const match = fixtures.tenants.find((t) => t.id === tenantId);
+        if (!match) throw new ApiError(`Tenant workspace '${tenantId}' not found`, 404);
+        return match;
+      });
     }
   }
 
@@ -482,11 +500,13 @@ class ApiClient {
     } catch (err: any) {
       if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      if (trustState) {
-        return fixtures.memories.filter((m) => m.trust_state === trustState);
-      }
-      return fixtures.memories;
+      return this.demoFallback(err, () => {
+        const fixtures = getTenantFixtures(effectiveTenant);
+        if (trustState) {
+          return fixtures.memories.filter((m) => m.trust_state === trustState);
+        }
+        return fixtures.memories;
+      });
     }
   }
 
@@ -539,28 +559,30 @@ class ApiClient {
     } catch (err) {
       if (err instanceof ApiError) throw err;   // a real server answer is never masked by fixtures
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      const match = fixtures.memoryDetails[recordId];
-      if (match) return match;
-      const mem = fixtures.memories.find((m) => m.id === recordId);
-      if (mem) {
-        return {
-          record: mem,
-          versions: [
-            {
-              id: `ver-${mem.id}-1`,
-              tenant_id: mem.tenant_id,
-              record_id: mem.id,
-              version: mem.current_version,
-              content: mem.content || 'Content unrecorded in version index',
-              checksum: mem.checksum || '0000000000000000000000000000000000000000000000000000000000000000',
-              created_at: mem.created_at,
-            },
-          ],
-          provenance: [],
-        };
-      }
-      throw new ApiError(`Memory record '${recordId}' not found in workspace`, 404);
+      return this.demoFallback(err, () => {
+        const fixtures = getTenantFixtures(effectiveTenant);
+        const match = fixtures.memoryDetails[recordId];
+        if (match) return match;
+        const mem = fixtures.memories.find((m) => m.id === recordId);
+        if (mem) {
+          return {
+            record: mem,
+            versions: [
+              {
+                id: `ver-${mem.id}-1`,
+                tenant_id: mem.tenant_id,
+                record_id: mem.id,
+                version: mem.current_version,
+                content: mem.content || 'Content unrecorded in version index',
+                checksum: mem.checksum || '0000000000000000000000000000000000000000000000000000000000000000',
+                created_at: mem.created_at,
+              },
+            ],
+            provenance: [],
+          };
+        }
+        throw new ApiError(`Memory record '${recordId}' not found in workspace`, 404);
+      });
     }
   }
 
@@ -640,10 +662,9 @@ class ApiClient {
         }));
       }
       throw new ApiError(`GET /agents returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.agents;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).agents);
     }
   }
 
@@ -659,10 +680,9 @@ class ApiClient {
         return await res.json();
       }
       throw new ApiError(`GET /gateway/decisions returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.decisions;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).decisions);
     }
   }
 
@@ -680,10 +700,10 @@ class ApiClient {
       res = await this.fetchWithTimeout(`${API_BASE_URL}/security/incidents`, {
         headers: this.getHeaders(effectiveTenant),
       });
-    } catch {
-      // Server unreachable: labelled fixture fallback (DualModeBadge shows CONTRACT FALLBACK).
+    } catch (err) {
+      // Server unreachable: labelled fixture fallback only in explicit demo mode.
       this.setApiStatus(false);
-      return getTenantFixtures(effectiveTenant).incidents;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).incidents);
     }
     if (!res.ok) {
       if (res.status === 403) throw new AuthorizationError('GET /security/incidents forbidden', res.status);
@@ -708,10 +728,9 @@ class ApiClient {
         return await res.json();
       }
       throw new ApiError(`GET /security/alerts returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.alerts;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).alerts);
     }
   }
 
@@ -745,10 +764,12 @@ class ApiClient {
     } catch (err) {
       if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      const trace = fixtures.traces[traceId] || Object.values(fixtures.traces)[0];
-      if (trace) return trace;
-      throw new ApiError(`Dual trace '${traceId}' not found`, 404);
+      return this.demoFallback(err, () => {
+        const fixtures = getTenantFixtures(effectiveTenant);
+        const trace = fixtures.traces[traceId] || Object.values(fixtures.traces)[0];
+        if (trace) return trace;
+        throw new ApiError(`Dual trace '${traceId}' not found`, 404);
+      });
     }
   }
 
@@ -764,31 +785,33 @@ class ApiClient {
         return await res.json();
       }
       throw new ApiError(`GET /chronimem/timeline returned ${res.status}`, res.status);
-    } catch {
+    } catch (err) {
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      const match = fixtures.chronimem[recordId];
-      if (match) return match;
+      return this.demoFallback(err, () => {
+        const fixtures = getTenantFixtures(effectiveTenant);
+        const match = fixtures.chronimem[recordId];
+        if (match) return match;
 
-      // Construct dynamic timeline from memoryDetails if present
-      const memDetail = fixtures.memoryDetails[recordId];
-      if (memDetail && memDetail.versions?.length > 0) {
-        return {
-          record_id: recordId,
-          tenant_id: effectiveTenant,
-          current_version: memDetail.record.current_version,
-          versions: memDetail.versions.map((v) => ({
-            version: v.version,
-            time_display: `Version ${v.version}`,
-            checksum: v.checksum,
-            author: 'Ingest Pipeline',
-            trust_state: memDetail.record.trust_state as any,
-            content: v.content,
-            created_at: v.created_at || new Date().toISOString(),
-          })),
-        };
-      }
-      throw new ApiError(`ChroniMem history for record '${recordId}' unavailable`, 404);
+        // Construct dynamic timeline from memoryDetails if present
+        const memDetail = fixtures.memoryDetails[recordId];
+        if (memDetail && memDetail.versions?.length > 0) {
+          return {
+            record_id: recordId,
+            tenant_id: effectiveTenant,
+            current_version: memDetail.record.current_version,
+            versions: memDetail.versions.map((v) => ({
+              version: v.version,
+              time_display: `Version ${v.version}`,
+              checksum: v.checksum,
+              author: 'Ingest Pipeline',
+              trust_state: memDetail.record.trust_state as any,
+              content: v.content,
+              created_at: v.created_at || new Date().toISOString(),
+            })),
+          };
+        }
+        throw new ApiError(`ChroniMem history for record '${recordId}' unavailable`, 404);
+      });
     }
   }
 
@@ -823,8 +846,7 @@ class ApiClient {
     } catch (err) {
       if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.drift;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).drift);
     }
   }
 
@@ -956,8 +978,7 @@ class ApiClient {
     } catch (err) {
       if (err instanceof ApiError) throw err;
       this.setApiStatus(false);
-      const fixtures = getTenantFixtures(effectiveTenant);
-      return fixtures.auditLogs;
+      return this.demoFallback(err, () => getTenantFixtures(effectiveTenant).auditLogs);
     }
   }
 
@@ -1323,6 +1344,239 @@ class ApiClient {
       return await res.json();
     }
     throw new ApiError(`GET /enterprise/audit failed (HTTP ${res.status})`, res.status);
+  }
+
+  // --- Phase 2 / 6A Company Application Endpoints ---
+  async listWorkspaces(): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/workspaces`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/workspaces failed (HTTP ${res.status})`, res.status);
+  }
+
+  async createWorkspace(payload: { name: string; description?: string; visibility?: 'PRIVATE' | 'BRANCH' }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/workspaces`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/workspaces failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listCompanyFiles(workspaceId?: string, includeDeleted = false): Promise<{ items: any[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (workspaceId) qs.set('workspace_id', workspaceId);
+    if (includeDeleted) qs.set('include_deleted', 'true');
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files${q}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/files failed (HTTP ${res.status})`, res.status);
+  }
+
+  async createCompanyFile(payload: { workspace_id: string; name: string; content: string; content_type?: string }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/files failed (HTTP ${res.status})`, res.status);
+  }
+
+  async readCompanyFile(fileId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files/${fileId}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/files/${fileId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async updateCompanyFile(fileId: string, content: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files/${fileId}`, {
+      method: 'PUT', headers: this.getHeaders(), body: JSON.stringify({ content }),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`PUT /company/files/${fileId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async deleteCompanyFile(fileId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files/${fileId}`, {
+      method: 'DELETE', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`DELETE /company/files/${fileId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async restoreCompanyFile(fileId: string, targetVersion?: number): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files/${fileId}/restore`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(targetVersion ? { target_version: targetVersion } : {}),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/files/${fileId}/restore failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listFileVersions(fileId: string): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/files/${fileId}/versions`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/files/${fileId}/versions failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listFileTransfers(direction: 'all' | 'incoming' | 'outgoing' = 'all'): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/transfers?direction=${direction}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/transfers failed (HTTP ${res.status})`, res.status);
+  }
+
+  async createFileTransfer(payload: { file_id: string; recipient_user_id: string; message?: string }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/transfers`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/transfers failed (HTTP ${res.status})`, res.status);
+  }
+
+  async acceptFileTransfer(transferId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/transfers/${transferId}/accept`, {
+      method: 'POST', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/transfers/${transferId}/accept failed (HTTP ${res.status})`, res.status);
+  }
+
+  async rejectFileTransfer(transferId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/transfers/${transferId}/reject`, {
+      method: 'POST', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/transfers/${transferId}/reject failed (HTTP ${res.status})`, res.status);
+  }
+
+  async cancelFileTransfer(transferId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/transfers/${transferId}/cancel`, {
+      method: 'POST', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/transfers/${transferId}/cancel failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listCompanyTasks(workspaceId?: string, status?: string): Promise<{ items: any[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (workspaceId) qs.set('workspace_id', workspaceId);
+    if (status) qs.set('status', status);
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/tasks${q}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/tasks failed (HTTP ${res.status})`, res.status);
+  }
+
+  async createCompanyTask(payload: { workspace_id: string; title: string; description?: string; priority?: string; assigned_to_user_id?: string }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/tasks`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/tasks failed (HTTP ${res.status})`, res.status);
+  }
+
+  async updateCompanyTask(taskId: string, payload: { status?: string; assigned_to_user_id?: string }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/tasks/${taskId}`, {
+      method: 'PATCH', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`PATCH /company/tasks/${taskId} failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listTaskEvents(taskId: string): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/tasks/${taskId}/events`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/tasks/${taskId}/events failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listCompanyMessages(box: 'inbox' | 'sent' | 'all' = 'inbox'): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/messages?box=${box}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/messages failed (HTTP ${res.status})`, res.status);
+  }
+
+  async sendCompanyMessage(payload: { recipient_user_id: string; subject: string; body: string }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/messages`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/messages failed (HTTP ${res.status})`, res.status);
+  }
+
+  async markMessageRead(messageId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/messages/${messageId}/read`, {
+      method: 'POST', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/messages/${messageId}/read failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listCompanyNotifications(unreadOnly = false): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/notifications?unread_only=${unreadOnly}`, {
+      headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/notifications failed (HTTP ${res.status})`, res.status);
+  }
+
+  async markNotificationRead(notificationId: string): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/notifications/${notificationId}/read`, {
+      method: 'POST', headers: this.getHeaders(),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /company/notifications/${notificationId}/read failed (HTTP ${res.status})`, res.status);
+  }
+
+  async listCompanyActivity(limit = 50): Promise<{ items: any[]; total: number }> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/company/activity?limit=${limit}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /company/activity failed (HTTP ${res.status})`, res.status);
+  }
+
+  async proposeGatewayAction(payload: {
+    agent_id: string;
+    tool_name: string;
+    operation: string;
+    parameters: Record<string, any>;
+    memory_refs?: string[];
+    idempotency_key?: string;
+    action_id?: string;
+  }): Promise<any> {
+    const body = {
+      agent_id: payload.agent_id,
+      tool_name: payload.tool_name,
+      operation: payload.operation,
+      parameters: payload.parameters,
+      memory_refs: payload.memory_refs || [],
+      idempotency_key: payload.idempotency_key || `ui-gw-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+      action_id: payload.action_id || `act-ui-${Date.now()}`,
+      trace_id: `tr-ui-${Date.now()}`,
+    };
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/gateway/actions/propose`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(body),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    const errText = await res.text().catch(() => '');
+    throw new ApiError(`POST /gateway/actions/propose failed (HTTP ${res.status}): ${errText}`, res.status);
+  }
+
+  async approveRecoveryPlan(planId: string, payload?: { approval_id?: string; runtime_cancellation_verified?: boolean }): Promise<any> {
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/recovery/plans/${planId}/approve`, {
+      method: 'POST', headers: this.getHeaders(), body: JSON.stringify(payload || {}),
+    });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`POST /recovery/plans/${planId}/approve failed (HTTP ${res.status})`, res.status);
+  }
+
+  async getForensicTimeline(params?: { incident_id?: string; trace_id?: string; agent_id?: string; resource_id?: string; limit?: number }): Promise<{ items: any[]; total: number }> {
+    const qs = new URLSearchParams();
+    if (params?.incident_id) qs.set('incident_id', params.incident_id);
+    if (params?.trace_id) qs.set('trace_id', params.trace_id);
+    if (params?.agent_id) qs.set('agent_id', params.agent_id);
+    if (params?.resource_id) qs.set('resource_id', params.resource_id);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const q = qs.toString() ? `?${qs.toString()}` : '';
+    const res = await this.fetchWithTimeout(`${API_BASE_URL}/recovery/forensics/timeline${q}`, { headers: this.getHeaders() });
+    if (res.ok) { this.setApiStatus(true); return await res.json(); }
+    throw new ApiError(`GET /recovery/forensics/timeline failed (HTTP ${res.status})`, res.status);
   }
 }
 

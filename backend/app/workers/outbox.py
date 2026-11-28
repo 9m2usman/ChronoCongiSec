@@ -526,12 +526,57 @@ PHASE1_OUTBOX_EVENT_TYPES = (
     "AUDIT_EVENT_EMITTED",
 )
 
+COMPANY_OUTBOX_EVENT_TYPES = (
+    "COMPANY_WORKSPACE_CREATED",
+    "COMPANY_FILE_CREATED",
+    "COMPANY_FILE_UPDATED",
+    "COMPANY_FILE_DELETED",
+    "COMPANY_FILE_RESTORED",
+    "COMPANY_FILE_TRANSFER_CREATED",
+    "COMPANY_FILE_TRANSFER_ACCEPTED",
+    "COMPANY_FILE_TRANSFER_REJECTED",
+    "COMPANY_FILE_TRANSFER_CANCELLED",
+    "COMPANY_TASK_CREATED",
+    "COMPANY_TASK_UPDATED",
+    "COMPANY_MESSAGE_SENT",
+    "COMPANY_MESSAGE_READ",
+    "COMPANY_NOTIFICATION_CREATED",
+    "COMPANY_NOTIFICATION_READ",
+)
+
+GATEWAY_OUTBOX_EVENT_TYPES = (
+    "GATEWAY_ACTION_PROPOSED",
+    "GATEWAY_ACTION_EXECUTED",
+    "GATEWAY_ACTION_FAILED",
+)
+
+SECURITY_OUTBOX_EVENT_TYPES = (
+    "SECURITY_DETECTION_RECORDED",
+    "SECURITY_CONTAINMENT_EXECUTED",
+    "COMPANY_RESOURCE_ISOLATED",
+)
+
+RECOVERY_OUTBOX_EVENT_TYPES = (
+    "RECOVERY_PLAN_CREATED",
+    "RECOVERY_PLAN_APPROVED",
+    "RECOVERY_EXECUTED",
+    "RECOVERY_FAILED",
+)
+
+ALL_SUPPORTED_OUTBOX_EVENT_TYPES = (
+    *PHASE1_OUTBOX_EVENT_TYPES,
+    *COMPANY_OUTBOX_EVENT_TYPES,
+    *GATEWAY_OUTBOX_EVENT_TYPES,
+    *SECURITY_OUTBOX_EVENT_TYPES,
+    *RECOVERY_OUTBOX_EVENT_TYPES,
+)
+
 
 def register_default_outbox_handlers(
     processor: OutboxProcessor,
     on_event: Optional[Callable[[OutboxEvent], Any]] = None,
 ) -> None:
-    """Register handlers for supported Phase 1 outbox event types.
+    """Register handlers for supported AMSC outbox event types.
 
     Unknown event types remain deliberately unregistered so they move to
     DEAD_LETTER and are never falsely reported as PUBLISHED.
@@ -548,7 +593,7 @@ def register_default_outbox_handlers(
             if inspect.isawaitable(res):
                 await res
 
-    for event_type in PHASE1_OUTBOX_EVENT_TYPES:
+    for event_type in ALL_SUPPORTED_OUTBOX_EVENT_TYPES:
         if event_type not in processor.handlers:
             processor.register_handler(event_type, _default_handler)
 

@@ -1015,7 +1015,11 @@ class DetectionEngine:
                         has_neg_base = bool(re.search(neg_pat, base_lower))
                         has_pos_claim = bool(re.search(pos_pat, claim_lower))
 
-                        if (has_pos_base and has_neg_claim) or (has_neg_base and has_pos_claim):
+                        is_inversion = (
+                            ((has_pos_base and has_neg_claim) or (has_neg_base and has_pos_claim))
+                            and not (has_pos_base and has_neg_base and has_pos_claim and has_neg_claim)
+                        )
+                        if is_inversion:
                             findings.append(DetectionResult(
                                 id=f"det-{uuid.uuid4().hex[:16]}",
                                 tenant_id=tenant_id,

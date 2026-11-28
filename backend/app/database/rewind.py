@@ -48,6 +48,16 @@ from backend.app.database.models import (
     RecoveryAction,
     RecoveryPlan,
 )
+from backend.app.database.models.company import (
+    CompanyActivity,
+    CompanyFile,
+    CompanyFileTransfer,
+    CompanyFileVersion,
+    CompanyMessage,
+    CompanyTask,
+    CompanyTaskEvent,
+    CompanyWorkspace,
+)
 from backend.app.database.unit_of_work import UnitOfWork
 
 SNAPSHOT_SHA256_OF_PARAM = "encode(sha256(convert_to(CAST(:snapshot AS jsonb)::text, 'UTF8')), 'hex')"
@@ -220,6 +230,160 @@ class RecoveryTransaction:
         await self.session.flush()
         self.actions_recorded += 1
         return action
+
+    async def restore_company_file(
+        self,
+        file_id: str,
+        *,
+        target_version: int,
+        expected_checksum: Optional[str] = None,
+        target_status: str = "ACTIVE",
+    ) -> dict[str, Any]:
+        """Restore a CompanyFile's current_version and status inside the rollback transaction."""
+        _check_id("file_id", file_id)
+        if isinstance(target_version, bool) or not isinstance(target_version, int) or target_version < 1:
+            raise ValueError("target_version must be a positive integer")
+        file_row = (
+            await self.session.execute(
+                select(CompanyFile)
+                .where(CompanyFile.tenant_id == self.tenant_id, CompanyFile.id == file_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if file_row is None:
+            raise RecordNotFound(f"company file {file_id!r} not found in this tenant")
+        ver_row = (
+            await self.session.execute(
+                select(CompanyFileVersion).where(
+                    CompanyFileVersion.tenant_id == self.tenant_id,
+                    CompanyFileVersion.file_id == file_id,
+                    CompanyFileVersion.version_number == target_version,
+                )
+            )
+        ).scalar_one_or_none()
+        if ver_row is None:
+            raise RecordNotFound(f"company file {file_id!r} version {target_version} not found")
+        if expected_checksum and ver_row.checksum != expected_checksum:
+            raise RewindError(
+                f"company file {file_id!r} version {target_version} checksum mismatch: "
+                f"expected {expected_checksum}, got {ver_row.checksum}"
+            )
+        ws = (
+            await self.session.execute(
+                select(CompanyWorkspace).where(
+                    CompanyWorkspace.tenant_id == self.tenant_id,
+                    CompanyWorkspace.id == file_row.workspace_id,
+                )
+            )
+        ).scalar_one_or_none()
+        file_row.current_version = target_version
+        file_row.status = target_status
+        file_row.deleted_at = None if target_status == "ACTIVE" else func.now()
+        file_row.updated_at = func.now()
+        self.session.add(
+            CompanyActivity(
+                id=f"cact-{uuid.uuid4().hex[:24]}",
+                tenant_id=self.tenant_id,
+                branch_id=ws.branch_id if ws else None,
+                actor_user_id=file_row.owner_user_id,
+                event_type="FILE_RECOVERED",
+                resource_type="FILE",
+                resource_id=file_id,
+                summary=f"Recovered file '{file_row.name}' to version {target_version}",
+                details={"target_version": target_version, "checksum": ver_row.checksum, "plan_id": self.plan_id},
+            )
+        )
+        await self.session.flush()
+        return {
+            "resource_type": "FILE",
+            "resource_id": file_id,
+            "restored_version": target_version,
+            "checksum": ver_row.checksum,
+            "status": target_status,
+        }
+
+    async def restore_company_file_transfer(
+        self,
+        transfer_id: str,
+        *,
+        target_status: str,
+    ) -> dict[str, Any]:
+        """Restore a CompanyFileTransfer's status inside the rollback transaction."""
+        _check_id("transfer_id", transfer_id)
+        tr = (
+            await self.session.execute(
+                select(CompanyFileTransfer)
+                .where(CompanyFileTransfer.tenant_id == self.tenant_id, CompanyFileTransfer.id == transfer_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if tr is None:
+            raise RecordNotFound(f"company file transfer {transfer_id!r} not found in this tenant")
+        tr.status = target_status
+        if target_status == "PENDING":
+            tr.responded_at = None
+        await self.session.flush()
+        return {"resource_type": "FILE_TRANSFER", "resource_id": transfer_id, "status": target_status}
+
+    async def restore_company_task(
+        self,
+        task_id: str,
+        *,
+        target_status: str,
+        target_assigned_to_user_id: Optional[str] = None,
+        target_priority: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Restore a CompanyTask's status/assignee/priority inside the rollback transaction."""
+        _check_id("task_id", task_id)
+        task = (
+            await self.session.execute(
+                select(CompanyTask)
+                .where(CompanyTask.tenant_id == self.tenant_id, CompanyTask.id == task_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if task is None:
+            raise RecordNotFound(f"company task {task_id!r} not found in this tenant")
+        task.status = target_status
+        task.assigned_to_user_id = target_assigned_to_user_id
+        if target_priority is not None:
+            task.priority = target_priority
+        task.updated_at = func.now()
+        self.session.add(
+            CompanyTaskEvent(
+                id=f"tevt-{uuid.uuid4().hex[:24]}",
+                tenant_id=self.tenant_id,
+                task_id=task_id,
+                actor_user_id=task.created_by_user_id,
+                event_type="RECOVERED",
+                details={"status": target_status, "plan_id": self.plan_id},
+            )
+        )
+        await self.session.flush()
+        return {"resource_type": "TASK", "resource_id": task_id, "status": target_status}
+
+    async def restore_company_message(
+        self,
+        message_id: str,
+        *,
+        target_status: str,
+    ) -> dict[str, Any]:
+        """Restore a CompanyMessage's status inside the rollback transaction."""
+        _check_id("message_id", message_id)
+        msg = (
+            await self.session.execute(
+                select(CompanyMessage)
+                .where(CompanyMessage.tenant_id == self.tenant_id, CompanyMessage.id == message_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if msg is None:
+            raise RecordNotFound(f"company message {message_id!r} not found in this tenant")
+        msg.status = target_status
+        if target_status == "SENT":
+            msg.read_at = None
+        await self.session.flush()
+        return {"resource_type": "MESSAGE", "resource_id": message_id, "status": target_status}
 
 
 def _new_id() -> str:

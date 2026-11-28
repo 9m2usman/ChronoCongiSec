@@ -20,6 +20,7 @@ from ml.model_registry.registry import ModelRegistry
 from ml.models.anomaly_detector.sequence_anomaly_model import BehavioralSequenceAnomalyDetector
 from ml.models.injection_detector.model import TfidfLinearInjectionClassifier
 from ml.models.memory_trust.semantic_drift_model import SemanticDriftAndClaimAnalyzer
+from ml.preprocessing.text_sanitizer import sanitize_text_for_ml
 
 
 def train_and_register_all(registry_dir: Path | None = None) -> Dict[str, str]:
@@ -33,14 +34,14 @@ def train_and_register_all(registry_dir: Path | None = None) -> Dict[str, str]:
 
     inj_model = TfidfLinearInjectionClassifier(version="injection-lr/1.0.0", threshold=0.46)
     inj_model.fit(
-        [s.text for s in inj_train],
+        [sanitize_text_for_ml(s.text)[0] for s in inj_train],
         [s.label for s in inj_train],
         max_vocab=2500,
         min_df=1,
         l2_reg=0.4,
         lr=0.6,
         epochs=250,
-        val_texts=[s.text for s in inj_val],
+        val_texts=[sanitize_text_for_ml(s.text)[0] for s in inj_val],
         val_labels=[s.label for s in inj_val],
     )
     inj_meta = registry.save_artifact(

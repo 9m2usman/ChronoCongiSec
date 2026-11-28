@@ -181,7 +181,7 @@ class ContainmentRequest(BaseModel):
 
     incident_id: str = Field(min_length=1, max_length=128)
     containment_actions: Tuple[ContainmentAction, ...] = Field(
-        min_items=1, max_items=10
+        min_length=1, max_length=10
     )
     reason: str = Field(min_length=1, max_length=1000)
     reason_code: ContainmentReasonCode = ContainmentReasonCode.INCIDENT_RESPONSE
@@ -306,8 +306,10 @@ class ContainmentService:
 
             # Every requested action gets an independent, attributable outcome.
             outcomes = []
-            for action in req.containment_actions:
+            for idx, action in enumerate(req.containment_actions):
                 action_facts = dict(facts)
+                if idx > 0:
+                    action_facts["outcome_id"] = f"cont-{uuid.uuid4().hex[:16]}"
                 for key in ("containment_type", "target_id", "previous_state", "resulting_state"):
                     action_facts.pop(key, None)
                 outcome = await self._apply_containment_action(
@@ -666,9 +668,14 @@ class ContainmentService:
         if not isinstance(resource_type, str) or not resource_type.strip():
             raise _Stop(ContainmentStatus.DENIED, ContainmentReasonCode.REQUEST_INVALID)
 
+        iso_branch = (
+            None
+            if facts.get("actor_role") == "TENANT_ADMIN"
+            else getattr(context, "branch_id", None)
+        )
         result = await isolate(
             tenant_id=facts["tenant_id"],
-            branch_id=getattr(context, "branch_id", None),
+            branch_id=iso_branch,
             resource_type=resource_type,
             resource_id=action.target_id,
             actor_id=facts["actor_id"],

@@ -81,6 +81,7 @@ class SqlCheckpointReader:
                     )
                 )
 
+            snap_data = cp.snapshot_data_json if isinstance(cp.snapshot_data_json, dict) else {}
             return CheckpointView(
                 id=cp.id,
                 tenant_id=cp.tenant_id,
@@ -88,6 +89,9 @@ class SqlCheckpointReader:
                 integrity_hash=cp.integrity_hash,
                 created_at=cp.created_at,
                 items=tuple(item_views),
+                resources=tuple(snap_data.get("resources") or ()),
+                agent_id=snap_data.get("agent_id"),
+                trace_id=snap_data.get("trace_id"),
             )
 
 
@@ -98,6 +102,13 @@ class SqlRecoveryPlanStore:
         self.session_factory = session_factory
 
     async def create(self, plan: RecoveryPlanRecord) -> None:
+        from backend.app.workers.outbox import publish_outbox_event
+
+        preview_payload = dict(plan.impact_preview)
+        preview_payload["_preview_fingerprint"] = plan.preview_fingerprint
+        preview_section = preview_payload.get("preview") or {}
+        is_company_only = bool(preview_section.get("company_resources")) and not bool(preview_section.get("affected_records"))
+        db_target_record_id = None if is_company_only else (plan.target_record_id or None)
         async with self.session_factory() as session:
             async with session.begin():
                 db_plan = RecoveryPlan(
@@ -105,13 +116,26 @@ class SqlRecoveryPlanStore:
                     tenant_id=plan.tenant_id,
                     incident_id=plan.incident_id,
                     checkpoint_id=plan.checkpoint_id,
-                    target_record_id=plan.target_record_id,
+                    target_record_id=db_target_record_id,
                     status=plan.status,
                     pre_recovery_snapshot_json={},
                     pre_recovery_snapshot_sha256=None,
-                    impact_preview_json=dict(plan.impact_preview),
+                    impact_preview_json=preview_payload,
                 )
                 session.add(db_plan)
+                await publish_outbox_event(
+                    session,
+                    tenant_id=plan.tenant_id,
+                    event_type="RECOVERY_PLAN_CREATED",
+                    payload={
+                        "plan_id": plan.id,
+                        "checkpoint_id": plan.checkpoint_id,
+                        "target_record_id": plan.target_record_id,
+                        "incident_id": plan.incident_id,
+                        "status": plan.status,
+                    },
+                    idempotency_key=f"recovery-plan-create-{plan.tenant_id}-{plan.id}",
+                )
 
     async def get(self, tenant_id: str, plan_id: str) -> Optional[RecoveryPlanRecord]:
         async with self.session_factory() as session:
@@ -123,18 +147,73 @@ class SqlRecoveryPlanStore:
             if row is None:
                 return None
 
+            raw_preview = dict(row.impact_preview_json or {})
+            stored_fp = raw_preview.get("_preview_fingerprint")
+            approval = raw_preview.get("_approval") or {}
+            clean_preview = {k: v for k, v in raw_preview.items() if k not in ("_preview_fingerprint", "_approval")}
             return RecoveryPlanRecord(
                 id=row.id,
                 tenant_id=row.tenant_id,
                 checkpoint_id=row.checkpoint_id,
-                target_record_id=row.target_record_id or "",
+                target_record_id=row.target_record_id or (clean_preview.get("preview") or {}).get("target_record_id") or "",
                 incident_id=row.incident_id,
                 status=row.status,
-                preview_fingerprint=_fingerprint(row.impact_preview_json),
-                impact_preview=row.impact_preview_json,
+                preview_fingerprint=stored_fp or _fingerprint(clean_preview),
+                impact_preview=clean_preview,
                 created_by="system",
                 snapshot_sha256=row.pre_recovery_snapshot_sha256,
+                approved_by=approval.get("approved_by"),
+                approved_at=approval.get("approved_at"),
+                approval_id=approval.get("approval_id"),
+                runtime_cancellation_verified=bool(approval.get("runtime_cancellation_verified", False)),
             )
+
+    async def approve(
+        self,
+        tenant_id: str,
+        plan_id: str,
+        *,
+        approved_by: str,
+        approved_at: str,
+        approval_id: str,
+        runtime_cancellation_verified: bool,
+    ) -> bool:
+        from backend.app.workers.outbox import publish_outbox_event
+
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(RecoveryPlan).where(
+                            RecoveryPlan.id == plan_id,
+                            RecoveryPlan.tenant_id == tenant_id,
+                        ).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if row is None or row.status not in ("PREVIEWED", "APPROVED", "FAILED"):
+                    return False
+                preview = dict(row.impact_preview_json or {})
+                preview["_approval"] = {
+                    "approved_by": approved_by,
+                    "approved_at": approved_at,
+                    "approval_id": approval_id,
+                    "runtime_cancellation_verified": runtime_cancellation_verified,
+                }
+                row.impact_preview_json = preview
+                row.status = "APPROVED"
+                await publish_outbox_event(
+                    session,
+                    tenant_id=tenant_id,
+                    event_type="RECOVERY_PLAN_APPROVED",
+                    payload={
+                        "plan_id": plan_id,
+                        "approved_by": approved_by,
+                        "approval_id": approval_id,
+                        "runtime_cancellation_verified": runtime_cancellation_verified,
+                    },
+                    idempotency_key=f"recovery-plan-approve-{tenant_id}-{plan_id}-{approval_id}",
+                )
+                return True
 
     async def transition(
         self,
@@ -146,6 +225,8 @@ class SqlRecoveryPlanStore:
         snapshot_sha256: Optional[str] = None,
     ) -> bool:
         """Compare-and-set status transition."""
+        from backend.app.workers.outbox import publish_outbox_event
+
         async with self.session_factory() as session:
             async with session.begin():
                 values: Dict[str, Any] = {"status": new_status}
@@ -162,6 +243,13 @@ class SqlRecoveryPlanStore:
                     .values(**values)
                 )
                 result = await session.execute(stmt)
+                if result.rowcount > 0 and new_status in ("EXECUTED", "FAILED"):
+                    await publish_outbox_event(
+                        session,
+                        tenant_id=tenant_id,
+                        event_type="RECOVERY_EXECUTED" if new_status == "EXECUTED" else "RECOVERY_FAILED",
+                        payload={"plan_id": plan_id, "status": new_status},
+                    )
                 return result.rowcount > 0
 
 
@@ -187,7 +275,7 @@ class SqlExternalActionReader:
                 )
                 .where(
                     ToolExecution.tenant_id == tenant_id,
-                    ToolExecution.created_at >= since,
+                    ToolExecution.executed_at >= since,
                 )
             )
             rows = (await session.execute(stmt)).all()

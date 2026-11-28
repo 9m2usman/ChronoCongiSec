@@ -16,6 +16,7 @@ import { AgentRewindingPage } from '@/pages/AgentRewindingPage';
 import { AuditCenterPage } from '@/pages/AuditCenterPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 import { EnterpriseConnectivityPage } from '@/pages/EnterpriseConnectivityPage';
+import { EmployeeWorkstationPage } from '@/pages/EmployeeWorkstationPage';
 
 export const router = createBrowserRouter([
   {
@@ -52,6 +53,11 @@ export const router = createBrowserRouter([
       { path: 'rewind', element: <AgentRewindingPage /> },
       { path: 'audit', element: <AuditCenterPage /> },
       { path: 'enterprise', element: <EnterpriseConnectivityPage /> },
+      { path: 'workstation', element: <EmployeeWorkstationPage initialTab="workspaces" /> },
+      { path: 'workstation/files', element: <EmployeeWorkstationPage initialTab="files" /> },
+      { path: 'workstation/tasks', element: <EmployeeWorkstationPage initialTab="tasks" /> },
+      { path: 'workstation/messages', element: <EmployeeWorkstationPage initialTab="messages" /> },
+      { path: 'workstation/agent-exec', element: <EmployeeWorkstationPage initialTab="agent-exec" /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
   },

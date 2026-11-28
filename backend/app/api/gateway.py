@@ -735,6 +735,24 @@ class SqlAlchemyGatewayRepository:
                     )
                     session.add(db_audit)
 
+                from backend.app.workers.outbox import publish_outbox_event
+
+                await publish_outbox_event(
+                    session,
+                    tenant_id=proposal.tenant_id,
+                    event_type="GATEWAY_ACTION_PROPOSED",
+                    payload={
+                        "proposal_id": proposal.id,
+                        "decision_id": decision.id,
+                        "agent_id": proposal.agent_id,
+                        "tool_name": proposal.tool_name,
+                        "operation": proposal.operation,
+                        "decision": decision.decision,
+                        "trace_id": proposal.trace_id,
+                    },
+                    idempotency_key=f"gw-prop-{proposal.tenant_id}-{proposal.id}",
+                )
+
                 try:
                     await session.commit()
                 except IntegrityError as exc:
@@ -795,6 +813,27 @@ class SqlAlchemyGatewayRepository:
                         details_json=audit_event.details_json,
                     )
                     session.add(db_audit)
+
+                from backend.app.workers.outbox import publish_outbox_event
+
+                event_type = (
+                    "GATEWAY_ACTION_EXECUTED"
+                    if execution.status == "SUCCESS"
+                    else "GATEWAY_ACTION_FAILED"
+                )
+                await publish_outbox_event(
+                    session,
+                    tenant_id=tenant_id,
+                    event_type=event_type,
+                    payload={
+                        "proposal_id": proposal_id,
+                        "decision_id": decision_id,
+                        "execution_id": execution.id,
+                        "status": execution.status,
+                        "status_code": execution.status_code,
+                    },
+                    idempotency_key=f"gw-exec-{tenant_id}-{execution.id}",
+                )
 
                 await session.commit()
 

@@ -41,7 +41,7 @@ from backend.app.company.service import CompanyResourceService
 
 from backend.app.database.models.agents import Agent
 from backend.app.database.models.baseline import AgentSecurityProfile
-from backend.app.database.models.company import CompanyFile, CompanyMessage, CompanyTask, CompanyWorkspace
+from backend.app.database.models.company import CompanyFile, CompanyTask, CompanyWorkspace
 from backend.app.database.models.identity import Membership, Tenant
 from backend.app.tenancy.context import TenantContext
 
@@ -291,36 +291,10 @@ class CompanyOperationsAdapter:
         agent_id, trace_id = context["agent_id"], context["trace_id"]
 
         if operation == "list_workspaces":
-            async with self._session_factory() as session:
-                rows = (await session.execute(select(CompanyWorkspace).where(
-                    CompanyWorkspace.tenant_id == ctx.tenant_id,
-                    CompanyWorkspace.branch_id == ctx.branch_id,
-                ))).scalars().all()
-            return [{"id": w.id, "tenant_id": w.tenant_id, "branch_id": w.branch_id,
-                     "owner_user_id": w.owner_user_id, "name": w.name,
-                     "visibility": w.visibility} for w in rows
-                    if not await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "WORKSPACE", w.id)]
+            return await svc.list_workspaces(ctx)
 
         if operation == "list_files":
-            async with self._session_factory() as session:
-                rows = (await session.execute(
-                    select(CompanyFile, CompanyWorkspace.branch_id)
-                    .join(CompanyWorkspace, (CompanyWorkspace.id == CompanyFile.workspace_id)
-                          & (CompanyWorkspace.tenant_id == CompanyFile.tenant_id))
-                    .where(CompanyFile.tenant_id == ctx.tenant_id,
-                           CompanyFile.workspace_id == p.workspace_id,
-                           CompanyWorkspace.branch_id == ctx.branch_id,
-                           CompanyFile.status == "ACTIVE")
-                )).all()
-            result = []
-            for file_row, branch_id in rows:
-                if await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "FILE", file_row.id):
-                    continue
-                result.append({"id": file_row.id, "tenant_id": file_row.tenant_id,
-                               "workspace_id": file_row.workspace_id, "branch_id": branch_id,
-                               "owner_user_id": file_row.owner_user_id, "name": file_row.name,
-                               "current_version": file_row.current_version, "status": file_row.status})
-            return result
+            return await svc.list_files(ctx, workspace_id=p.workspace_id)
 
         if operation == "read_file":
             result = await svc.read_file(ctx, file_id=p.file_id, agent_id=agent_id, trace_id=trace_id)
@@ -353,16 +327,7 @@ class CompanyOperationsAdapter:
             return await svc.send_message(ctx, recipient_user_id=p.recipient_user_id,
                 subject=p.subject, body=p.body, agent_id=agent_id, trace_id=trace_id)
         if operation == "read_inbox":
-            async with self._session_factory() as session:
-                rows = (await session.execute(select(CompanyMessage).where(
-                    CompanyMessage.tenant_id == ctx.tenant_id,
-                    CompanyMessage.recipient_user_id == ctx.user_id,
-                    CompanyMessage.status == "SENT",
-                ).order_by(CompanyMessage.sent_at.desc()))).scalars().all()
-            return [{"id": m.id, "tenant_id": m.tenant_id, "sender_user_id": m.sender_user_id,
-                     "recipient_user_id": m.recipient_user_id, "subject": m.subject,
-                     "body": m.body, "status": m.status} for m in rows
-                    if not await svc._isolation_adapter.is_resource_isolated(ctx.tenant_id, "MESSAGE", m.id)]
+            return await svc.list_messages(ctx, box="inbox")
         raise _Denied(400, f"Unsupported operation '{operation}'.", "OPERATION_UNSUPPORTED")
 
     # ---------------------------------------------------------------- contract

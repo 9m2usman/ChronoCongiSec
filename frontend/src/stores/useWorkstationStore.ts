@@ -77,9 +77,28 @@ interface WorkstationState {
   attackReplayOpen: boolean;
   setAttackReplayOpen: (open: boolean) => void;
 
-  // API Mode
+  // API Mode & Explicit Demo Mode
   apiMode: ApiMode;
   setApiMode: (mode: ApiMode) => void;
+  demoMode: boolean;
+  setDemoMode: (enabled: boolean) => void;
+
+  // Real-time Outbox Stream
+  realtimeConnected: boolean;
+  setRealtimeConnected: (connected: boolean) => void;
+  lastRealtimeEventId: string | null;
+  realtimeEvents: Array<{
+    id: string;
+    event_type: string;
+    payload: Record<string, unknown>;
+    created_at: string;
+  }>;
+  pushRealtimeEvent: (ev: {
+    id: string;
+    event_type: string;
+    payload: Record<string, unknown>;
+    created_at: string;
+  }) => void;
 
   // Theme
   theme: WorkstationTheme;
@@ -222,8 +241,25 @@ export const useWorkstationStore = create<WorkstationState>((set) => ({
   attackReplayOpen: false,
   setAttackReplayOpen: (open) => set({ attackReplayOpen: open }),
 
-  apiMode: 'SCHEMA_FALLBACK',
+  apiMode: 'LIVE_CONNECTED',
   setApiMode: (mode) => set({ apiMode: mode }),
+  demoMode: typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_DEMO_MODE === 'true',
+  setDemoMode: (enabled) => set({ demoMode: enabled }),
+
+  realtimeConnected: false,
+  setRealtimeConnected: (connected) => set({ realtimeConnected: connected }),
+  lastRealtimeEventId: null,
+  realtimeEvents: [],
+  pushRealtimeEvent: (ev) =>
+    set((state) => {
+      if (state.realtimeEvents.some((e) => e.id === ev.id)) {
+        return state;
+      }
+      return {
+        lastRealtimeEventId: ev.id,
+        realtimeEvents: [ev, ...state.realtimeEvents].slice(0, 100),
+      };
+    }),
 
   theme: INITIAL_THEME,
   setTheme: (theme) => {

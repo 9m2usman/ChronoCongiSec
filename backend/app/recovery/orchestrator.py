@@ -69,6 +69,7 @@ MAX_SCOPE_RECORDS = 200          # a larger blast radius is refused, not truncat
 
 class PlanStatus(str, Enum):
     PREVIEWED = "PREVIEWED"
+    APPROVED = "APPROVED"
     EXECUTED = "EXECUTED"
     FAILED = "FAILED"           # rolled back or not started; retryable under the same snapshot
 
@@ -90,6 +91,8 @@ class RecoveryReason(str, Enum):
     PLAN_STALE = "PLAN_STALE"
     PLAN_ALREADY_EXECUTED = "PLAN_ALREADY_EXECUTED"
     PLAN_NOT_EXECUTABLE = "PLAN_NOT_EXECUTABLE"
+    HUMAN_APPROVAL_REQUIRED = "HUMAN_APPROVAL_REQUIRED"
+    RUNTIME_CANCELLATION_REQUIRED = "RUNTIME_CANCELLATION_REQUIRED"
     SNAPSHOT_FAILED = "SNAPSHOT_FAILED"
     CONTAINMENT_FAILED = "CONTAINMENT_FAILED"
     ROLLBACK_FAILED = "ROLLBACK_FAILED"
@@ -120,6 +123,9 @@ class CheckpointView:
     created_at: datetime
     items: Tuple[CheckpointItemView, ...]
     name: str = ""
+    resources: Tuple[Mapping[str, Any], ...] = ()
+    agent_id: Optional[str] = None
+    trace_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,10 @@ class RecoveryPlanRecord:
     impact_preview: Mapping[str, Any]
     created_by: str
     snapshot_sha256: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    approval_id: Optional[str] = None
+    runtime_cancellation_verified: bool = False
 
 
 class CheckpointReader(Protocol):
@@ -208,6 +218,9 @@ class RecoveryPreview:
     irreversible_external_actions: Tuple[ExternalActionView, ...]
     fingerprint: str
     status: str = PlanStatus.PREVIEWED.value
+    company_resources: Tuple[Mapping[str, Any], ...] = ()
+    agent_id: Optional[str] = None
+    trace_id: Optional[str] = None
 
     @property
     def risk_level(self) -> str:
@@ -215,13 +228,13 @@ class RecoveryPreview:
         if self.irreversible_external_actions:
             return "HIGH"
         restored = sum(1 for r in self.records if r.action == ActionTaken.RESTORED_TO_CHECKPOINT.value)
-        if any(r.action == ActionTaken.QUARANTINED_INTERMEDIARY.value for r in self.records) or restored > 1:
+        if any(r.action == ActionTaken.QUARANTINED_INTERMEDIARY.value for r in self.records) or restored > 1 or len(self.company_resources) > 1:
             return "MEDIUM"
         return "LOW"
 
     def to_dict(self) -> Dict[str, Any]:
         """Doc 05 §6.3 response shape; extra fields are additive."""
-        return {
+        data: Dict[str, Any] = {
             "plan_id": self.plan_id,
             "status": self.status,
             "preview": {
@@ -234,6 +247,12 @@ class RecoveryPreview:
                     "checkpoint_version": r.checkpoint_version, "target_checksum": r.checkpoint_checksum,
                     "current_version": r.current_version, "current_trust_state": r.effective_state,
                 } for r in self.records],
+                "company_resources": [dict(r) for r in self.company_resources],
+                "company_resources_count": len(self.company_resources),
+                "agent_id": self.agent_id,
+                "trace_id": self.trace_id,
+                "requires_human_approval": bool(self.company_resources),
+                "requires_runtime_cancellation": bool(self.company_resources and self.agent_id),
                 "irreversible_external_actions": len(self.irreversible_external_actions),
                 "irreversible_execution_ids": [a.execution_id for a in self.irreversible_external_actions],
                 "risk_level": self.risk_level,
@@ -241,6 +260,7 @@ class RecoveryPreview:
                 "policy_version": RECOVERY_POLICY_VERSION,
             },
         }
+        return data
 
 
 @dataclass(frozen=True)
@@ -275,7 +295,8 @@ def checkpoint_integrity_hash(items: Sequence[CheckpointItemView]) -> str:
 def _checkpoint_problem(cp: Any, tenant_id: str) -> Optional[str]:
     if not isinstance(cp, CheckpointView) or cp.tenant_id != tenant_id:
         return "CHECKPOINT_NOT_FOUND"
-    if not isinstance(cp.items, tuple) or not cp.items:
+    has_resources = isinstance(cp.resources, tuple) and len(cp.resources) > 0
+    if not isinstance(cp.items, tuple) or (not cp.items and not has_resources):
         return "CHECKPOINT_INTEGRITY_FAILED"
     seen = set()
     for item in cp.items:
@@ -285,7 +306,9 @@ def _checkpoint_problem(cp: Any, tenant_id: str) -> Optional[str]:
                 or not isinstance(item.content, str) or sha256_hex(item.content) != item.checksum:
             return "CHECKPOINT_INTEGRITY_FAILED"
         seen.add(item.record_id)
-    if not isinstance(cp.integrity_hash, str) or checkpoint_integrity_hash(cp.items) != cp.integrity_hash:
+    if cp.items and (not isinstance(cp.integrity_hash, str) or checkpoint_integrity_hash(cp.items) != cp.integrity_hash):
+        return "CHECKPOINT_INTEGRITY_FAILED"
+    if not cp.items and (not isinstance(cp.integrity_hash, str) or not cp.integrity_hash):
         return "CHECKPOINT_INTEGRITY_FAILED"
     return None
 
@@ -345,7 +368,7 @@ class RecoveryService:
                 RecoveryPreviewRequest.model_validate(dict(request) if isinstance(request, Mapping) else request)
         except (PydanticValidationError, TypeError, ValueError) as exc:
             raise ValidationError("Invalid recovery preview request.") from exc
-        plan_id = f"plan-{uuid.uuid4().hex}"
+        plan_id = f"plan-{uuid.uuid4().hex[:24]}"
         preview = await self._build_preview(tenant_id, plan_id, req.checkpoint_id, req.target_record_id)
         record = RecoveryPlanRecord(
             id=plan_id, tenant_id=tenant_id, checkpoint_id=req.checkpoint_id, target_record_id=req.target_record_id,
@@ -355,6 +378,7 @@ class RecoveryService:
         try:
             await self._plans.create(record)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Recovery plan create failed")
             raise SecurityDependencyError("Recovery plan could not be recorded.") from exc
         try:
             await self._audit(tenant_id, actor, "RECOVERY_PREVIEWED", plan_id, "PREVIEW", "SUCCESS",
@@ -366,85 +390,202 @@ class RecoveryService:
 
     async def _build_preview(self, tenant_id: str, plan_id: str, checkpoint_id: str,
                              target_record_id: str) -> RecoveryPreview:
-        target = self._memory.get_record(target_record_id, tenant_id)
-        if target is None or getattr(target, "tenant_id", None) != tenant_id:
-            raise NotFoundError("Recovery target or checkpoint not found.")
         try:
             checkpoint = await self._checkpoints.get_checkpoint(tenant_id, checkpoint_id)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("Checkpoint get_checkpoint failed")
             raise SecurityDependencyError("Checkpoint source unavailable.") from exc
         problem = _checkpoint_problem(checkpoint, tenant_id)
         if problem == "CHECKPOINT_NOT_FOUND" or (problem is None and checkpoint.id != checkpoint_id):
             raise NotFoundError("Recovery target or checkpoint not found.")   # same message as a missing target
         if problem:
             raise ValidationError("Checkpoint integrity verification failed; recovery refused.")
-        items = {i.record_id: i for i in checkpoint.items}
-        if target_record_id not in items:
-            raise ValidationError("The recovery target is not part of the selected checkpoint.")
 
-        descendants = get_descendants(tenant_id, target_record_id, repository=self._memory)
-        if not getattr(descendants, "complete", False):
-            raise ValidationError("Blast radius could not be fully determined; recovery refused.")
-        scope = [target_record_id] + [rid for rid, _depth in descendants if rid != target_record_id]
-        scope = list(dict.fromkeys(scope))
-        if len(scope) > MAX_SCOPE_RECORDS:
-            raise ValidationError("Blast radius exceeds the recovery scope limit; recovery refused.")
+        items = {i.record_id: i for i in checkpoint.items}
+        company_resources = tuple(dict(r) for r in (checkpoint.resources or ()))
+        company_resource_ids = {str(r.get("resource_id", "")) for r in company_resources if r.get("resource_id")}
+
+        is_company_only = (
+            target_record_id not in items
+            and (target_record_id in company_resource_ids or target_record_id == checkpoint_id or target_record_id.startswith("company:"))
+            and bool(company_resources)
+        )
 
         planned: List[PlannedRecord] = []
-        for rid in scope:
-            rec = self._memory.get_record(rid, tenant_id)
-            if rec is None:
-                raise ValidationError("A record in the blast radius is missing; recovery refused.")
-            latest = self._memory.get_version(rid, rec.current_version, tenant_id)
-            if latest is None or sha256_hex(latest.content) != latest.checksum:
-                raise ValidationError("A record in the blast radius failed integrity verification.")
-            use_async = (
-                getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
-                or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
-            )
-            if use_async and hasattr(self._trust, "aeffective_state"):
-                effective = await self._trust.aeffective_state(tenant_id, rid)
-            else:
-                effective = self._trust.effective_state(tenant_id, rid)
-            if effective is None:
-                raise ValidationError("Trust state of a record in the blast radius is unknown.")
-            if rid == target_record_id and effective == "REJECTED":
-                raise ValidationError("A REJECTED record cannot be recovered.")
-            item = items.get(rid)
-            if effective == "REJECTED":
-                action = "UNCHANGED_REJECTED"
-            elif item is not None:
-                action = ActionTaken.RESTORED_TO_CHECKPOINT.value
-            else:
-                action = ActionTaken.QUARANTINED_INTERMEDIARY.value
-            planned.append(PlannedRecord(
-                record_id=rid, action=action, current_version=rec.current_version, current_checksum=latest.checksum,
-                effective_state=effective, checkpoint_version=item.version if item else None,
-                checkpoint_checksum=item.checksum if item else None,
-            ))
+        scope: List[str] = []
+
+        if not is_company_only:
+            target = self._memory.get_record(target_record_id, tenant_id)
+            if target is None or getattr(target, "tenant_id", None) != tenant_id:
+                raise NotFoundError("Recovery target or checkpoint not found.")
+            if target_record_id not in items:
+                raise ValidationError("The recovery target is not part of the selected checkpoint.")
+
+            descendants = get_descendants(tenant_id, target_record_id, repository=self._memory)
+            if not getattr(descendants, "complete", False):
+                raise ValidationError("Blast radius could not be fully determined; recovery refused.")
+            scope = [target_record_id] + [rid for rid, _depth in descendants if rid != target_record_id]
+            scope = list(dict.fromkeys(scope))
+            if len(scope) > MAX_SCOPE_RECORDS:
+                raise ValidationError("Blast radius exceeds the recovery scope limit; recovery refused.")
+
+            for rid in scope:
+                rec = self._memory.get_record(rid, tenant_id)
+                if rec is None:
+                    raise ValidationError("A record in the blast radius is missing; recovery refused.")
+                latest = self._memory.get_version(rid, rec.current_version, tenant_id)
+                if latest is None or sha256_hex(latest.content) != latest.checksum:
+                    raise ValidationError("A record in the blast radius failed integrity verification.")
+                use_async = (
+                    getattr(getattr(self._trust, "_store", None), "session_factory", None) is not None
+                    or getattr(getattr(self._trust, "_repo", None), "session_factory", None) is not None
+                )
+                if use_async and hasattr(self._trust, "aeffective_state"):
+                    effective = await self._trust.aeffective_state(tenant_id, rid)
+                else:
+                    effective = self._trust.effective_state(tenant_id, rid)
+                if effective is None:
+                    raise ValidationError("Trust state of a record in the blast radius is unknown.")
+                if rid == target_record_id and effective == "REJECTED":
+                    raise ValidationError("A REJECTED record cannot be recovered.")
+                item = items.get(rid)
+                if effective == "REJECTED":
+                    action = "UNCHANGED_REJECTED"
+                elif item is not None:
+                    action = ActionTaken.RESTORED_TO_CHECKPOINT.value
+                else:
+                    action = ActionTaken.QUARANTINED_INTERMEDIARY.value
+                planned.append(PlannedRecord(
+                    record_id=rid, action=action, current_version=rec.current_version, current_checksum=latest.checksum,
+                    effective_state=effective, checkpoint_version=item.version if item else None,
+                    checkpoint_checksum=item.checksum if item else None,
+                ))
 
         try:
-            external = tuple(await self._external.executions_referencing(tenant_id, scope, checkpoint.created_at))
+            external = tuple(await self._external.executions_referencing(tenant_id, scope or list(company_resource_ids), checkpoint.created_at))
         except Exception as exc:  # noqa: BLE001 — honest outcome classification is mandatory
+            logger.exception("External action history query failed")
             raise SecurityDependencyError("External action history unavailable; recovery refused.") from exc
         if not all(isinstance(a, ExternalActionView) for a in external):
             raise SecurityDependencyError("External action history returned invalid data.")
         external = tuple(sorted(external, key=lambda a: a.execution_id))
 
         # The fingerprint binds what the analyst approved: checkpoint, scope, planned actions,
-        # current content (version + checksum) and external actions. Trust-state changes after the
-        # preview are deliberately excluded: execution contains every record anyway, a new REJECTED
-        # changes the planned action (included), and containment itself must not make a retry stale.
+        # current content (version + checksum), company resources, and external actions.
         fingerprint = _fingerprint({
             "tenant_id": tenant_id, "checkpoint_id": checkpoint.id, "checkpoint_hash": checkpoint.integrity_hash,
             "target": target_record_id,
             "records": [{k: v for k, v in p.__dict__.items() if k != "effective_state"} for p in planned],
+            "company_resources": list(company_resources),
             "external": [a.__dict__ for a in external], "policy": RECOVERY_POLICY_VERSION,
         })
-        return RecoveryPreview(plan_id=plan_id, tenant_id=tenant_id, checkpoint_id=checkpoint.id,
-                               checkpoint_integrity_hash=checkpoint.integrity_hash, target_record_id=target_record_id,
-                               checkpoint_name=checkpoint.name if isinstance(checkpoint.name, str) else "",
-                               records=tuple(planned), irreversible_external_actions=external, fingerprint=fingerprint)
+        return RecoveryPreview(
+            plan_id=plan_id,
+            tenant_id=tenant_id,
+            checkpoint_id=checkpoint.id,
+            checkpoint_integrity_hash=checkpoint.integrity_hash,
+            target_record_id=target_record_id,
+            checkpoint_name=checkpoint.name if isinstance(checkpoint.name, str) else "",
+            records=tuple(planned),
+            irreversible_external_actions=external,
+            fingerprint=fingerprint,
+            company_resources=company_resources,
+            agent_id=checkpoint.agent_id,
+            trace_id=checkpoint.trace_id,
+        )
+
+    # -- approve ----------------------------------------------------------------
+
+    async def approve_plan(
+        self,
+        context: Optional[TenantContext],
+        plan_id: Any,
+        *,
+        approval_id: Optional[str] = None,
+        runtime_cancellation_verified: bool = False,
+        runtime_cancellation_adapter: Any = None,
+    ) -> RecoveryPlanRecord:
+        tenant_id, actor = self._authorize(context)
+        if type(plan_id) is not str or not _SAFE_ID.fullmatch(plan_id):
+            raise ValidationError("Invalid recovery plan identifier.")
+        plan = await self._plans.get(tenant_id, plan_id)
+        if not isinstance(plan, RecoveryPlanRecord) or plan.tenant_id != tenant_id or plan.id != plan_id:
+            raise NotFoundError("Recovery plan not found.")
+        if plan.status == PlanStatus.EXECUTED.value:
+            raise ValidationError("Executed recovery plan cannot be approved again.")
+        if plan.status not in (PlanStatus.PREVIEWED.value, PlanStatus.APPROVED.value, PlanStatus.FAILED.value):
+            raise ValidationError(f"Recovery plan in status '{plan.status}' cannot be approved.")
+
+        checkpoint = await self._checkpoints.get_checkpoint(tenant_id, plan.checkpoint_id)
+        agent_id = getattr(checkpoint, "agent_id", None) if checkpoint is not None else None
+        trace_id = getattr(checkpoint, "trace_id", None) if checkpoint is not None else None
+
+        cancel_ok = bool(runtime_cancellation_verified)
+        if agent_id and not cancel_ok:
+            if runtime_cancellation_adapter is not None and hasattr(runtime_cancellation_adapter, "cancel_agent_work"):
+                res = await runtime_cancellation_adapter.cancel_agent_work(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    incident_id=plan.incident_id,
+                    trace_id=trace_id,
+                )
+                cancel_ok = bool(isinstance(res, Mapping) and (res.get("cancelled") or res.get("acknowledged")))
+            if not cancel_ok:
+                cancel_ok = await self._is_runtime_cancelled(tenant_id, agent_id)
+            if not cancel_ok:
+                raise ValidationError("Agent runtime cancellation must be verified before approving recovery.")
+        elif not agent_id:
+            cancel_ok = True
+
+        resolved_approval_id = approval_id or f"appr-{uuid.uuid4().hex[:16]}"
+        approved_at = self._clock().isoformat()
+        if hasattr(self._plans, "approve"):
+            await self._plans.approve(
+                tenant_id,
+                plan_id,
+                approved_by=actor,
+                approved_at=approved_at,
+                approval_id=resolved_approval_id,
+                runtime_cancellation_verified=cancel_ok,
+            )
+        else:
+            await self._safe_transition(tenant_id, plan_id, PlanStatus(plan.status), PlanStatus.APPROVED)
+
+        await self._audit(
+            tenant_id,
+            actor,
+            "RECOVERY_PLAN_APPROVED",
+            plan_id,
+            "APPROVE",
+            "SUCCESS",
+            {
+                "approval_id": resolved_approval_id,
+                "runtime_cancellation_verified": cancel_ok,
+                "agent_id": agent_id,
+                "incident_id": plan.incident_id,
+            },
+        )
+        updated = await self._plans.get(tenant_id, plan_id)
+        return updated if updated is not None else plan
+
+    async def _is_runtime_cancelled(self, tenant_id: str, agent_id: str) -> bool:
+        session_factory = getattr(self._plans, "session_factory", None)
+        if session_factory is None:
+            return False
+        from sqlalchemy import select
+        from backend.app.database.models.baseline import ObservationEvent
+
+        async with session_factory() as session:
+            obs = (
+                await session.execute(
+                    select(ObservationEvent.id).where(
+                        ObservationEvent.tenant_id == tenant_id,
+                        ObservationEvent.agent_id == agent_id,
+                        ObservationEvent.event_type == "AGENT_RUNTIME_CANCELLED",
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            return obs is not None
 
     # -- execute ----------------------------------------------------------------
 
@@ -467,7 +608,7 @@ class RecoveryService:
             raise NotFoundError("Recovery plan not found.")
         if plan.status == PlanStatus.EXECUTED.value:
             return RecoveryOutcome(plan_id, RecoveryStatus.FAILED, (RecoveryReason.PLAN_ALREADY_EXECUTED.value,))
-        if plan.status not in (PlanStatus.PREVIEWED.value, PlanStatus.FAILED.value):
+        if plan.status not in (PlanStatus.PREVIEWED.value, PlanStatus.APPROVED.value, PlanStatus.FAILED.value):
             return RecoveryOutcome(plan_id, RecoveryStatus.FAILED, (RecoveryReason.PLAN_NOT_EXECUTABLE.value,))
 
         # 2. Re-verify everything the analyst approved in the preview (TOCTOU).
@@ -478,12 +619,20 @@ class RecoveryService:
         if current.fingerprint != plan.preview_fingerprint:
             return await self._fail(tenant_id, actor, plan, RecoveryReason.PLAN_STALE, change_status=False)
 
+        if current.company_resources:
+            if plan.status != PlanStatus.APPROVED.value and not plan.approved_by:
+                return await self._fail(tenant_id, actor, plan, RecoveryReason.HUMAN_APPROVAL_REQUIRED, change_status=False)
+            if current.agent_id and not plan.runtime_cancellation_verified:
+                if not await self._is_runtime_cancelled(tenant_id, current.agent_id):
+                    return await self._fail(tenant_id, actor, plan, RecoveryReason.RUNTIME_CANCELLATION_REQUIRED, change_status=False)
+
         checkpoint = await self._checkpoints.get_checkpoint(tenant_id, plan.checkpoint_id)
         if _checkpoint_problem(checkpoint, tenant_id):
             return await self._fail(tenant_id, actor, plan, RecoveryReason.PLAN_STALE, change_status=False)
         content = {i.record_id: i for i in checkpoint.items}
         restore = [p for p in current.records if p.action == ActionTaken.RESTORED_TO_CHECKPOINT.value]
         intermediaries = [p for p in current.records if p.action == ActionTaken.QUARANTINED_INTERMEDIARY.value]
+        company_restored_ids: List[str] = []
 
         # 3. Pre-recovery snapshot, committed before any change (M6 transaction 1).
         snapshot_sha = plan.snapshot_sha256
@@ -540,6 +689,43 @@ class RecoveryService:
                 await rtx.compare_and_set_current_version(p.record_id, expected=p.current_version, new=version.version)
                 await rtx.record_action(p.record_id, ActionTaken.RESTORED_TO_CHECKPOINT.value, "SUCCESS")
                 new_versions[p.record_id] = version.version
+            for res in current.company_resources:
+                rtype = str(res.get("resource_type", "")).upper()
+                rid = str(res.get("resource_id", ""))
+                if not rid:
+                    continue
+                if rtype == "FILE" and hasattr(rtx, "restore_company_file"):
+                    await rtx.restore_company_file(
+                        rid,
+                        target_version=int(res["current_version"]),
+                        expected_checksum=res.get("version_checksum"),
+                        target_status=str(res.get("status", "ACTIVE")),
+                    )
+                    await rtx.record_action(rid, ActionTaken.RESTORED_TO_CHECKPOINT.value, "SUCCESS")
+                    company_restored_ids.append(rid)
+                elif rtype == "FILE_TRANSFER" and hasattr(rtx, "restore_company_file_transfer"):
+                    await rtx.restore_company_file_transfer(
+                        rid,
+                        target_status=str(res.get("status", "PENDING")),
+                    )
+                    await rtx.record_action(rid, ActionTaken.RESTORED_TO_CHECKPOINT.value, "SUCCESS")
+                    company_restored_ids.append(rid)
+                elif rtype == "TASK" and hasattr(rtx, "restore_company_task"):
+                    await rtx.restore_company_task(
+                        rid,
+                        target_status=str(res.get("status", "OPEN")),
+                        target_assigned_to_user_id=res.get("assigned_to_user_id"),
+                        target_priority=res.get("priority"),
+                    )
+                    await rtx.record_action(rid, ActionTaken.RESTORED_TO_CHECKPOINT.value, "SUCCESS")
+                    company_restored_ids.append(rid)
+                elif rtype == "MESSAGE" and hasattr(rtx, "restore_company_message"):
+                    await rtx.restore_company_message(
+                        rid,
+                        target_status=str(res.get("status", "SENT")),
+                    )
+                    await rtx.record_action(rid, ActionTaken.RESTORED_TO_CHECKPOINT.value, "SUCCESS")
+                    company_restored_ids.append(rid)
             for p in intermediaries:
                 await rtx.record_action(p.record_id, ActionTaken.QUARANTINED_INTERMEDIARY.value, "SUCCESS")
             for a in current.irreversible_external_actions:
@@ -577,16 +763,19 @@ class RecoveryService:
                 codes.append(RecoveryReason.TRUST_RESTORE_FAILED.value)
 
         # 7. Post-conditions: content equals the checkpoint, no restored record is TRUSTED,
-        #    intermediaries are QUARANTINED.
-        post = await self._apostconditions(tenant_id, restore, intermediaries, content, new_versions)
+        #    intermediaries are QUARANTINED, and company resources match checkpoint integrity.
+        post = await self._apostconditions(
+            tenant_id, restore, intermediaries, content, new_versions, company_resources=current.company_resources
+        )
         if not post["ok"]:
             codes.append(RecoveryReason.POSTCONDITION_FAILED.value)
         if not await self._safe_transition(tenant_id, plan_id, PlanStatus(plan.status), PlanStatus.EXECUTED):
             codes.append(RecoveryReason.PLAN_STATUS_NOT_RECORDED.value)
         status = RecoveryStatus.EXECUTED if not codes else RecoveryStatus.RECONCILIATION_REQUIRED
+        all_restored = tuple(dict.fromkeys([p.record_id for p in restore] + company_restored_ids))
         outcome = RecoveryOutcome(
             plan_id=plan_id, status=status, reason_codes=tuple(codes) or (RecoveryReason.RECOVERY_COMPLETED.value,),
-            restored_record_ids=tuple(p.record_id for p in restore),
+            restored_record_ids=all_restored,
             quarantined_intermediary_ids=tuple(p.record_id for p in intermediaries),
             irreversible_external_actions=len(current.irreversible_external_actions),
             snapshot_sha256=snapshot_sha, postconditions=post, executed_at=self._clock().isoformat(),
@@ -636,7 +825,16 @@ class RecoveryService:
                 "expected_version": version, "reason": f"Recovery plan {plan.id} ({op.value.lower()})",
                 "evidence": evidence}
 
-    async def _apostconditions(self, tenant_id, restore, intermediaries, content, new_versions) -> Dict[str, Any]:
+    async def _apostconditions(
+        self,
+        tenant_id,
+        restore,
+        intermediaries,
+        content,
+        new_versions,
+        *,
+        company_resources: Tuple[Mapping[str, Any], ...] = (),
+    ) -> Dict[str, Any]:
         import inspect
         failures: List[str] = []
         for p in restore:
@@ -671,7 +869,50 @@ class RecoveryService:
                 inter_state = self._trust.effective_state(tenant_id, p.record_id)
             if inter_state not in ("QUARANTINED", "REJECTED"):
                 failures.append(f"{p.record_id}:INTERMEDIARY_NOT_QUARANTINED")
-        return {"ok": not failures, "failures": failures}
+
+        company_verified: List[Dict[str, Any]] = []
+        session_factory = getattr(self._plans, "session_factory", None)
+        if company_resources and session_factory is not None:
+            from sqlalchemy import select
+            from backend.app.database.models.company import (
+                CompanyFile,
+                CompanyFileTransfer,
+                CompanyFileVersion,
+                CompanyMessage,
+                CompanyTask,
+            )
+            async with session_factory() as session:
+                for res in company_resources:
+                    rtype = str(res.get("resource_type", "")).upper()
+                    rid = str(res.get("resource_id", ""))
+                    if not rid:
+                        continue
+                    if rtype == "FILE":
+                        f = (await session.execute(select(CompanyFile).where(CompanyFile.tenant_id == tenant_id, CompanyFile.id == rid))).scalar_one_or_none()
+                        ver = (await session.execute(select(CompanyFileVersion).where(CompanyFileVersion.tenant_id == tenant_id, CompanyFileVersion.file_id == rid, CompanyFileVersion.version_number == int(res["current_version"])))).scalar_one_or_none()
+                        if f is None or f.current_version != int(res["current_version"]) or f.status != res.get("status", "ACTIVE") or ver is None or (res.get("version_checksum") and ver.checksum != res["version_checksum"]):
+                            failures.append(f"{rid}:COMPANY_FILE_INTEGRITY_FAILED")
+                        else:
+                            company_verified.append({"resource_type": "FILE", "resource_id": rid, "version": f.current_version, "checksum": ver.checksum, "verified": True})
+                    elif rtype == "FILE_TRANSFER":
+                        tr = (await session.execute(select(CompanyFileTransfer).where(CompanyFileTransfer.tenant_id == tenant_id, CompanyFileTransfer.id == rid))).scalar_one_or_none()
+                        if tr is None or tr.status != res.get("status", "PENDING"):
+                            failures.append(f"{rid}:COMPANY_TRANSFER_INTEGRITY_FAILED")
+                        else:
+                            company_verified.append({"resource_type": "FILE_TRANSFER", "resource_id": rid, "status": tr.status, "verified": True})
+                    elif rtype == "TASK":
+                        t = (await session.execute(select(CompanyTask).where(CompanyTask.tenant_id == tenant_id, CompanyTask.id == rid))).scalar_one_or_none()
+                        if t is None or t.status != res.get("status", "OPEN"):
+                            failures.append(f"{rid}:COMPANY_TASK_INTEGRITY_FAILED")
+                        else:
+                            company_verified.append({"resource_type": "TASK", "resource_id": rid, "status": t.status, "verified": True})
+                    elif rtype == "MESSAGE":
+                        m = (await session.execute(select(CompanyMessage).where(CompanyMessage.tenant_id == tenant_id, CompanyMessage.id == rid))).scalar_one_or_none()
+                        if m is None or m.status != res.get("status", "SENT"):
+                            failures.append(f"{rid}:COMPANY_MESSAGE_INTEGRITY_FAILED")
+                        else:
+                            company_verified.append({"resource_type": "MESSAGE", "resource_id": rid, "status": m.status, "verified": True})
+        return {"ok": not failures, "failures": failures, "company_resources": company_verified}
 
     def _postconditions(self, tenant_id, restore, intermediaries, content, new_versions) -> Dict[str, Any]:
         failures: List[str] = []

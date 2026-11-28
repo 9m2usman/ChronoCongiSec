@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.company.service import CompanyResourceService
@@ -54,6 +54,11 @@ class UpdateFileRequest(BaseModel):
     content: str
 
 
+class RestoreFileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_version: Optional[int] = Field(default=None, ge=1)
+
+
 class CreateTransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     file_id: str = Field(min_length=1, max_length=64)
@@ -83,6 +88,16 @@ class SendMessageRequest(BaseModel):
     body: str = Field(min_length=1)
 
 
+@router.get("/workspaces")
+async def list_workspaces(
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_workspaces(context)
+    return {"items": items, "total": len(items)}
+
+
 @router.post("/workspaces", status_code=status.HTTP_201_CREATED)
 async def create_workspace(
     body: CreateWorkspaceRequest,
@@ -96,6 +111,22 @@ async def create_workspace(
         description=body.description,
         visibility=body.visibility,
     )
+
+
+@router.get("/files")
+async def list_files(
+    request: Request,
+    workspace_id: Optional[str] = Query(default=None),
+    include_deleted: bool = Query(default=False),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_files(
+        context,
+        workspace_id=workspace_id,
+        include_deleted=include_deleted,
+    )
+    return {"items": items, "total": len(items)}
 
 
 @router.post("/files", status_code=status.HTTP_201_CREATED)
@@ -274,6 +305,166 @@ async def read_notification(
 ) -> Dict[str, Any]:
     svc = _get_company_service(request)
     return await svc.read_notification(context, notification_id=notification_id)
+
+
+@router.get("/files/{file_id}/versions")
+async def list_file_versions(
+    file_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_file_versions(context, file_id=file_id)
+    return {"items": items, "total": len(items)}
+
+
+@router.delete("/files/{file_id}")
+async def delete_file(
+    file_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.delete_file(
+        context,
+        file_id=file_id,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.post("/files/{file_id}/restore")
+async def restore_file(
+    file_id: str,
+    request: Request,
+    body: Optional[RestoreFileRequest] = Body(default=None),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.restore_file(
+        context,
+        file_id=file_id,
+        target_version=body.target_version if body else None,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.get("/transfers")
+async def list_transfers(
+    request: Request,
+    direction: str = Query(default="all"),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_file_transfers(context, direction=direction)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/transfers/{transfer_id}/reject")
+async def reject_transfer(
+    transfer_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.reject_file_transfer(
+        context,
+        transfer_id=transfer_id,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.post("/transfers/{transfer_id}/cancel")
+async def cancel_transfer(
+    transfer_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.cancel_file_transfer(
+        context,
+        transfer_id=transfer_id,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.get("/tasks")
+async def list_tasks(
+    request: Request,
+    workspace_id: Optional[str] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_tasks(context, workspace_id=workspace_id, status=status_filter)
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/tasks/{task_id}/events")
+async def list_task_events(
+    task_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_task_events(context, task_id=task_id)
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/messages")
+async def list_messages(
+    request: Request,
+    box: str = Query(default="inbox"),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_messages(context, box=box)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/messages/{message_id}/read")
+async def mark_message_read(
+    message_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.mark_message_read(
+        context,
+        message_id=message_id,
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
+@router.get("/notifications")
+async def list_notifications(
+    request: Request,
+    unread_only: bool = Query(default=False),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_notifications(context, unread_only=unread_only)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    request: Request,
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    return await svc.mark_notification_read(context, notification_id=notification_id)
+
+
+@router.get("/activity")
+async def list_activity(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    context: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    svc = _get_company_service(request)
+    items = await svc.list_activity(context, limit=limit)
+    return {"items": items, "total": len(items)}
 
 
 __all__ = ["router"]

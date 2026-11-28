@@ -260,7 +260,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from backend.app.recovery.store import SqlTrustDecisionStore
             app.state.trust_decision_store = SqlTrustDecisionStore(session_factory)
 
-        if getattr(app.state, "pre_action_checkpoint_service", None) is None:
+        existing_chk = getattr(app.state, "pre_action_checkpoint_service", None)
+        if existing_chk is None or getattr(existing_chk, "is_in_memory", False):
             from backend.app.security.checkpoints import SqlPreActionCheckpointService
             app.state.pre_action_checkpoint_service = SqlPreActionCheckpointService(session_factory)
 
@@ -1099,7 +1100,10 @@ def create_app(
     api_router.include_router(chronimem_router)
     api_router.include_router(company_router)
     api_router.include_router(containment_router)
+    from backend.app.api.realtime import router as realtime_router
+
     api_router.include_router(knowledge_router)
+    api_router.include_router(realtime_router)
 
     app.include_router(api_router)
 

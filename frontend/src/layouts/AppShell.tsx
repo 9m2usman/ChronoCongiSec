@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useWorkstationStore } from '@/stores/useWorkstationStore';
-import { useHealthCheck, useTenants } from '@/hooks';
+import { useHealthCheck, useTenants, useRealtimeStream } from '@/hooks';
 import { apiClient } from '@/services/apiClient';
 import { DualModeBadge } from '@/components/common/DualModeBadge';
 import { CommandPalette } from '@/components/common/CommandPalette';
@@ -33,6 +33,7 @@ import {
 
 export const AppShell: React.FC = () => {
   useHealthCheck();
+  useRealtimeStream(true);
   const navigate = useNavigate();
   const location = useLocation();
   const { data: liveTenants } = useTenants();
@@ -115,6 +116,7 @@ export const AppShell: React.FC = () => {
       heading: 'WORKSPACE',
       items: [
         { label: 'Overview', path: '/', icon: LayoutDashboard },
+        { label: 'Employee Workstation', path: '/workstation', icon: Bot },
         { label: 'Enterprise Connect', path: '/enterprise', icon: Database },
         { label: 'Agent Registry', path: '/agents', icon: Bot },
       ],
