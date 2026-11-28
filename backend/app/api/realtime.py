@@ -6,16 +6,21 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Dict, List, Optional, Set
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
+from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_tenant_context
 from backend.app.core.exceptions import SecurityDependencyError
 from backend.app.database.models.observability import OutboxEvent
-from backend.app.tenancy.context import TenantContext
+from backend.app.tenancy.context import (
+    TenantContext,
+    decode_access_token,
+    get_default_auth_repository,
+)
 
 logger = logging.getLogger("amsc.api.realtime")
 
@@ -73,14 +78,35 @@ def _serialize_event(event: OutboxEvent) -> Dict[str, Any]:
     }
 
 
+async def _resolve_anchor_cursor(
+    session_factory: Any,
+    tenant_id: str,
+    resume_id: Optional[str],
+) -> Tuple[Optional[datetime], Optional[str]]:
+    if not resume_id:
+        return None, None
+    async with session_factory() as session:
+        anchor = (
+            await session.execute(
+                select(OutboxEvent).where(
+                    OutboxEvent.tenant_id == tenant_id,
+                    OutboxEvent.id == resume_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if anchor is not None:
+            return anchor.created_at, anchor.id
+    return None, None
+
+
 async def _fetch_outbox_events(
     session_factory: Any,
     context: TenantContext,
     *,
-    since_created_at: Optional[datetime] = None,
-    seen_ids: Set[str],
+    last_created_at: Optional[datetime] = None,
+    last_event_id: Optional[str] = None,
     limit: int = 100,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Optional[datetime], Optional[str]]:
     async with session_factory() as session:
         stmt = (
             select(OutboxEvent)
@@ -88,18 +114,30 @@ async def _fetch_outbox_events(
             .order_by(OutboxEvent.created_at.asc(), OutboxEvent.id.asc())
             .limit(limit)
         )
-        if since_created_at is not None:
-            stmt = stmt.where(OutboxEvent.created_at >= since_created_at)
+        if last_created_at is not None:
+            if last_event_id is not None:
+                stmt = stmt.where(
+                    or_(
+                        OutboxEvent.created_at > last_created_at,
+                        and_(
+                            OutboxEvent.created_at == last_created_at,
+                            OutboxEvent.id > last_event_id,
+                        ),
+                    )
+                )
+            else:
+                stmt = stmt.where(OutboxEvent.created_at > last_created_at)
         rows = (await session.execute(stmt)).scalars().all()
 
     out: List[Dict[str, Any]] = []
+    next_ts = last_created_at
+    next_id = last_event_id
     for ev in rows:
-        if ev.id in seen_ids:
-            continue
-        seen_ids.add(ev.id)
+        next_ts = ev.created_at
+        next_id = ev.id
         if is_event_visible_to_context(ev, context):
             out.append(_serialize_event(ev))
-    return out
+    return out, next_ts, next_id
 
 
 @router.get("/events")
@@ -116,36 +154,26 @@ async def stream_realtime_events(
         raise SecurityDependencyError("Real-time event store is unavailable.")
 
     resume_id = last_event_id_header or last_event_id_query
-    seen_ids: Set[str] = set()
-    since_ts: Optional[datetime] = None
-
-    if resume_id:
-        seen_ids.add(resume_id)
-        async with session_factory() as session:
-            anchor = (
-                await session.execute(
-                    select(OutboxEvent).where(
-                        OutboxEvent.tenant_id == context.tenant_id,
-                        OutboxEvent.id == resume_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if anchor is not None:
-                since_ts = anchor.created_at
+    last_ts, last_id = await _resolve_anchor_cursor(session_factory, context.tenant_id, resume_id)
 
     async def _event_generator() -> AsyncIterator[str]:
-        nonlocal since_ts
+        nonlocal last_ts, last_id
         while True:
             if await request.is_disconnected():
                 break
-            events = await _fetch_outbox_events(
-                session_factory,
-                context,
-                since_created_at=since_ts,
-                seen_ids=seen_ids,
-            )
-            for item in events:
-                yield f"id: {item['id']}\nevent: {item['event_type']}\ndata: {json.dumps(item)}\n\n"
+            while True:
+                events, next_ts, next_id = await _fetch_outbox_events(
+                    session_factory,
+                    context,
+                    last_created_at=last_ts,
+                    last_event_id=last_id,
+                )
+                advanced = (next_ts != last_ts) or (next_id != last_id)
+                last_ts, last_id = next_ts, next_id
+                for item in events:
+                    yield f"id: {item['id']}\nevent: {item['event_type']}\ndata: {json.dumps(item)}\n\n"
+                if not advanced:
+                    break
             if once:
                 break
             yield ": keepalive\n\n"
@@ -169,24 +197,65 @@ async def _resolve_ws_context(websocket: WebSocket, token: Optional[str]) -> Opt
         raw_token = auth_header[7:].strip()
     if not raw_token:
         return None
-    token_service = getattr(websocket.app.state, "token_service", None)
-    auth_service = getattr(websocket.app.state, "auth_service", None)
-    if token_service is None:
-        return None
+
+    app_settings = getattr(websocket.app.state, "settings", None) or get_settings()
     try:
-        claims = token_service.verify_access_token(raw_token)
-        if auth_service is not None and hasattr(auth_service, "resolve_context_from_claims"):
-            return await auth_service.resolve_context_from_claims(claims)
+        payload = decode_access_token(raw_token, settings=app_settings)
+        user_id = payload.get("sub")
+        token_tenant_id = payload.get("tenant_id")
+        if not user_id or not token_tenant_id:
+            return None
+
+        revocation_store = getattr(websocket.app.state, "revocation_store", None)
+        if revocation_store is not None:
+            jti = payload.get("jti")
+            iat = payload.get("iat", 0)
+            if jti and await revocation_store.is_token_revoked(jti):
+                return None
+            if await revocation_store.is_user_revoked(user_id, token_tenant_id, iat):
+                return None
+
+        repository = getattr(websocket.app.state, "auth_repo", None)
+        if repository is None:
+            session_factory = getattr(websocket.app.state, "db_session_factory", None)
+            if session_factory is not None and (
+                app_settings.AUTH_BACKEND == "database"
+                or app_settings.APP_ENV == "production"
+                or not app_settings.ALLOW_IN_MEMORY_AUTH
+            ):
+                from backend.app.database.repositories.auth import DatabaseAuthRepository
+                repository = DatabaseAuthRepository(session_factory)
+                websocket.app.state.auth_repo = repository
+            elif app_settings.APP_ENV != "production" and app_settings.ALLOW_IN_MEMORY_AUTH:
+                repository = get_default_auth_repository(app_settings)
+            else:
+                return None
+
+        user = await repository.get_user_by_id(user_id)
+        if not user or user.status != "ACTIVE":
+            return None
+        tenant = await repository.get_tenant_by_id(token_tenant_id)
+        if not tenant or tenant.status != "ACTIVE":
+            return None
+        membership = await repository.get_membership(user_id, token_tenant_id)
+        if not membership or membership.status != "ACTIVE":
+            return None
+
+        branch_id = getattr(membership, "branch_id", None)
+        if branch_id is not None:
+            branch_id = str(branch_id).strip() or None
+
         return TenantContext(
-            tenant_id=claims.tenant_id,
-            tenant_slug=claims.tenant_slug,
-            tenant_name=claims.tenant_name,
-            user_id=claims.user_id,
-            role=claims.role,
+            tenant_id=tenant.id,
+            tenant_slug=tenant.slug,
+            tenant_name=tenant.name,
+            user_id=user.id,
+            role=membership.role,
             is_active=True,
-            branch_id=getattr(claims, "branch_id", None),
+            branch_id=branch_id,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("WebSocket auth failed: %s", type(exc).__name__)
         return None
 
 
@@ -208,32 +277,23 @@ async def websocket_realtime_events(
         return
 
     await websocket.accept()
-    seen_ids: Set[str] = set()
-    since_ts: Optional[datetime] = None
-    if last_event_id:
-        seen_ids.add(last_event_id)
-        async with session_factory() as session:
-            anchor = (
-                await session.execute(
-                    select(OutboxEvent).where(
-                        OutboxEvent.tenant_id == context.tenant_id,
-                        OutboxEvent.id == last_event_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if anchor is not None:
-                since_ts = anchor.created_at
+    last_ts, last_id = await _resolve_anchor_cursor(session_factory, context.tenant_id, last_event_id)
 
     try:
         while True:
-            events = await _fetch_outbox_events(
-                session_factory,
-                context,
-                since_created_at=since_ts,
-                seen_ids=seen_ids,
-            )
-            for item in events:
-                await websocket.send_json(item)
+            while True:
+                events, next_ts, next_id = await _fetch_outbox_events(
+                    session_factory,
+                    context,
+                    last_created_at=last_ts,
+                    last_event_id=last_id,
+                )
+                advanced = (next_ts != last_ts) or (next_id != last_id)
+                last_ts, last_id = next_ts, next_id
+                for item in events:
+                    await websocket.send_json(item)
+                if not advanced:
+                    break
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
         return

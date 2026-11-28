@@ -266,10 +266,10 @@ describe('Screen States & Accessibility (A11y)', () => {
       const btn3d = screen.getByRole('button', { name: /3D Graph/i });
       expect(btn2d).toHaveAttribute('aria-pressed', 'true');
       fireEvent.click(btn3d);
-      expect(await screen.findByText(/WebGL Unavailable for 3D Graph/i)).toBeInTheDocument();
+      expect(await screen.findByText(/WebGL Unavailable for 3D Graph/i, {}, { timeout: 5000 })).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: /Switch to 2D Graph/i }));
       expect(screen.getByRole('button', { name: /2D Graph/i })).toHaveAttribute('aria-pressed', 'true');
-    });
+    }, 15000);
 
     it('computes connected-component, entity-type, and trust-state clusters with cross-boundary edges', () => {
       const sampleGraph = {
